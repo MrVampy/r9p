@@ -385,8 +385,9 @@ impl<T: FileTree> Server<T> {
 
     fn handle_remove(&mut self, tag: Tag, fid: Fid) -> Result<RMessage> {
         let state = self.session.fid(fid)?;
-        self.tree.remove(fid, state.qid)?;
+        let result = self.tree.remove(fid, state.qid);
         let _removed = self.session.remove_fid(fid)?;
+        result?;
         Ok(RMessage::Remove { tag })
     }
 
@@ -569,6 +570,31 @@ mod tests {
                 ename: EBADWNAME.as_bytes().to_vec()
             }
         );
+        Ok(())
+    }
+
+    #[test]
+    fn remove_clunks_fid_even_when_backend_rejects_remove() -> Result<()> {
+        let mut server = Server::new(RootOnly::new());
+        let attach = server.handle(TMessage::Attach {
+            tag: 1,
+            fid: 1,
+            afid: NOFID,
+            uname: b"u".to_vec(),
+            aname: Vec::new(),
+        });
+        assert!(matches!(attach, RMessage::Attach { .. }));
+        assert!(server.session().contains_fid(1));
+
+        let remove = server.handle(TMessage::Remove { tag: 2, fid: 1 });
+        assert_eq!(
+            remove,
+            RMessage::Error {
+                tag: 2,
+                ename: EPERM.as_bytes().to_vec()
+            }
+        );
+        assert!(!server.session().contains_fid(1));
         Ok(())
     }
 }

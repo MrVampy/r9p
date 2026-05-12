@@ -32,6 +32,7 @@ pub struct Client<S> {
     stream: S,
     protocol: ProtocolClient,
     root_fid: Fid,
+    root_qid: Qid,
 }
 
 impl Client<TcpStream> {
@@ -61,6 +62,7 @@ impl<S: Read + Write> Client<S> {
             stream,
             protocol: ProtocolClient::new(),
             root_fid: NOFID,
+            root_qid: Qid::file(0),
         };
         let version_request = client.protocol.version_request(msize);
         match client.call_message(version_request)? {
@@ -86,16 +88,25 @@ impl<S: Read + Write> Client<S> {
             .map_err(protocol_error)?;
         let fid = op_fid(&attach)?;
         match client.call_op(attach)? {
-            Completion::Attach { .. } => {
+            Completion::Attach { qid } => {
                 client.root_fid = fid;
+                client.root_qid = qid;
                 Ok(client)
             }
             other => Err(unexpected("Rattach", other)),
         }
     }
 
+    pub fn version(&self) -> &[u8] {
+        self.protocol.version()
+    }
+
     pub fn root_fid(&self) -> Fid {
         self.root_fid
+    }
+
+    pub fn root_qid(&self) -> Qid {
+        self.root_qid
     }
 
     pub fn msize(&self) -> u32 {

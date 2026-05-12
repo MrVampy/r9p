@@ -37,15 +37,19 @@ reusable client/server core.
 The operator-facing client tracks the shape of plan9port's `9p` command:
 
 ```bash
+r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] version [service]
+r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] attach [service]
 r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] read path
 r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] readfd path
 r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] write [-l] path
+r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] write-at path offset
 r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] writefd path
 r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] stat path
 r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] rdwr path
 r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] ls [-ldnt] path...
 r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] rm path...
 r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] create path...
+r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] mkdir path...
 r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] con [-r] path
 ```
 

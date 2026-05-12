@@ -1,7 +1,7 @@
 use r9p::{
     blocking::{self, BoxedClient, ReadWrite, ORDWR, OREAD, OTRUNC, OWRITE},
     fid::Fid,
-    qid::{DMAPPEND, DMDIR},
+    qid::{Qid, DMAPPEND, DMDIR},
     stat::{decode_dir_entries, Stat},
 };
 use std::{
@@ -59,19 +59,46 @@ fn run() -> CliResult<()> {
     }
     let command = args.remove(0);
     match command.as_str() {
+        "version" => version_cmd(config, args),
+        "attach" => attach_cmd(config, args),
         "read" | "readfd" => read_cmd(config, args),
         "write" => write_cmd(config, args, true),
+        "write-at" => write_at_cmd(config, args),
         "writefd" => write_cmd(config, args, false),
         "stat" => stat_cmd(config, args),
         "rdwr" => rdwr_cmd(config, args),
         "ls" => ls_cmd(config, args),
         "rm" => rm_cmd(config, args),
         "create" => create_cmd(config, args),
+        "mkdir" => mkdir_cmd(config, args),
         "con" => con_cmd(config, args),
         _ => {
             usage();
         }
     }
+}
+
+fn version_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
+    let target = connection_target(config, args)?;
+    let (client, _) = connect_path(&target)?;
+    println!("{}", format_version(client.msize(), client.version()));
+    Ok(())
+}
+
+fn attach_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
+    let target = connection_target(config, args)?;
+    let (client, _) = connect_path(&target)?;
+    println!("{}", format_attach(client.root_qid()));
+    Ok(())
+}
+
+fn connection_target(config: Config, args: Vec<String>) -> CliResult<Target> {
+    let path = match (config.address.is_some(), args.as_slice()) {
+        (true, []) => "/".to_string(),
+        (false, [path]) => path.clone(),
+        _ => usage(),
+    };
+    Ok(Target { config, path })
 }
 
 fn parse_global_options(args: &mut Vec<String>) -> CliResult<Config> {
@@ -189,6 +216,29 @@ fn write_cmd(config: Config, mut args: Vec<String>, allow_line_option: bool) -> 
     Ok(())
 }
 
+fn write_at_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
+    if args.len() != 2 {
+        usage();
+    }
+    let offset = parse_offset(&args[1])?;
+    let target = Target {
+        config,
+        path: args[0].clone(),
+    };
+    let (mut client, fid) = open_path(&target, OWRITE)?;
+    let result = copy_stdin_to_fid_at(&mut client, fid, offset, false);
+    let clunk = client.clunk(fid);
+    result?;
+    clunk?;
+    Ok(())
+}
+
+fn parse_offset(value: &str) -> CliResult<u64> {
+    value
+        .parse()
+        .map_err(|_| cli_error(format!("invalid offset {value}")))
+}
+
 fn stat_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
     if args.len() != 1 {
         usage();
@@ -292,6 +342,20 @@ fn rm_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
 }
 
 fn create_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
+    create_paths(config, args, 0o666, OREAD, "create")
+}
+
+fn mkdir_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
+    create_paths(config, args, DMDIR | 0o755, OREAD, "mkdir")
+}
+
+fn create_paths(
+    config: Config,
+    args: Vec<String>,
+    perm: u32,
+    mode: u8,
+    label: &str,
+) -> CliResult<()> {
     if args.is_empty() {
         usage();
     }
@@ -301,16 +365,16 @@ fn create_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
             config: config.clone(),
             path: path.clone(),
         };
-        match create_one(&target) {
+        match create_one(&target, perm, mode) {
             Ok(()) => {}
             Err(error) => {
-                eprintln!("create {path}: {error}");
+                eprintln!("{label} {path}: {error}");
                 had_error = true;
             }
         }
     }
     if had_error {
-        return Err(cli_error("create errors"));
+        return Err(cli_error(format!("{label} errors")));
     }
     Ok(())
 }
@@ -473,8 +537,17 @@ fn copy_fid_to_stdout(client: &mut BoxedClient, fid: Fid) -> CliResult<()> {
 }
 
 fn copy_stdin_to_fid(client: &mut BoxedClient, fid: Fid, by_line: bool) -> CliResult<()> {
+    copy_stdin_to_fid_at(client, fid, 0, by_line)
+}
+
+fn copy_stdin_to_fid_at(
+    client: &mut BoxedClient,
+    fid: Fid,
+    initial_offset: u64,
+    by_line: bool,
+) -> CliResult<()> {
     let mut stdin = io::BufReader::new(io::stdin().lock());
-    let mut offset = 0_u64;
+    let mut offset = initial_offset;
     let mut wrote = false;
     if by_line {
         loop {
@@ -662,7 +735,7 @@ fn remove_one(target: &Target) -> CliResult<()> {
     Ok(())
 }
 
-fn create_one(target: &Target) -> CliResult<()> {
+fn create_one(target: &Target, perm: u32, mode: u8) -> CliResult<()> {
     if target.config.address.is_none() && !target.path.trim_start_matches('/').contains('/') {
         return Err(cli_error("without -a, create path must be service/name"));
     }
@@ -673,7 +746,7 @@ fn create_one(target: &Target) -> CliResult<()> {
     };
     let (mut client, path) = connect_path(&parent_target)?;
     let parent_fid = client.walk_path(&path)?;
-    let (fid, _) = client.create(parent_fid, name.as_bytes(), 0o666, OREAD)?;
+    let (fid, _) = client.create(parent_fid, name.as_bytes(), perm, mode)?;
     client.clunk(fid)?;
     client.clunk(parent_fid)?;
     Ok(())
@@ -712,6 +785,19 @@ fn format_stat(stat: &Stat) -> String {
         stat.type_,
         stat.dev
     )
+}
+
+fn format_version(msize: u32, version: &[u8]) -> String {
+    format!("version={} msize={}", text(version), msize)
+}
+
+fn format_attach(qid: Qid) -> String {
+    format!("attached qid={}", format_qid(qid))
+}
+
+fn format_qid(qid: Qid) -> String {
+    let kind = if qid.is_dir() { "dir" } else { "file" };
+    format!("{kind}/{}/{}", qid.version, qid.path)
 }
 
 fn qid_type_string(qtype: u8) -> String {
@@ -877,15 +963,19 @@ fn cli_error(message: impl Into<String>) -> Box<dyn Error> {
 fn usage() -> ! {
     eprintln!("usage: r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] cmd args...");
     eprintln!("possible cmds:");
+    eprintln!("  version [service]");
+    eprintln!("  attach [service]");
     eprintln!("  read name");
     eprintln!("  readfd name");
     eprintln!("  write [-l] name");
+    eprintln!("  write-at name offset");
     eprintln!("  writefd name");
     eprintln!("  stat name");
     eprintln!("  rdwr name");
     eprintln!("  ls [-ldnt] name...");
     eprintln!("  rm name...");
     eprintln!("  create name...");
+    eprintln!("  mkdir name...");
     eprintln!("  con [-r] name");
     eprintln!("without -a, name elem/path means /path on server unix!$NAMESPACE/elem");
     std::process::exit(2);
@@ -894,7 +984,8 @@ fn usage() -> ! {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_stat, mode_string, parse_global_options, split_namespace_path, split_parent, DMDIR,
+        format_attach, format_stat, format_version, mode_string, parse_global_options,
+        parse_offset, split_namespace_path, split_parent, DMDIR,
     };
     use r9p::{qid::Qid, stat::Stat};
 
@@ -934,9 +1025,24 @@ mod tests {
     }
 
     #[test]
+    fn write_at_offset_parses_as_decimal_count() {
+        assert_eq!(parse_offset("42").expect("offset should parse"), 42);
+        assert!(parse_offset("four").is_err());
+    }
+
+    #[test]
     fn ls_mode_and_stat_formats_follow_plan9port_shape() {
         let stat = Stat::new("entries", Qid::dir(7), DMDIR | 0o755);
         assert_eq!(mode_string(stat.mode), "d-rwxr-xr-x");
         assert!(format_stat(&stat).contains("q (0000000000000007 0 d)"));
+    }
+
+    #[test]
+    fn version_and_attach_formats_match_vault_operator_shape() {
+        assert_eq!(
+            format_version(65_536, b"9P2000"),
+            "version=9P2000 msize=65536"
+        );
+        assert_eq!(format_attach(Qid::dir(42)), "attached qid=dir/0/42");
     }
 }

@@ -44,6 +44,15 @@ The implementation adds:
 
 The CLI accepts `-u uname` and `-m msize` as small Rust-client extensions, while preserving plan9port's `-a`, `-A`, `-n`, and `-D` option surface.
 
+The Vault command-map pass exposed four generic CLI gaps that are now covered without making the CLI Vault-specific:
+
+- `version` reports the negotiated 9P version and msize.
+- `attach` reports the root attach qid.
+- `mkdir` creates directory entries with `DMDIR | 0755`.
+- `write-at` writes stdin at an explicit offset without truncating the file.
+
+The existing `write` command deliberately keeps plan9port behavior: it opens with `OWRITE | OTRUNC`. Vault's current `scripts/p9 write` opens with plain `OWRITE` and writes at offset zero, so callers that need non-truncating command-file semantics should use `write-at <path> 0` instead of `write`.
+
 ## Open Questions
 
 - Whether to install a compatibility alias named `9p` in packaging, or keep the binary only as `r9p`.

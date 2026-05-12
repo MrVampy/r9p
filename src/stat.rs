@@ -116,6 +116,26 @@ pub fn dirread_chunk(stats: &[Stat], offset: u64, count: u32) -> Result<Vec<u8>>
     Ok(out)
 }
 
+pub fn decode_dir_entries(data: &[u8]) -> Result<Vec<Stat>> {
+    let mut entries = Vec::new();
+    let mut offset = 0_usize;
+    while offset < data.len() {
+        if data.len().saturating_sub(offset) < 2 {
+            return Err(Error::from("truncated directory stat"));
+        }
+        let size = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
+        let end = offset
+            .checked_add(size + 2)
+            .ok_or_else(|| Error::from("directory stat overflow"))?;
+        let entry = data
+            .get(offset..end)
+            .ok_or_else(|| Error::from("truncated directory stat"))?;
+        entries.push(Stat::decode(entry)?);
+        offset = end;
+    }
+    Ok(entries)
+}
+
 pub(crate) fn push_u16(out: &mut Vec<u8>, value: u16) {
     out.extend(value.to_le_bytes());
 }
@@ -204,5 +224,26 @@ impl<'a> Cursor<'a> {
             .ok_or_else(|| Error::from("truncated frame"))?;
         self.position = end;
         Ok(bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_dir_entries, Stat};
+    use crate::{error::Result, qid::Qid};
+
+    #[test]
+    fn directory_entry_stream_decodes_concatenated_stats() -> Result<()> {
+        let first = Stat::new("first", Qid::file(1), 0o400);
+        let second = Stat::new("second", Qid::file(2), 0o600);
+        let mut data = first.encode()?;
+        data.extend(second.encode()?);
+        assert_eq!(decode_dir_entries(&data)?, vec![first, second]);
+        Ok(())
+    }
+
+    #[test]
+    fn directory_entry_stream_rejects_truncated_stats() {
+        assert!(decode_dir_entries(&[10, 0, 1]).is_err());
     }
 }

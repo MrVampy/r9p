@@ -141,6 +141,27 @@ impl Client {
         })
     }
 
+    pub fn create(
+        &mut self,
+        fid: Fid,
+        name: impl Into<Vec<u8>>,
+        perm: u32,
+        mode: u8,
+    ) -> Result<Op> {
+        let tag = self.alloc_tag()?;
+        Ok(Op {
+            tag,
+            fid: Some(fid),
+            message: TMessage::Create {
+                tag,
+                fid,
+                name: name.into(),
+                perm,
+                mode,
+            },
+        })
+    }
+
     pub fn clunk(&mut self, fid: Fid) -> Result<Op> {
         let tag = self.alloc_tag()?;
         Ok(Op {
@@ -150,12 +171,30 @@ impl Client {
         })
     }
 
+    pub fn remove(&mut self, fid: Fid) -> Result<Op> {
+        let tag = self.alloc_tag()?;
+        Ok(Op {
+            tag,
+            fid: Some(fid),
+            message: TMessage::Remove { tag, fid },
+        })
+    }
+
     pub fn stat(&mut self, fid: Fid) -> Result<Op> {
         let tag = self.alloc_tag()?;
         Ok(Op {
             tag,
             fid: Some(fid),
             message: TMessage::Stat { tag, fid },
+        })
+    }
+
+    pub fn wstat(&mut self, fid: Fid, stat: Stat) -> Result<Op> {
+        let tag = self.alloc_tag()?;
+        Ok(Op {
+            tag,
+            fid: Some(fid),
+            message: TMessage::Wstat { tag, fid, stat },
         })
     }
 
@@ -312,4 +351,67 @@ pub struct Op {
     pub tag: Tag,
     pub fid: Option<Fid>,
     pub message: TMessage,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Client, Op};
+    use crate::{message::TMessage, qid::Qid, stat::Stat};
+
+    #[test]
+    fn builds_create_remove_and_wstat_ops() {
+        let mut client = Client::new();
+
+        let create = must_op(client.create(3, b"created".to_vec(), 0o644, 1));
+        assert_eq!(create.fid, Some(3));
+        match create.message {
+            TMessage::Create {
+                tag,
+                fid,
+                name,
+                perm,
+                mode,
+            } => {
+                assert_eq!(tag, create.tag);
+                assert_eq!(fid, 3);
+                assert_eq!(name, b"created".to_vec());
+                assert_eq!(perm, 0o644);
+                assert_eq!(mode, 1);
+            }
+            other => panic!("expected Tcreate, got {other:?}"),
+        }
+
+        let remove = must_op(client.remove(4));
+        assert_eq!(remove.fid, Some(4));
+        match remove.message {
+            TMessage::Remove { tag, fid } => {
+                assert_eq!(tag, remove.tag);
+                assert_eq!(fid, 4);
+            }
+            other => panic!("expected Tremove, got {other:?}"),
+        }
+
+        let stat = Stat::new(b"renamed".to_vec(), Qid::file(9), 0o600);
+        let wstat = must_op(client.wstat(5, stat.clone()));
+        assert_eq!(wstat.fid, Some(5));
+        match wstat.message {
+            TMessage::Wstat {
+                tag,
+                fid,
+                stat: actual,
+            } => {
+                assert_eq!(tag, wstat.tag);
+                assert_eq!(fid, 5);
+                assert_eq!(actual, stat);
+            }
+            other => panic!("expected Twstat, got {other:?}"),
+        }
+    }
+
+    fn must_op(result: crate::Result<Op>) -> Op {
+        match result {
+            Ok(op) => op,
+            Err(error) => panic!("client op failed: {error}"),
+        }
+    }
 }

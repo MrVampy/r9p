@@ -5,8 +5,10 @@
 client/server protocol state. It does not own any particular filesystem,
 editor, Vault, FUSE, socket, async runtime, or transport policy.
 
-Current consumers:
+Current surfaces and consumers:
 
+- `r9p`, a plan9port `9p`-shaped client CLI for one-shot reads, writes,
+  stats, listings, creates, removes, and console-style interaction.
 - Racme serves an Acme-compatible 9P namespace through `r9p`.
 - `r9pfuse` uses `r9p` to mount 9P namespaces through Linux FUSE.
 
@@ -27,19 +29,39 @@ The architectural boundary is deliberately small:
 - The client core owns operation construction, tag/fid allocation, and response
   admission.
 
-The crate does not yet provide a full transport loop or a finished operator
-binary. Those should be layered over the reusable client/server core.
+The crate keeps full transport loops and operator tools layered over the
+reusable client/server core.
 
-## plan9port Compatibility
+## CLI
 
-The operator-facing client should track the shape of plan9port's `9p` command:
-`read`, `write`, `stat`, `rdwr`, `ls`, and the address/aname options used by
-existing shell workflows. That command is a client facade over the library, not
-the boundary of the library itself.
+The operator-facing client tracks the shape of plan9port's `9p` command:
+
+```bash
+r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] read path
+r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] readfd path
+r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] write [-l] path
+r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] writefd path
+r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] stat path
+r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] rdwr path
+r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] ls [-ldnt] path...
+r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] rm path...
+r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] create path...
+r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] con [-r] path
+```
+
+`-a` accepts `host:port`, `tcp!host!port`, bare hosts defaulting to port 564,
+and `unix!/path/to/socket`. Without `-a`, paths use the plan9port namespace
+shape: `service/subpath` connects to `$NAMESPACE/service` and walks `subpath`.
+`-n` and `-D` are accepted for plan9port command-line compatibility; `r9p`
+always uses the noauth attach path today.
+
+The CLI is a blocking client facade over the reusable library. It is not the
+boundary of the library itself.
 
 ## Development
 
 ```bash
+cargo run --bin r9p -- -a 127.0.0.1:9564 ls /
 cargo test
 cargo clippy -- -D warnings
 nix flake check

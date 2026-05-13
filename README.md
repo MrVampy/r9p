@@ -8,7 +8,8 @@ editor, Vault, FUSE, socket, async runtime, or transport policy.
 Current surfaces and consumers:
 
 - `r9p`, a plan9port `9p`-shaped client CLI for one-shot reads, writes,
-  stats, listings, creates, removes, and console-style interaction.
+  stats, listings, creates, removes, console-style interaction, and stable
+  tab/hex machine-readable output.
 - Racme serves an Acme-compatible 9P namespace through `r9p`.
 - `r9pfuse` uses `r9p` to mount 9P namespaces through Linux FUSE.
 
@@ -61,6 +62,21 @@ always uses the noauth attach path today.
 
 The CLI is a blocking client facade over the reusable library. It is not the
 boundary of the library itself.
+
+`--machine` keeps the same connection flags but emits tab-separated records
+with byte fields hex-encoded. It is intended for typed wrappers that need a
+stable one-shot client surface without parsing the human plan9port-style output:
+
+```bash
+r9p --machine [-a address] [-A aname] [-u uname] [-m msize] version
+r9p --machine [-a address] [-A aname] [-u uname] [-m msize] attach
+r9p --machine [-a address] [-A aname] [-u uname] [-m msize] stat path
+r9p --machine [-a address] [-A aname] [-u uname] [-m msize] list path
+r9p --machine [-a address] [-A aname] [-u uname] [-m msize] read path
+r9p --machine [-a address] [-A aname] [-u uname] [-m msize] write path offset payload-hex
+r9p --machine [-a address] [-A aname] [-u uname] [-m msize] create path perm mode
+r9p --machine [-a address] [-A aname] [-u uname] [-m msize] remove path
+```
 
 ## Development
 

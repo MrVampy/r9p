@@ -1,6 +1,10 @@
 use r9p::{
     blocking::{self, BoxedClient, ReadWrite, ORDWR, OREAD, OTRUNC, OWRITE},
+    client::{Client as ProtocolClient, ClientResponse, Completion},
+    codec,
+    error::Error as R9pError,
     fid::Fid,
+    message::RMessage,
     qid::{Qid, DMAPPEND, DMDIR},
     stat::{decode_dir_entries, Stat},
 };
@@ -36,6 +40,7 @@ struct Config {
     aname: String,
     uname: String,
     msize: u32,
+    machine: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -68,7 +73,9 @@ fn run() -> CliResult<()> {
         "stat" => stat_cmd(config, args),
         "rdwr" => rdwr_cmd(config, args),
         "ls" => ls_cmd(config, args),
+        "list" if config.machine => machine_list_cmd(config, args),
         "rm" => rm_cmd(config, args),
+        "remove" if config.machine => machine_remove_cmd(config, args),
         "create" => create_cmd(config, args),
         "mkdir" => mkdir_cmd(config, args),
         "con" => con_cmd(config, args),
@@ -79,6 +86,9 @@ fn run() -> CliResult<()> {
 }
 
 fn version_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
+    if config.machine {
+        return machine_version_cmd(config, args);
+    }
     let target = connection_target(config, args)?;
     let (client, _) = connect_path(&target)?;
     println!("{}", format_version(client.msize(), client.version()));
@@ -88,8 +98,34 @@ fn version_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
 fn attach_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
     let target = connection_target(config, args)?;
     let (client, _) = connect_path(&target)?;
-    println!("{}", format_attach(client.root_qid()));
+    if target.config.machine {
+        print_machine_qid("attach", client.root_qid());
+    } else {
+        println!("{}", format_attach(client.root_qid()));
+    }
     Ok(())
+}
+
+fn machine_version_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
+    let target = connection_target(config, args)?;
+    let mut stream = dial_target(&target)?;
+    let mut protocol = ProtocolClient::new();
+    let request = protocol.version_request(target.config.msize);
+    let frame = codec::encode_tmessage(&request)?;
+    stream.write_all(&frame)?;
+    let response = read_response(&mut stream)?;
+
+    match protocol.receive(response)? {
+        ClientResponse::Completion {
+            completion: Completion::Version { msize, version },
+            ..
+        } => {
+            println!("version\t{}\t{msize}", hex_encode(&version));
+            Ok(())
+        }
+        ClientResponse::Error { ename, .. } => Err(R9pError::new(ename).into()),
+        other => Err(cli_error(format!("unexpected version response: {other:?}"))),
+    }
 }
 
 fn connection_target(config: Config, args: Vec<String>) -> CliResult<Target> {
@@ -107,6 +143,7 @@ fn parse_global_options(args: &mut Vec<String>) -> CliResult<Config> {
         aname: String::new(),
         uname: env::var("USER").unwrap_or_else(|_| "none".to_string()),
         msize: DEFAULT_MSIZE,
+        machine: false,
     };
     let mut rest = Vec::new();
     let mut i = 0;
@@ -121,6 +158,11 @@ fn parse_global_options(args: &mut Vec<String>) -> CliResult<Config> {
             break;
         }
         if arg == "-n" || arg == "-D" {
+            i += 1;
+            continue;
+        }
+        if arg == "--machine" {
+            config.machine = true;
             i += 1;
             continue;
         }
@@ -187,7 +229,13 @@ fn read_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
         path: args[0].clone(),
     };
     let (mut client, fid) = open_path(&target, OREAD)?;
-    let result = copy_fid_to_stdout(&mut client, fid);
+    let result = if target.config.machine {
+        let data = read_all(&mut client, fid)?;
+        println!("read\t{}", hex_encode(&data));
+        Ok(())
+    } else {
+        copy_fid_to_stdout(&mut client, fid)
+    };
     let clunk = client.clunk(fid);
     result?;
     clunk?;
@@ -195,6 +243,9 @@ fn read_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
 }
 
 fn write_cmd(config: Config, mut args: Vec<String>, allow_line_option: bool) -> CliResult<()> {
+    if config.machine {
+        return machine_write_cmd(config, args);
+    }
     let by_line = if allow_line_option && args.first().is_some_and(|arg| arg == "-l") {
         args.remove(0);
         true
@@ -250,7 +301,11 @@ fn stat_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
     let (mut client, path) = connect_path(&target)?;
     let fid = client.walk_path(&path)?;
     let stat = client.stat(fid)?;
-    println!("{}", format_stat(&stat));
+    if target.config.machine {
+        print_machine_stat("stat", &stat);
+    } else {
+        println!("{}", format_stat(&stat));
+    }
     client.clunk(fid)?;
     Ok(())
 }
@@ -342,6 +397,9 @@ fn rm_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
 }
 
 fn create_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
+    if config.machine {
+        return machine_create_cmd(config, args);
+    }
     create_paths(config, args, 0o666, OREAD, "create")
 }
 
@@ -376,6 +434,87 @@ fn create_paths(
     if had_error {
         return Err(cli_error(format!("{label} errors")));
     }
+    Ok(())
+}
+
+fn machine_list_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
+    if args.len() != 1 {
+        usage();
+    }
+    let target = Target {
+        config,
+        path: args[0].clone(),
+    };
+    let (mut client, path) = connect_path(&target)?;
+    let fid = client.walk_path(&path)?;
+    client.open(fid, OREAD)?;
+    let stats = read_dir_stats(&mut client, fid)?;
+    for stat in stats {
+        print_machine_stat("entry", &stat);
+    }
+    client.clunk(fid)?;
+    Ok(())
+}
+
+fn machine_write_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
+    if args.len() != 3 {
+        usage();
+    }
+    let offset = parse_offset(&args[1])?;
+    let data = hex_decode(&args[2])?;
+    let target = Target {
+        config,
+        path: args[0].clone(),
+    };
+    let (mut client, fid) = open_path(&target, OWRITE)?;
+    let count = client.write(fid, offset, &data)?;
+    println!("write\t{count}");
+    client.clunk(fid)?;
+    Ok(())
+}
+
+fn machine_create_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
+    if args.len() != 3 {
+        usage();
+    }
+    let perm = args[1]
+        .parse::<u32>()
+        .map_err(|_| cli_error(format!("invalid perm {}", args[1])))?;
+    let mode = args[2]
+        .parse::<u8>()
+        .map_err(|_| cli_error(format!("invalid mode {}", args[2])))?;
+    let target = Target {
+        config,
+        path: args[0].clone(),
+    };
+    let (parent, name) = split_parent(&target.path)?;
+    let parent_target = Target {
+        config: target.config.clone(),
+        path: parent,
+    };
+    let (mut client, path) = connect_path(&parent_target)?;
+    let parent_fid = client.walk_path(&path)?;
+    let (fid, qid) = client.create(parent_fid, name.as_bytes(), perm, mode)?;
+    let iounit = codec::max_write_payload(client.msize());
+    println!(
+        "create\t{}\t{}\t{}\t{}",
+        qid.qtype, qid.version, qid.path, iounit
+    );
+    client.clunk(fid)?;
+    client.clunk(parent_fid)?;
+    Ok(())
+}
+
+fn machine_remove_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
+    if args.len() != 1 {
+        usage();
+    }
+    let target = Target {
+        config,
+        path: args[0].clone(),
+    };
+    remove_one(&target)?;
+    println!("ok");
     Ok(())
 }
 
@@ -446,28 +585,34 @@ fn open_path(target: &Target, mode: u8) -> CliResult<(BoxedClient, Fid)> {
 }
 
 fn connect_path(target: &Target) -> CliResult<(BoxedClient, String)> {
+    let path = target_path(target)?;
+    let stream = dial_target(target)?;
+    let client = blocking::Client::connect(
+        stream,
+        &target.config.uname,
+        &target.config.aname,
+        target.config.msize,
+    )?;
+    Ok((client, path))
+}
+
+fn target_path(target: &Target) -> CliResult<String> {
     match &target.config.address {
-        Some(address) => {
-            let stream = dial_address(address)?;
-            let client = blocking::Client::connect(
-                stream,
-                &target.config.uname,
-                &target.config.aname,
-                target.config.msize,
-            )?;
-            Ok((client, target.path.clone()))
-        }
+        Some(_) => Ok(target.path.clone()),
         None => {
-            let (service, path) = split_namespace_path(&target.path)?;
+            let (_, path) = split_namespace_path(&target.path)?;
+            Ok(path)
+        }
+    }
+}
+
+fn dial_target(target: &Target) -> CliResult<Box<dyn ReadWrite>> {
+    match &target.config.address {
+        Some(address) => dial_address(address),
+        None => {
+            let (service, _) = split_namespace_path(&target.path)?;
             let socket = namespace_socket(&service)?;
-            let stream = dial_unix_socket(&socket)?;
-            let client = blocking::Client::connect(
-                stream,
-                &target.config.uname,
-                &target.config.aname,
-                target.config.msize,
-            )?;
-            Ok((client, path))
+            dial_unix_socket(&socket)
         }
     }
 }
@@ -483,6 +628,21 @@ fn dial_address(address: &str) -> CliResult<Box<dyn ReadWrite>> {
         .set_nodelay(true)
         .map_err(|error| cli_error(format!("set TCP_NODELAY: {error}")))?;
     Ok(Box::new(stream))
+}
+
+fn read_response(stream: &mut Box<dyn ReadWrite>) -> CliResult<RMessage> {
+    let mut prefix = [0_u8; 4];
+    stream.read_exact(&mut prefix)?;
+    let size = u32::from_le_bytes(prefix);
+    if size < codec::FRAME_HEADER_SIZE {
+        return Err(cli_error(format!("short 9P frame {size}")));
+    }
+    let rest_len = usize::try_from(size - 4)?;
+    let mut frame = Vec::with_capacity(rest_len + 4);
+    frame.extend(prefix);
+    frame.resize(rest_len + 4, 0);
+    stream.read_exact(&mut frame[4..])?;
+    Ok(codec::decode_rmessage(&frame)?)
 }
 
 #[cfg(unix)]
@@ -534,6 +694,22 @@ fn copy_fid_to_stdout(client: &mut BoxedClient, fid: Fid) -> CliResult<()> {
         stdout.write_all(&data)?;
     }
     Ok(())
+}
+
+fn read_all(client: &mut BoxedClient, fid: Fid) -> CliResult<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut offset = 0_u64;
+    loop {
+        let data = client.read(fid, offset, READ_CHUNK)?;
+        if data.is_empty() {
+            break;
+        }
+        offset = offset.saturating_add(
+            u64::try_from(data.len()).map_err(|_| cli_error("read count overflow"))?,
+        );
+        out.extend(data);
+    }
+    Ok(out)
 }
 
 fn copy_stdin_to_fid(client: &mut BoxedClient, fid: Fid, by_line: bool) -> CliResult<()> {
@@ -787,6 +963,30 @@ fn format_stat(stat: &Stat) -> String {
     )
 }
 
+fn print_machine_qid(prefix: &str, qid: Qid) {
+    println!("{}\t{}\t{}\t{}", prefix, qid.qtype, qid.version, qid.path);
+}
+
+fn print_machine_stat(prefix: &str, stat: &Stat) {
+    println!(
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        prefix,
+        hex_encode(&stat.name),
+        stat.qid.qtype,
+        stat.qid.version,
+        stat.qid.path,
+        stat.length,
+        stat.mode,
+        stat.atime,
+        stat.mtime,
+        stat.type_,
+        stat.dev,
+        hex_encode(&stat.uid),
+        hex_encode(&stat.gid),
+        hex_encode(&stat.muid),
+    );
+}
+
 fn format_version(msize: u32, version: &[u8]) -> String {
     format!("version={} msize={}", text(version), msize)
 }
@@ -956,12 +1156,47 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn hex_decode(raw: &str) -> CliResult<Vec<u8>> {
+    let bytes = raw.as_bytes();
+    if !bytes.len().is_multiple_of(2) {
+        return Err(cli_error("odd hex length"));
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.chunks_exact(2) {
+        let high = hex_value(pair[0])?;
+        let low = hex_value(pair[1])?;
+        out.push((high << 4) | low);
+    }
+    Ok(out)
+}
+
+fn hex_value(byte: u8) -> CliResult<u8> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(cli_error(format!("invalid hex byte {}", byte as char))),
+    }
+}
+
 fn cli_error(message: impl Into<String>) -> Box<dyn Error> {
     Box::new(io::Error::other(message.into()))
 }
 
 fn usage() -> ! {
-    eprintln!("usage: r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] cmd args...");
+    eprintln!(
+        "usage: r9p [-n] [--machine] [-a address] [-A aname] [-u uname] [-m msize] cmd args..."
+    );
     eprintln!("possible cmds:");
     eprintln!("  version [service]");
     eprintln!("  attach [service]");
@@ -973,7 +1208,9 @@ fn usage() -> ! {
     eprintln!("  stat name");
     eprintln!("  rdwr name");
     eprintln!("  ls [-ldnt] name...");
+    eprintln!("  list name                machine mode");
     eprintln!("  rm name...");
+    eprintln!("  remove name              machine mode");
     eprintln!("  create name...");
     eprintln!("  mkdir name...");
     eprintln!("  con [-r] name");
@@ -984,8 +1221,8 @@ fn usage() -> ! {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_attach, format_stat, format_version, mode_string, parse_global_options,
-        parse_offset, split_namespace_path, split_parent, DMDIR,
+        format_attach, format_stat, format_version, hex_decode, hex_encode, mode_string,
+        parse_global_options, parse_offset, split_namespace_path, split_parent, DMDIR,
     };
     use r9p::{qid::Qid, stat::Stat};
 
@@ -993,6 +1230,7 @@ mod tests {
     fn global_options_accept_plan9port_flags_and_extensions() {
         let mut args = vec![
             "-nD".to_string(),
+            "--machine".to_string(),
             "-a".to_string(),
             "tcp!127.0.0.1!9564".to_string(),
             "-A/".to_string(),
@@ -1006,6 +1244,7 @@ mod tests {
         assert_eq!(config.aname, "/");
         assert_eq!(config.uname, "codex");
         assert_eq!(config.msize, 65_536);
+        assert!(config.machine);
         assert_eq!(args, ["ls".to_string(), "/".to_string()]);
     }
 
@@ -1044,5 +1283,15 @@ mod tests {
             "version=9P2000 msize=65536"
         );
         assert_eq!(format_attach(Qid::dir(42)), "attached qid=dir/0/42");
+    }
+
+    #[test]
+    fn machine_payloads_are_hex_encoded() {
+        assert_eq!(hex_encode(b"9P2000"), "395032303030");
+        assert_eq!(
+            hex_decode("7661756c74").expect("hex should decode"),
+            b"vault"
+        );
+        assert!(hex_decode("abc").is_err());
     }
 }

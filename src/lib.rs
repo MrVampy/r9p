@@ -5,6 +5,7 @@ pub mod error;
 pub mod fid;
 pub mod flush;
 pub mod message;
+pub mod multiplex;
 pub mod qid;
 pub mod server;
 pub mod stat;

@@ -18,6 +18,8 @@ This map defines the local sources agents should inspect before making source-sp
   - Generic file-tree trait, session state, open/read/write/stat/walk handling.
 - `src/client.rs`
   - Runtime-neutral client operation builder and response admission.
+- `src/multiplex.rs`
+  - Layered blocking transport facade for concurrent tagged client calls.
 - `src/stat.rs`
   - 9P stat record shape and mode helpers.
 - `tests/memory_tree.rs`

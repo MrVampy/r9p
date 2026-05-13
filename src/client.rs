@@ -1,11 +1,12 @@
 use crate::{
-    error::{Error, Result, EDUPTAG},
+    error::{Error, Result, EBADTAG, EDUPTAG},
     fid::{Fid, NOFID},
     flush::RequestTable,
     message::{RMessage, TMessage, Tag, NOTAG},
     qid::Qid,
     stat::Stat,
 };
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Completion {
@@ -37,6 +38,7 @@ pub struct Client {
     next_tag: Tag,
     next_fid: Fid,
     pending: RequestTable,
+    flush_targets: BTreeMap<Tag, Tag>,
 }
 
 impl Default for Client {
@@ -53,6 +55,7 @@ impl Client {
             next_tag: 0,
             next_fid: 1,
             pending: RequestTable::new(),
+            flush_targets: BTreeMap::new(),
         }
     }
 
@@ -66,6 +69,7 @@ impl Client {
 
     pub fn version_request(&mut self, msize: u32) -> TMessage {
         self.pending.reset();
+        self.flush_targets.clear();
         TMessage::Version {
             tag: NOTAG,
             msize,
@@ -199,7 +203,11 @@ impl Client {
     }
 
     pub fn flush(&mut self, oldtag: Tag) -> Result<Op> {
+        if oldtag == NOTAG {
+            return Err(Error::from_static(EBADTAG));
+        }
         let tag = self.alloc_tag()?;
+        self.flush_targets.insert(tag, oldtag);
         Ok(Op {
             tag,
             fid: None,
@@ -217,6 +225,7 @@ impl Client {
                 self.msize = msize;
                 self.version = version.clone();
                 self.pending.reset();
+                self.flush_targets.clear();
                 Ok(ClientResponse::Completion {
                     tag,
                     completion: Completion::Version { msize, version },
@@ -224,6 +233,7 @@ impl Client {
             }
             RMessage::Error { tag, ename } => {
                 let _ = self.pending.flush(tag);
+                self.flush_targets.remove(&tag);
                 Ok(ClientResponse::Error { tag, ename })
             }
             RMessage::Attach { tag, qid } => {
@@ -242,6 +252,9 @@ impl Client {
             }
             RMessage::Flush { tag } => {
                 self.finish(tag)?;
+                if let Some(oldtag) = self.flush_targets.remove(&tag) {
+                    let _ = self.pending.flush(oldtag);
+                }
                 Ok(ClientResponse::Completion {
                     tag,
                     completion: Completion::Flush,

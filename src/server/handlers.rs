@@ -78,7 +78,23 @@ impl<T> Server<T> {
         let tag = key.tag;
         match message {
             TMessage::Version { .. } => unreachable!("Tversion handled before admission"),
-            TMessage::Auth { .. } => Err(Error::from_static(ENOAUTH)),
+            TMessage::Auth {
+                afid, uname, aname, ..
+            } => {
+                if afid == NOFID {
+                    return Err(Error::from_static(ENOAUTH));
+                }
+                if self.session.contains_fid(afid) {
+                    return Err(Error::from_static(EFIDINUSE));
+                }
+                if self.session.fid_count() >= self.session.config.max_fids {
+                    return Err(Error::from_static(EFIDLIMIT));
+                }
+                Ok(ServerEvent::Dispatch(ServerRequest {
+                    key,
+                    kind: ServerRequestKind::Auth { afid, uname, aname },
+                }))
+            }
             TMessage::Attach {
                 fid,
                 afid,
@@ -87,7 +103,10 @@ impl<T> Server<T> {
                 ..
             } => {
                 if afid != NOFID {
-                    return Err(Error::from_static(ENOAUTH));
+                    let auth_state = self.session.fid(afid)?;
+                    if !auth_state.qid.is_auth() {
+                        return Err(Error::from_static(ENOAUTH));
+                    }
                 }
                 if self.session.contains_fid(fid) {
                     return Err(Error::from_static(EFIDINUSE));
@@ -269,6 +288,13 @@ impl<T> Server<T> {
         completion: ServerCompletion,
     ) -> Result<RMessage> {
         match (request, completion) {
+            (ServerRequestKind::Auth { afid, .. }, ServerCompletion::Auth { qid }) => {
+                if !qid.is_auth() {
+                    return Err(Error::from_static(ENOAUTH));
+                }
+                self.session.insert_new_fid(*afid, FidState::new(qid))?;
+                Ok(RMessage::Auth { tag, aqid: qid })
+            }
             (ServerRequestKind::Attach { fid, .. }, ServerCompletion::Attach { qid }) => {
                 self.session.insert_new_fid(*fid, FidState::new(qid))?;
                 Ok(RMessage::Attach { tag, qid })
@@ -345,12 +371,23 @@ impl<T> Server<T> {
         T: FileTree,
     {
         match &request.kind {
-            ServerRequestKind::Attach {
-                fid, uname, aname, ..
-            } => self
+            ServerRequestKind::Auth { afid, uname, aname } => self
                 .tree
-                .attach(*fid, uname, aname)
-                .map(|qid| ServerCompletion::Attach { qid }),
+                .auth(*afid, uname, aname)
+                .map(|qid| ServerCompletion::Auth { qid }),
+            ServerRequestKind::Attach {
+                fid,
+                afid,
+                uname,
+                aname,
+            } => {
+                let qid = if *afid == NOFID {
+                    self.tree.attach(*fid, uname, aname)?
+                } else {
+                    self.tree.attach_with_auth(*fid, *afid, uname, aname)?
+                };
+                Ok(ServerCompletion::Attach { qid })
+            }
             ServerRequestKind::Walk {
                 fid,
                 newfid,

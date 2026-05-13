@@ -25,6 +25,20 @@ pub trait FileTree {
     fn read(&mut self, fid: Fid, qid: Qid, offset: u64, count: u32) -> Result<ReadData>;
     fn stat(&mut self, qid: Qid) -> Result<Stat>;
 
+    fn auth(&mut self, _afid: Fid, _uname: &[u8], _aname: &[u8]) -> Result<Qid> {
+        Err(Error::from_static(crate::error::ENOAUTH))
+    }
+
+    fn attach_with_auth(
+        &mut self,
+        _fid: Fid,
+        _afid: Fid,
+        _uname: &[u8],
+        _aname: &[u8],
+    ) -> Result<Qid> {
+        Err(Error::from_static(crate::error::ENOAUTH))
+    }
+
     fn create(
         &mut self,
         _fid: Fid,

@@ -42,6 +42,11 @@ impl ServerRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerRequestKind {
+    Auth {
+        afid: Fid,
+        uname: Vec<u8>,
+        aname: Vec<u8>,
+    },
     Attach {
         fid: Fid,
         afid: Fid,
@@ -99,6 +104,7 @@ pub enum ServerRequestKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerCompletion {
+    Auth { qid: Qid },
     Attach { qid: Qid },
     Walk { qids: Vec<Qid> },
     Open(OpenFile),

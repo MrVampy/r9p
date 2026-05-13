@@ -50,11 +50,13 @@ impl Session {
         if requested_msize < MIN_MSIZE {
             return Err(Error::from_static(EBADMSIZE));
         }
-        if !version.starts_with(b"9P2000") {
-            return Err(Error::from_static(EBADVERSION));
-        }
+        let accepted = self
+            .config
+            .variant
+            .accept(version)
+            .ok_or_else(|| Error::from_static(EBADVERSION))?;
         self.msize = requested_msize.min(self.config.max_msize);
-        self.version = b"9P2000".to_vec();
+        self.version = accepted.wire_name().to_vec();
         Ok(())
     }
 

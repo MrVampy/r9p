@@ -10,6 +10,7 @@ pub mod qid;
 pub mod server;
 pub mod stat;
 
+pub use codec::Variant;
 pub use error::{Error, Result};
 pub use fid::{Fid, FidState, NOFID};
 pub use message::{RMessage, TMessage, Tag, NOTAG};

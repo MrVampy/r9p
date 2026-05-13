@@ -1,10 +1,11 @@
-use crate::codec::{DEFAULT_MSIZE, MAX_MSIZE};
+use crate::codec::{Variant, DEFAULT_MSIZE, MAX_MSIZE};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct ServerConfig {
     pub default_msize: u32,
     pub max_msize: u32,
     pub max_fids: usize,
+    pub variant: Variant,
 }
 
 impl Default for ServerConfig {
@@ -13,6 +14,7 @@ impl Default for ServerConfig {
             default_msize: DEFAULT_MSIZE,
             max_msize: MAX_MSIZE,
             max_fids: 4096,
+            variant: Variant::Plain,
         }
     }
 }

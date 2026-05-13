@@ -15,6 +15,28 @@ pub const DEFAULT_MSIZE: u32 = 8192;
 pub const MIN_MSIZE: u32 = 256;
 pub const MAX_MSIZE: u32 = 64 * 1024;
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
+pub enum Variant {
+    #[default]
+    Plain,
+}
+
+impl Variant {
+    pub const fn wire_name(self) -> &'static [u8] {
+        match self {
+            Variant::Plain => b"9P2000",
+        }
+    }
+
+    pub fn accept(self, requested: &[u8]) -> Option<Variant> {
+        if requested.starts_with(self.wire_name()) {
+            Some(self)
+        } else {
+            None
+        }
+    }
+}
+
 pub fn clamp_read_count(msize: u32, requested: u32) -> u32 {
     requested.min(msize.saturating_sub(RREAD_HEADER_SIZE))
 }

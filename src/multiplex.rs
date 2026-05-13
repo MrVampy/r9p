@@ -54,9 +54,16 @@ impl MultiplexTransport for UnixStream {
     }
 }
 
-#[derive(Clone)]
 pub struct MultiplexedClient<S: MultiplexTransport> {
     inner: Arc<MultiplexedInner<S>>,
+}
+
+impl<S: MultiplexTransport> Clone for MultiplexedClient<S> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
 }
 
 struct MultiplexedInner<S: MultiplexTransport> {
@@ -597,16 +604,24 @@ fn lock<'a, T>(mutex: &'a Mutex<T>, context: &'static str) -> Result<MutexGuard<
 mod tests {
     use super::*;
     use crate::{fid::NOFID, qid::Qid};
+    use std::net::{TcpListener, TcpStream};
     use std::sync::{mpsc, Arc, Barrier};
 
-    #[cfg(unix)]
     #[test]
     fn concurrent_calls_are_demultiplexed_by_tag() -> Result<()> {
-        let (client_stream, server_stream) =
-            UnixStream::pair().map_err(|error| io_error("create unix pair", error))?;
-        let server = thread::spawn(move || scripted_out_of_order_server(server_stream));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .map_err(|error| io_error("bind test listener", error))?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| io_error("read listener address", error))?;
+        let server = thread::spawn(move || {
+            let (stream, _) = listener
+                .accept()
+                .map_err(|error| io_error("accept test connection", error))?;
+            scripted_out_of_order_server(stream)
+        });
         let client = Arc::new(MultiplexedClient::connect(
-            client_stream,
+            TcpStream::connect(address).map_err(|error| io_error("connect test client", error))?,
             "glenda",
             "",
             8192,
@@ -643,14 +658,26 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(unix)]
     #[test]
     fn flush_releases_original_waiter() -> Result<()> {
-        let (client_stream, server_stream) =
-            UnixStream::pair().map_err(|error| io_error("create unix pair", error))?;
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .map_err(|error| io_error("bind test listener", error))?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| io_error("read listener address", error))?;
         let (done_sender, done_receiver) = mpsc::channel();
-        let server = thread::spawn(move || scripted_flush_server(server_stream, done_receiver));
-        let client = MultiplexedClient::connect(client_stream, "glenda", "", 8192)?;
+        let server = thread::spawn(move || {
+            let (stream, _) = listener
+                .accept()
+                .map_err(|error| io_error("accept test connection", error))?;
+            scripted_flush_server(stream, done_receiver)
+        });
+        let client = MultiplexedClient::connect(
+            TcpStream::connect(address).map_err(|error| io_error("connect test client", error))?,
+            "glenda",
+            "",
+            8192,
+        )?;
         let pending = client.submit(|protocol| protocol.read(client.root_fid(), 0, 100))?;
         let oldtag = pending.tag();
         client.flush_tag(oldtag)?;
@@ -665,8 +692,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(unix)]
-    fn scripted_out_of_order_server(mut stream: UnixStream) -> Result<()> {
+    fn scripted_out_of_order_server(mut stream: TcpStream) -> Result<()> {
         handshake(&mut stream)?;
 
         let first = read_tmessage(&mut stream)?;
@@ -698,8 +724,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(unix)]
-    fn scripted_flush_server(mut stream: UnixStream, done: mpsc::Receiver<()>) -> Result<()> {
+    fn scripted_flush_server(mut stream: TcpStream, done: mpsc::Receiver<()>) -> Result<()> {
         handshake(&mut stream)?;
         let read = read_tmessage(&mut stream)?;
         let read_tag = match read {
@@ -717,8 +742,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(unix)]
-    fn handshake(stream: &mut UnixStream) -> Result<()> {
+    fn handshake(stream: &mut TcpStream) -> Result<()> {
         let version = read_tmessage(stream)?;
         match version {
             TMessage::Version { tag, msize, .. } => write_response(
@@ -747,8 +771,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(unix)]
-    fn read_tmessage(stream: &mut UnixStream) -> Result<TMessage> {
+    fn read_tmessage(stream: &mut TcpStream) -> Result<TMessage> {
         let mut prefix = [0_u8; 4];
         stream
             .read_exact(&mut prefix)

@@ -5,7 +5,7 @@ use crate::{
         EFIDLIMIT, ENOAUTH, EPERM,
     },
     fid::{Fid, FidState, NOFID},
-    flush::{RequestKey, RequestTable},
+    flush::{FlushOutcome, RequestKey, RequestTable},
     message::{RMessage, TMessage, Tag, MAXWELEM},
     qid::Qid,
     stat::{dirread_chunk, Stat},
@@ -39,6 +39,99 @@ pub struct OpenFile {
 pub enum ReadData {
     Bytes(Vec<u8>),
     Directory(Vec<Stat>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServerEvent {
+    Reply(RMessage),
+    Dispatch(ServerRequest),
+    Flush {
+        reply: RMessage,
+        outcome: FlushOutcome,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerRequest {
+    pub key: RequestKey,
+    pub kind: ServerRequestKind,
+}
+
+impl ServerRequest {
+    pub const fn tag(&self) -> Tag {
+        self.key.tag
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServerRequestKind {
+    Attach {
+        fid: Fid,
+        afid: Fid,
+        uname: Vec<u8>,
+        aname: Vec<u8>,
+    },
+    Walk {
+        fid: Fid,
+        newfid: Fid,
+        start: Qid,
+        wnames: Vec<Vec<u8>>,
+    },
+    Open {
+        fid: Fid,
+        qid: Qid,
+        mode: u8,
+    },
+    Create {
+        fid: Fid,
+        qid: Qid,
+        name: Vec<u8>,
+        perm: u32,
+        mode: u8,
+    },
+    Read {
+        fid: Fid,
+        qid: Qid,
+        offset: u64,
+        count: u32,
+    },
+    Write {
+        fid: Fid,
+        qid: Qid,
+        offset: u64,
+        data: Vec<u8>,
+    },
+    Clunk {
+        fid: Fid,
+        qid: Qid,
+    },
+    Remove {
+        fid: Fid,
+        qid: Qid,
+    },
+    Stat {
+        fid: Fid,
+        qid: Qid,
+    },
+    Wstat {
+        fid: Fid,
+        qid: Qid,
+        stat: Stat,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServerCompletion {
+    Attach { qid: Qid },
+    Walk { qids: Vec<Qid> },
+    Open(OpenFile),
+    Create(OpenFile),
+    Read(ReadData),
+    Write { count: u32 },
+    Clunk,
+    Remove,
+    Stat { stat: Stat },
+    Wstat,
 }
 
 pub trait FileTree {
@@ -164,7 +257,7 @@ pub struct Server<T> {
     tree: T,
 }
 
-impl<T: FileTree> Server<T> {
+impl<T> Server<T> {
     pub fn new(tree: T) -> Self {
         Self::with_config(tree, ServerConfig::default())
     }
@@ -192,7 +285,7 @@ impl<T: FileTree> Server<T> {
         self.tree
     }
 
-    pub fn handle(&mut self, message: TMessage) -> RMessage {
+    pub fn admit(&mut self, message: TMessage) -> ServerEvent {
         if let TMessage::Version {
             tag,
             msize,
@@ -200,28 +293,61 @@ impl<T: FileTree> Server<T> {
         } = message
         {
             return match self.session.reset_for_version(msize, &version) {
-                Ok(()) => RMessage::Version {
+                Ok(()) => ServerEvent::Reply(RMessage::Version {
                     tag,
                     msize: self.session.msize(),
                     version: self.session.version().to_vec(),
-                },
-                Err(error) => error_reply(tag, error),
+                }),
+                Err(error) => ServerEvent::Reply(error_reply(tag, error)),
             };
         }
 
         let tag = message.tag();
         let key = match self.session.requests.begin(tag) {
             Ok(key) => key,
-            Err(error) => return error_reply(tag, error),
+            Err(error) => return ServerEvent::Reply(error_reply(tag, error)),
         };
-        let reply = self.handle_admitted(message, key);
-        let _finished = self.session.requests.finish(key);
-        reply
+
+        match self.admit_after_begin(message, key) {
+            Ok(event) => event,
+            Err(error) => self.finish_with_reply(key, error_reply(tag, error)),
+        }
     }
 
-    fn handle_admitted(&mut self, message: TMessage, _key: RequestKey) -> RMessage {
-        let tag = message.tag();
-        let result = match message {
+    pub fn complete(
+        &mut self,
+        request: ServerRequest,
+        completion: Result<ServerCompletion>,
+    ) -> Option<RMessage> {
+        if !self.session.requests.finish(request.key) {
+            return None;
+        }
+        let tag = request.tag();
+        let result = match completion {
+            Ok(completion) => self.apply_completion(tag, &request.kind, completion),
+            Err(error) => Err(error),
+        };
+        Some(result.unwrap_or_else(|error| error_reply(tag, error)))
+    }
+
+    pub fn handle(&mut self, message: TMessage) -> RMessage
+    where
+        T: FileTree,
+    {
+        match self.admit(message) {
+            ServerEvent::Reply(reply) | ServerEvent::Flush { reply, .. } => reply,
+            ServerEvent::Dispatch(request) => {
+                let tag = request.tag();
+                let result = self.perform_request(&request);
+                self.complete(request, result)
+                    .unwrap_or_else(|| error_reply(tag, Error::from("stale server completion")))
+            }
+        }
+    }
+
+    fn admit_after_begin(&mut self, message: TMessage, key: RequestKey) -> Result<ServerEvent> {
+        let tag = key.tag;
+        match message {
             TMessage::Version { .. } => unreachable!("Tversion handled before admission"),
             TMessage::Auth { .. } => Err(Error::from_static(ENOAUTH)),
             TMessage::Attach {
@@ -230,177 +356,330 @@ impl<T: FileTree> Server<T> {
                 uname,
                 aname,
                 ..
-            } => self.handle_attach(tag, fid, afid, &uname, &aname),
-            TMessage::Flush { oldtag, .. } => self.handle_flush(tag, oldtag),
+            } => {
+                if afid != NOFID {
+                    return Err(Error::from_static(ENOAUTH));
+                }
+                if self.session.contains_fid(fid) {
+                    return Err(Error::from_static(EFIDINUSE));
+                }
+                if self.session.fid_count() >= self.session.config.max_fids {
+                    return Err(Error::from_static(EFIDLIMIT));
+                }
+                Ok(ServerEvent::Dispatch(ServerRequest {
+                    key,
+                    kind: ServerRequestKind::Attach {
+                        fid,
+                        afid,
+                        uname,
+                        aname,
+                    },
+                }))
+            }
+            TMessage::Flush { oldtag, .. } => {
+                let outcome = self.session.requests.flush(oldtag)?;
+                let reply = RMessage::Flush { tag };
+                let _finished = self.session.requests.finish(key);
+                Ok(ServerEvent::Flush { reply, outcome })
+            }
             TMessage::Walk {
                 fid,
                 newfid,
                 wnames,
                 ..
-            } => self.handle_walk(tag, fid, newfid, &wnames),
-            TMessage::Open { fid, mode, .. } => self.handle_open(tag, fid, mode),
+            } => {
+                validate_walk_names(&wnames)?;
+                let source = self.session.fid(fid)?;
+                if newfid != fid && self.session.contains_fid(newfid) {
+                    return Err(Error::from_static(EFIDINUSE));
+                }
+                if newfid != fid
+                    && !self.session.contains_fid(newfid)
+                    && self.session.fid_count() >= self.session.config.max_fids
+                {
+                    return Err(Error::from_static(EFIDLIMIT));
+                }
+                if wnames.is_empty() {
+                    if newfid != fid {
+                        self.session.insert_new_fid(newfid, source)?;
+                    }
+                    return Ok(self.finish_with_reply(
+                        key,
+                        RMessage::Walk {
+                            tag,
+                            qids: Vec::new(),
+                        },
+                    ));
+                }
+                Ok(ServerEvent::Dispatch(ServerRequest {
+                    key,
+                    kind: ServerRequestKind::Walk {
+                        fid,
+                        newfid,
+                        start: source.qid,
+                        wnames,
+                    },
+                }))
+            }
+            TMessage::Open { fid, mode, .. } => {
+                let state = self.session.fid(fid)?;
+                Ok(ServerEvent::Dispatch(ServerRequest {
+                    key,
+                    kind: ServerRequestKind::Open {
+                        fid,
+                        qid: state.qid,
+                        mode,
+                    },
+                }))
+            }
             TMessage::Create {
                 fid,
                 name,
                 perm,
                 mode,
                 ..
-            } => self.handle_create(tag, fid, &name, perm, mode),
+            } => {
+                let state = self.session.fid(fid)?;
+                Ok(ServerEvent::Dispatch(ServerRequest {
+                    key,
+                    kind: ServerRequestKind::Create {
+                        fid,
+                        qid: state.qid,
+                        name,
+                        perm,
+                        mode,
+                    },
+                }))
+            }
             TMessage::Read {
                 fid, offset, count, ..
-            } => self.handle_read(tag, fid, offset, count),
+            } => {
+                let state = self.session.fid(fid)?;
+                Ok(ServerEvent::Dispatch(ServerRequest {
+                    key,
+                    kind: ServerRequestKind::Read {
+                        fid,
+                        qid: state.qid,
+                        offset,
+                        count: clamp_read_count(self.session.msize(), count),
+                    },
+                }))
+            }
             TMessage::Write {
                 fid, offset, data, ..
-            } => self.handle_write(tag, fid, offset, &data),
-            TMessage::Clunk { fid, .. } => self.handle_clunk(tag, fid),
-            TMessage::Remove { fid, .. } => self.handle_remove(tag, fid),
-            TMessage::Stat { fid, .. } => self.handle_stat(tag, fid),
-            TMessage::Wstat { fid, stat, .. } => self.handle_wstat(tag, fid, &stat),
-        };
-        result.unwrap_or_else(|error| error_reply(tag, error))
-    }
-
-    fn handle_attach(
-        &mut self,
-        tag: Tag,
-        fid: Fid,
-        afid: Fid,
-        uname: &[u8],
-        aname: &[u8],
-    ) -> Result<RMessage> {
-        if afid != NOFID {
-            return Err(Error::from_static(ENOAUTH));
-        }
-        let qid = self.tree.attach(fid, uname, aname)?;
-        self.session.insert_new_fid(fid, FidState::new(qid))?;
-        Ok(RMessage::Attach { tag, qid })
-    }
-
-    fn handle_flush(&mut self, tag: Tag, oldtag: Tag) -> Result<RMessage> {
-        let _outcome = self.session.requests.flush(oldtag)?;
-        Ok(RMessage::Flush { tag })
-    }
-
-    fn handle_walk(
-        &mut self,
-        tag: Tag,
-        fid: Fid,
-        newfid: Fid,
-        wnames: &[Vec<u8>],
-    ) -> Result<RMessage> {
-        validate_walk_names(wnames)?;
-        let source = self.session.fid(fid)?;
-        if newfid != fid && self.session.contains_fid(newfid) {
-            return Err(Error::from_static(EFIDINUSE));
-        }
-        if newfid != fid
-            && !self.session.contains_fid(newfid)
-            && self.session.fid_count() >= self.session.config.max_fids
-        {
-            return Err(Error::from_static(EFIDLIMIT));
-        }
-        if wnames.is_empty() {
-            if newfid != fid {
-                self.session.insert_new_fid(newfid, source)?;
+            } => {
+                let max = usize::try_from(max_write_payload(self.session.msize()))
+                    .map_err(|_| Error::from("msize too large"))?;
+                if data.len() > max {
+                    return Err(Error::from("write exceeds msize"));
+                }
+                let state = self.session.fid(fid)?;
+                Ok(ServerEvent::Dispatch(ServerRequest {
+                    key,
+                    kind: ServerRequestKind::Write {
+                        fid,
+                        qid: state.qid,
+                        offset,
+                        data,
+                    },
+                }))
             }
-            return Ok(RMessage::Walk {
-                tag,
-                qids: Vec::new(),
-            });
-        }
-
-        let qids = self.tree.walk(fid, newfid, source.qid, wnames)?;
-        if qids.is_empty() {
-            return Err(Error::from_static(EEXIST));
-        }
-        if qids.len() > wnames.len() {
-            return Err(Error::from("walk returned too many qids"));
-        }
-        if qids.len() == wnames.len() {
-            let qid = qids[qids.len() - 1];
-            if newfid == fid {
-                self.session.bind_fid(fid, FidState::new(qid))?;
-            } else {
-                self.session.insert_new_fid(newfid, FidState::new(qid))?;
+            TMessage::Clunk { fid, .. } => {
+                let state = self.session.remove_fid(fid)?;
+                Ok(ServerEvent::Dispatch(ServerRequest {
+                    key,
+                    kind: ServerRequestKind::Clunk {
+                        fid,
+                        qid: state.qid,
+                    },
+                }))
+            }
+            TMessage::Remove { fid, .. } => {
+                let state = self.session.remove_fid(fid)?;
+                Ok(ServerEvent::Dispatch(ServerRequest {
+                    key,
+                    kind: ServerRequestKind::Remove {
+                        fid,
+                        qid: state.qid,
+                    },
+                }))
+            }
+            TMessage::Stat { fid, .. } => {
+                let state = self.session.fid(fid)?;
+                Ok(ServerEvent::Dispatch(ServerRequest {
+                    key,
+                    kind: ServerRequestKind::Stat {
+                        fid,
+                        qid: state.qid,
+                    },
+                }))
+            }
+            TMessage::Wstat { fid, stat, .. } => {
+                let state = self.session.fid(fid)?;
+                Ok(ServerEvent::Dispatch(ServerRequest {
+                    key,
+                    kind: ServerRequestKind::Wstat {
+                        fid,
+                        qid: state.qid,
+                        stat,
+                    },
+                }))
             }
         }
-        Ok(RMessage::Walk { tag, qids })
     }
 
-    fn handle_open(&mut self, tag: Tag, fid: Fid, mode: u8) -> Result<RMessage> {
-        let state = self.session.fid(fid)?;
-        let opened = self.tree.open(fid, state.qid, mode)?;
-        self.session.bind_fid(fid, FidState::opened(opened.qid))?;
-        Ok(RMessage::Open {
-            tag,
-            qid: opened.qid,
-            iounit: opened.iounit,
-        })
+    fn finish_with_reply(&mut self, key: RequestKey, reply: RMessage) -> ServerEvent {
+        let _finished = self.session.requests.finish(key);
+        ServerEvent::Reply(reply)
     }
 
-    fn handle_create(
+    fn apply_completion(
         &mut self,
         tag: Tag,
-        fid: Fid,
-        name: &[u8],
-        perm: u32,
-        mode: u8,
+        request: &ServerRequestKind,
+        completion: ServerCompletion,
     ) -> Result<RMessage> {
-        let state = self.session.fid(fid)?;
-        let opened = self.tree.create(fid, state.qid, name, perm, mode)?;
-        self.session.bind_fid(fid, FidState::opened(opened.qid))?;
-        Ok(RMessage::Create {
-            tag,
-            qid: opened.qid,
-            iounit: opened.iounit,
-        })
-    }
-
-    fn handle_read(&mut self, tag: Tag, fid: Fid, offset: u64, count: u32) -> Result<RMessage> {
-        let state = self.session.fid(fid)?;
-        let count = clamp_read_count(self.session.msize(), count);
-        let data = match self.tree.read(fid, state.qid, offset, count)? {
-            ReadData::Bytes(bytes) => take_count(bytes, count)?,
-            ReadData::Directory(stats) => dirread_chunk(&stats, offset, count)?,
-        };
-        Ok(RMessage::Read { tag, data })
-    }
-
-    fn handle_write(&mut self, tag: Tag, fid: Fid, offset: u64, data: &[u8]) -> Result<RMessage> {
-        let max = usize::try_from(max_write_payload(self.session.msize()))
-            .map_err(|_| Error::from("msize too large"))?;
-        if data.len() > max {
-            return Err(Error::from("write exceeds msize"));
+        match (request, completion) {
+            (ServerRequestKind::Attach { fid, .. }, ServerCompletion::Attach { qid }) => {
+                self.session.insert_new_fid(*fid, FidState::new(qid))?;
+                Ok(RMessage::Attach { tag, qid })
+            }
+            (
+                ServerRequestKind::Walk {
+                    fid,
+                    newfid,
+                    wnames,
+                    ..
+                },
+                ServerCompletion::Walk { qids },
+            ) => {
+                if qids.is_empty() {
+                    return Err(Error::from_static(EEXIST));
+                }
+                if qids.len() > wnames.len() {
+                    return Err(Error::from("walk returned too many qids"));
+                }
+                if qids.len() == wnames.len() {
+                    let qid = qids[qids.len() - 1];
+                    if newfid == fid {
+                        self.session.bind_fid(*fid, FidState::new(qid))?;
+                    } else {
+                        self.session.insert_new_fid(*newfid, FidState::new(qid))?;
+                    }
+                }
+                Ok(RMessage::Walk { tag, qids })
+            }
+            (ServerRequestKind::Open { fid, .. }, ServerCompletion::Open(opened)) => {
+                self.session.bind_fid(*fid, FidState::opened(opened.qid))?;
+                Ok(RMessage::Open {
+                    tag,
+                    qid: opened.qid,
+                    iounit: opened.iounit,
+                })
+            }
+            (ServerRequestKind::Create { fid, .. }, ServerCompletion::Create(opened)) => {
+                self.session.bind_fid(*fid, FidState::opened(opened.qid))?;
+                Ok(RMessage::Create {
+                    tag,
+                    qid: opened.qid,
+                    iounit: opened.iounit,
+                })
+            }
+            (ServerRequestKind::Read { offset, count, .. }, ServerCompletion::Read(data)) => {
+                let data = match data {
+                    ReadData::Bytes(bytes) => take_count(bytes, *count)?,
+                    ReadData::Directory(stats) => dirread_chunk(&stats, *offset, *count)?,
+                };
+                Ok(RMessage::Read { tag, data })
+            }
+            (ServerRequestKind::Write { .. }, ServerCompletion::Write { count }) => {
+                Ok(RMessage::Write { tag, count })
+            }
+            (ServerRequestKind::Clunk { .. }, ServerCompletion::Clunk) => {
+                Ok(RMessage::Clunk { tag })
+            }
+            (ServerRequestKind::Remove { .. }, ServerCompletion::Remove) => {
+                Ok(RMessage::Remove { tag })
+            }
+            (ServerRequestKind::Stat { .. }, ServerCompletion::Stat { stat }) => {
+                Ok(RMessage::Stat { tag, stat })
+            }
+            (ServerRequestKind::Wstat { .. }, ServerCompletion::Wstat) => {
+                Ok(RMessage::Wstat { tag })
+            }
+            _ => Err(Error::from("completion kind does not match request")),
         }
-        let state = self.session.fid(fid)?;
-        let count = self.tree.write(fid, state.qid, offset, data)?;
-        Ok(RMessage::Write { tag, count })
     }
 
-    fn handle_clunk(&mut self, tag: Tag, fid: Fid) -> Result<RMessage> {
-        let state = self.session.remove_fid(fid)?;
-        self.tree.clunk(fid, state.qid)?;
-        Ok(RMessage::Clunk { tag })
-    }
-
-    fn handle_remove(&mut self, tag: Tag, fid: Fid) -> Result<RMessage> {
-        let state = self.session.fid(fid)?;
-        let result = self.tree.remove(fid, state.qid);
-        let _removed = self.session.remove_fid(fid)?;
-        result?;
-        Ok(RMessage::Remove { tag })
-    }
-
-    fn handle_stat(&mut self, tag: Tag, fid: Fid) -> Result<RMessage> {
-        let state = self.session.fid(fid)?;
-        let stat = self.tree.stat(state.qid)?;
-        Ok(RMessage::Stat { tag, stat })
-    }
-
-    fn handle_wstat(&mut self, tag: Tag, fid: Fid, stat: &Stat) -> Result<RMessage> {
-        let state = self.session.fid(fid)?;
-        self.tree.wstat(fid, state.qid, stat)?;
-        Ok(RMessage::Wstat { tag })
+    fn perform_request(&mut self, request: &ServerRequest) -> Result<ServerCompletion>
+    where
+        T: FileTree,
+    {
+        match &request.kind {
+            ServerRequestKind::Attach {
+                fid, uname, aname, ..
+            } => self
+                .tree
+                .attach(*fid, uname, aname)
+                .map(|qid| ServerCompletion::Attach { qid }),
+            ServerRequestKind::Walk {
+                fid,
+                newfid,
+                wnames,
+                start,
+            } => self
+                .tree
+                .walk(*fid, *newfid, *start, wnames)
+                .map(|qids| ServerCompletion::Walk { qids }),
+            ServerRequestKind::Open { fid, qid, mode } => self
+                .tree
+                .open(*fid, *qid, *mode)
+                .map(ServerCompletion::Open),
+            ServerRequestKind::Create {
+                fid,
+                qid,
+                name,
+                perm,
+                mode,
+            } => self
+                .tree
+                .create(*fid, *qid, name, *perm, *mode)
+                .map(ServerCompletion::Create),
+            ServerRequestKind::Read {
+                fid,
+                qid,
+                offset,
+                count,
+            } => self
+                .tree
+                .read(*fid, *qid, *offset, *count)
+                .map(ServerCompletion::Read),
+            ServerRequestKind::Write {
+                fid,
+                qid,
+                offset,
+                data,
+            } => self
+                .tree
+                .write(*fid, *qid, *offset, data)
+                .map(|count| ServerCompletion::Write { count }),
+            ServerRequestKind::Clunk { fid, qid } => self
+                .tree
+                .clunk(*fid, *qid)
+                .map(|()| ServerCompletion::Clunk),
+            ServerRequestKind::Remove { fid, qid } => self
+                .tree
+                .remove(*fid, *qid)
+                .map(|()| ServerCompletion::Remove),
+            ServerRequestKind::Stat { qid, .. } => self
+                .tree
+                .stat(*qid)
+                .map(|stat| ServerCompletion::Stat { stat }),
+            ServerRequestKind::Wstat { fid, qid, stat } => self
+                .tree
+                .wstat(*fid, *qid, stat)
+                .map(|()| ServerCompletion::Wstat),
+        }
     }
 }
 
@@ -596,5 +875,82 @@ mod tests {
         );
         assert!(!server.session().contains_fid(1));
         Ok(())
+    }
+
+    #[test]
+    fn split_attach_completion_binds_fid_when_request_is_live() -> Result<()> {
+        let mut server = Server::new(RootOnly::new());
+        let request = match server.admit(TMessage::Attach {
+            tag: 1,
+            fid: 1,
+            afid: NOFID,
+            uname: b"u".to_vec(),
+            aname: Vec::new(),
+        }) {
+            ServerEvent::Dispatch(request) => request,
+            other => panic!("expected dispatch, got {other:?}"),
+        };
+
+        let reply = server
+            .complete(request, Ok(ServerCompletion::Attach { qid: Qid::dir(1) }))
+            .ok_or("live completion was dropped")?;
+
+        assert_eq!(
+            reply,
+            RMessage::Attach {
+                tag: 1,
+                qid: Qid::dir(1)
+            }
+        );
+        assert!(server.session().contains_fid(1));
+        Ok(())
+    }
+
+    #[test]
+    fn split_flush_cancels_request_and_drops_stale_completion() -> Result<()> {
+        let mut server = Server::new(RootOnly::new());
+        let request = match server.admit(TMessage::Attach {
+            tag: 1,
+            fid: 1,
+            afid: NOFID,
+            uname: b"u".to_vec(),
+            aname: Vec::new(),
+        }) {
+            ServerEvent::Dispatch(request) => request,
+            other => panic!("expected dispatch, got {other:?}"),
+        };
+
+        let expected_key = request.key;
+        let flush = server.admit(TMessage::Flush { tag: 2, oldtag: 1 });
+        assert_eq!(
+            flush,
+            ServerEvent::Flush {
+                reply: RMessage::Flush { tag: 2 },
+                outcome: FlushOutcome::Cancelled(expected_key)
+            }
+        );
+
+        let late = server.complete(request, Ok(ServerCompletion::Attach { qid: Qid::dir(1) }));
+        assert_eq!(late, None);
+        assert!(!server.session().contains_fid(1));
+        Ok(())
+    }
+
+    #[test]
+    fn split_api_does_not_require_a_filetree_backend() {
+        let mut server = Server::new(());
+        let event = server.admit(TMessage::Version {
+            tag: crate::message::NOTAG,
+            msize: 8192,
+            version: b"9P2000".to_vec(),
+        });
+        assert_eq!(
+            event,
+            ServerEvent::Reply(RMessage::Version {
+                tag: crate::message::NOTAG,
+                msize: 8192,
+                version: b"9P2000".to_vec()
+            })
+        );
     }
 }

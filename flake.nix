@@ -27,19 +27,31 @@
           devShells.default = pkgs.mkShell {
             packages = with pkgs; [
               cargo
+              clang
               rustc
               rustfmt
               clippy
               rust-analyzer
+              just
               git
               jq
               ripgrep
               nixpkgs-fmt
+              # Agent-loop tooling — same set used in Racme + r9pfuse.
+              # See justfile for tier-by-tier usage.
+              mold
+              sccache
+              cargo-nextest
+              cargo-deny
+              cargo-machete
+              cargo-mutants
+              cargo-outdated
+              cargo-expand
             ];
 
             shellHook = ''
               echo "r9p dev shell"
-              echo "Tools: cargo, rustc, rustfmt, clippy, rust-analyzer, git, jq, rg"
+              echo "Iteration tiers: just check (T1) / lint (T2) / verify (T3) / audit (T4)"
             '';
           };
 

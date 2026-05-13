@@ -1,11 +1,13 @@
 mod config;
 mod handlers;
 mod session;
+mod stream;
 mod types;
 mod validation;
 
 pub use config::ServerConfig;
 pub use session::Session;
+pub use stream::{Broadcaster, Stream};
 pub use types::{
     OpenFile, ReadData, ServerCompletion, ServerEvent, ServerRequest, ServerRequestKind,
 };

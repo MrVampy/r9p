@@ -48,11 +48,6 @@
               cargo-outdated
               cargo-expand
             ];
-
-            shellHook = ''
-              echo "r9p dev shell"
-              echo "Iteration tiers: just check (T1) / lint (T2) / verify (T3) / audit (T4)"
-            '';
           };
 
           formatter = pkgs.nixpkgs-fmt;

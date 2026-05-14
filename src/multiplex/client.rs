@@ -12,10 +12,11 @@ use std::{
     collections::BTreeMap,
     net::TcpStream,
     sync::{
-        mpsc::{self, Receiver},
+        mpsc::{self, Receiver, RecvTimeoutError},
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
+    time::Duration,
 };
 
 #[cfg(unix)]
@@ -227,6 +228,10 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
         self.walk(fid, &[])
     }
 
+    pub fn clone_fid_timeout(&self, fid: Fid, timeout: Duration) -> Result<Fid> {
+        self.walk_timeout(fid, &[], timeout)
+    }
+
     pub fn walk_path(&self, path: &str) -> Result<Fid> {
         let names = path_names(path);
         if names.is_empty() {
@@ -237,6 +242,10 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
 
     pub fn walk_one(&self, fid: Fid, name: &[u8]) -> Result<Fid> {
         self.walk(fid, &[name.to_vec()])
+    }
+
+    pub fn walk_one_timeout(&self, fid: Fid, name: &[u8], timeout: Duration) -> Result<Fid> {
+        self.walk_timeout(fid, &[name.to_vec()], timeout)
     }
 
     pub fn walk(&self, fid: Fid, names: &[Vec<u8>]) -> Result<Fid> {
@@ -258,12 +267,42 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
         }
     }
 
+    pub fn walk_timeout(&self, fid: Fid, names: &[Vec<u8>], timeout: Duration) -> Result<Fid> {
+        let op = {
+            let mut protocol = lock(&self.inner.protocol, "lock 9P protocol client")?;
+            protocol.walk(fid, names.to_vec()).map_err(protocol_error)?
+        };
+        let newfid = op_fid(&op)?;
+        match self.call_op_timeout(op, timeout)? {
+            Completion::Walk { qids } if qids.len() == names.len() => Ok(newfid),
+            Completion::Walk { .. } => {
+                let _ = self.clunk_timeout(newfid, timeout);
+                Err(Error::from("partial walk"))
+            }
+            other => {
+                let _ = self.clunk_timeout(newfid, timeout);
+                Err(unexpected("Rwalk", other))
+            }
+        }
+    }
+
     pub fn open(&self, fid: Fid, mode: u8) -> Result<Qid> {
         let op = {
             let mut protocol = lock(&self.inner.protocol, "lock 9P protocol client")?;
             protocol.open(fid, mode).map_err(protocol_error)?
         };
         match self.call_op(op)? {
+            Completion::Open { qid, .. } => Ok(qid),
+            other => Err(unexpected("Ropen", other)),
+        }
+    }
+
+    pub fn open_timeout(&self, fid: Fid, mode: u8, timeout: Duration) -> Result<Qid> {
+        let op = {
+            let mut protocol = lock(&self.inner.protocol, "lock 9P protocol client")?;
+            protocol.open(fid, mode).map_err(protocol_error)?
+        };
+        match self.call_op_timeout(op, timeout)? {
             Completion::Open { qid, .. } => Ok(qid),
             other => Err(unexpected("Ropen", other)),
         }
@@ -286,6 +325,35 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
             }
             Err(error) => {
                 let _ = self.clunk(fid);
+                Err(error)
+            }
+        }
+    }
+
+    pub fn create_timeout(
+        &self,
+        parent_fid: Fid,
+        name: &[u8],
+        perm: u32,
+        mode: u8,
+        timeout: Duration,
+    ) -> Result<(Fid, Qid)> {
+        let fid = self.clone_fid_timeout(parent_fid, timeout)?;
+        let op = {
+            let mut protocol = lock(&self.inner.protocol, "lock 9P protocol client")?;
+            protocol
+                .create(fid, name.to_vec(), perm, mode)
+                .map_err(protocol_error)?
+        };
+        let reply = self.call_op_timeout(op, timeout);
+        match reply {
+            Ok(Completion::Create { qid, .. }) => Ok((fid, qid)),
+            Ok(other) => {
+                let _ = self.clunk_timeout(fid, timeout);
+                Err(unexpected("Rcreate", other))
+            }
+            Err(error) => {
+                let _ = self.clunk_timeout(fid, timeout);
                 Err(error)
             }
         }
@@ -374,6 +442,17 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
         }
     }
 
+    pub fn clunk_timeout(&self, fid: Fid, timeout: Duration) -> Result<()> {
+        let op = {
+            let mut protocol = lock(&self.inner.protocol, "lock 9P protocol client")?;
+            protocol.clunk(fid).map_err(protocol_error)?
+        };
+        match self.call_op_timeout(op, timeout)? {
+            Completion::Clunk => Ok(()),
+            other => Err(unexpected("Rclunk", other)),
+        }
+    }
+
     pub fn remove(&self, fid: Fid) -> Result<()> {
         let op = {
             let mut protocol = lock(&self.inner.protocol, "lock 9P protocol client")?;
@@ -396,6 +475,17 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
         }
     }
 
+    pub fn stat_timeout(&self, fid: Fid, timeout: Duration) -> Result<Stat> {
+        let op = {
+            let mut protocol = lock(&self.inner.protocol, "lock 9P protocol client")?;
+            protocol.stat(fid).map_err(protocol_error)?
+        };
+        match self.call_op_timeout(op, timeout)? {
+            Completion::Stat { stat } => Ok(stat),
+            other => Err(unexpected("Rstat", other)),
+        }
+    }
+
     pub fn wstat(&self, fid: Fid, stat: Stat) -> Result<()> {
         let op = {
             let mut protocol = lock(&self.inner.protocol, "lock 9P protocol client")?;
@@ -410,6 +500,37 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
     fn call_op(&self, op: Op) -> Result<Completion> {
         let expected_tag = op.tag;
         match self.submit_op(op)?.wait()? {
+            ClientResponse::Completion { tag, completion } if tag == expected_tag => Ok(completion),
+            ClientResponse::Error { tag, ename } if tag == expected_tag => Err(Error::new(ename)),
+            other => Err(Error::from(format!(
+                "response tag mismatch or unexpected response: {other:?}"
+            ))),
+        }
+    }
+
+    fn call_op_timeout(&self, op: Op, timeout: Duration) -> Result<Completion> {
+        let expected_tag = op.tag;
+        let pending = self.submit_op(op)?;
+        let response = match pending.receiver.recv_timeout(timeout) {
+            Ok(response) => response?,
+            Err(RecvTimeoutError::Timeout) => {
+                self.cancel_waiter(
+                    expected_tag,
+                    Error::from(format!(
+                        "9P response timeout after {:.3}s",
+                        timeout.as_secs_f64()
+                    )),
+                );
+                return Err(Error::from(format!(
+                    "9P response timeout after {:.3}s",
+                    timeout.as_secs_f64()
+                )));
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(Error::from("9P reader stopped before response"));
+            }
+        };
+        match response {
             ClientResponse::Completion { tag, completion } if tag == expected_tag => Ok(completion),
             ClientResponse::Error { tag, ename } if tag == expected_tag => Err(Error::new(ename)),
             other => Err(Error::from(format!(

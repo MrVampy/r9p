@@ -3,3 +3,6 @@
 
 .direnv/
 .worktrees/
+
+/refs/*
+!/refs/README.md

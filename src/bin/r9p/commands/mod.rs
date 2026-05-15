@@ -3,5 +3,6 @@ pub(crate) mod ls;
 pub(crate) mod machine;
 pub(crate) mod mutate;
 pub(crate) mod read_write;
+pub(crate) mod script;
 pub(crate) mod stat_rdwr;
 pub(crate) mod version_attach;

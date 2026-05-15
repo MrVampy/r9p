@@ -30,6 +30,7 @@ type TestResult<T> = Result<T, Box<dyn Error>>;
 struct SharedFile {
     data: Arc<Mutex<Vec<u8>>>,
     read_calls: Arc<AtomicUsize>,
+    attach_calls: Arc<AtomicUsize>,
 }
 
 impl SharedFile {
@@ -37,6 +38,7 @@ impl SharedFile {
         Self {
             data: Arc::new(Mutex::new(data)),
             read_calls: Arc::new(AtomicUsize::new(0)),
+            attach_calls: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -50,6 +52,10 @@ impl SharedFile {
 
     fn read_count(&self) -> usize {
         self.read_calls.load(Ordering::SeqCst)
+    }
+
+    fn attach_count(&self) -> usize {
+        self.attach_calls.load(Ordering::SeqCst)
     }
 }
 
@@ -71,6 +77,7 @@ impl MachineTree {
 
 impl FileTree for MachineTree {
     fn attach(&mut self, _fid: Fid, _uname: &[u8], _aname: &[u8]) -> R9pResult<Qid> {
+        self.file.attach_calls.fetch_add(1, Ordering::SeqCst);
         Ok(self.root)
     }
 
@@ -249,6 +256,48 @@ fn machine_writefd_streams_stdin_with_truncation() -> TestResult<()> {
     assert_stdout(&output, &format!("write\t{}\n", payload.len()))?;
     if shared.bytes()? != payload {
         return Err(test_error("writefd did not truncate before writing"));
+    }
+    join_server(handle)
+}
+
+#[test]
+fn machine_script_runs_multiple_operations_on_one_session() -> TestResult<()> {
+    let input_path = temp_path("script-input");
+    let output_path = temp_path("script-output");
+    let script_path = temp_path("script");
+    fs::write(&input_path, b"12345")?;
+    let input_arg = input_path.to_string_lossy();
+    let output_arg = output_path.to_string_lossy();
+    fs::write(
+        &script_path,
+        format!(
+            "# comment lines are ignored\nwrite-hex\t/data\t2\t5859\nread-hex\t/data\t0\t8\nwrite-from\t/data\t3\t{input_arg}\nread-to\t/data\t{output_arg}\n"
+        ),
+    )?;
+    let script_arg = script_path.to_string_lossy().into_owned();
+    let shared = SharedFile::new(b"abcdef".to_vec());
+    let (address, handle) = start_server(shared.clone())?;
+
+    let output = run_machine(&address, &["script", &script_arg], None)?;
+    let _ = fs::remove_file(&input_path);
+    let _ = fs::remove_file(&script_path);
+    assert_success(&output)?;
+    assert_stdout(
+        &output,
+        "ok\t2\twrite\t2\nok\t3\tread-hex\t6\t616258596566\nok\t4\twrite\t5\nok\t5\tread\t8\n",
+    )?;
+    if shared.attach_count() != 1 {
+        return Err(test_error(
+            "script did not preserve a single attached session",
+        ));
+    }
+    if shared.bytes()? != b"abX12345" {
+        return Err(test_error("script write operations did not update file"));
+    }
+    let written = fs::read(&output_path)?;
+    let _ = fs::remove_file(&output_path);
+    if written != b"abX12345" {
+        return Err(test_error("script read-to file did not match server file"));
     }
     join_server(handle)
 }

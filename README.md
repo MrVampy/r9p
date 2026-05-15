@@ -79,6 +79,8 @@ r9p --machine [-a address] [-A aname] [-u uname] [-m msize] write path offset pa
 r9p --machine [-a address] [-A aname] [-u uname] [-m msize] write-at path offset
 r9p --machine [-a address] [-A aname] [-u uname] [-m msize] writefd path
 r9p --machine [-a address] [-A aname] [-u uname] [-m msize] write-from path offset local-path
+r9p --machine [-a address] [-A aname] [-u uname] [-m msize] script script-path
+r9p --machine [-A aname] [-u uname] [-m msize] script service script-path
 r9p --machine [-a address] [-A aname] [-u uname] [-m msize] create path perm mode
 r9p --machine [-a address] [-A aname] [-u uname] [-m msize] remove path
 ```
@@ -89,6 +91,24 @@ payloads: `readfd` writes raw bytes to stdout, `read-to` writes raw bytes to a
 local file and prints `read<TAB>count`, `writefd` reads stdin with truncating
 plan9port `writefd` semantics, `write-at` reads stdin at an explicit remote
 offset, and `write-from` streams a local file to an explicit remote offset.
+
+`script` runs a tab-separated operation file over one connection and attach.
+With `-a`, the command is `script script-path`; without `-a`, the command is
+`script service script-path` and connects through `$NAMESPACE/service`. Blank
+lines and `#` comments are ignored. Supported operations are:
+
+```text
+write-hex<TAB>remote-path<TAB>offset<TAB>payload-hex
+write-from<TAB>remote-path<TAB>offset<TAB>local-path
+read-to<TAB>remote-path<TAB>local-path
+read-hex<TAB>remote-path<TAB>offset<TAB>count
+```
+
+Each completed operation prints an indexed record:
+`ok<TAB>line<TAB>write<TAB>count`, `ok<TAB>line<TAB>read<TAB>count`, or
+`ok<TAB>line<TAB>read-hex<TAB>count<TAB>payload-hex`. The line number is the
+source line in the script file, so wrapper errors can point back to the exact
+operation while preserving one 9P session for session-private state.
 
 ## Development
 

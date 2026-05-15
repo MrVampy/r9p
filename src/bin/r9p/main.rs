@@ -15,6 +15,7 @@ use commands::{
     read_write::{
         read_cmd, read_to_cmd, write_at_cmd, write_cmd, write_from_cmd, ReadMode, WriteMode,
     },
+    script::machine_script_cmd,
     stat_rdwr::{rdwr_cmd, stat_cmd},
     version_attach::{attach_cmd, version_cmd},
 };
@@ -56,6 +57,7 @@ fn run() -> CliResult<()> {
         "write-at" => write_at_cmd(config, args),
         "writefd" => write_cmd(config, args, WriteMode::WriteFd),
         "write-from" if config.machine => write_from_cmd(config, args),
+        "script" if config.machine => machine_script_cmd(config, args),
         "stat" => stat_cmd(config, args),
         "rdwr" => rdwr_cmd(config, args),
         "ls" => ls_cmd(config, args),
@@ -174,6 +176,8 @@ pub(crate) fn usage() -> ! {
     eprintln!("  rm name...");
     eprintln!("  remove name              machine mode");
     eprintln!("  write-from name offset local  machine mode");
+    eprintln!("  script file              machine mode");
+    eprintln!("  script service file      machine mode without -a");
     eprintln!("  create name...");
     eprintln!("  mkdir name...");
     eprintln!("  con [-r] name");

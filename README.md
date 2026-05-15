@@ -73,10 +73,22 @@ r9p --machine [-a address] [-A aname] [-u uname] [-m msize] attach
 r9p --machine [-a address] [-A aname] [-u uname] [-m msize] stat path
 r9p --machine [-a address] [-A aname] [-u uname] [-m msize] list path
 r9p --machine [-a address] [-A aname] [-u uname] [-m msize] read path
+r9p --machine [-a address] [-A aname] [-u uname] [-m msize] readfd path
+r9p --machine [-a address] [-A aname] [-u uname] [-m msize] read-to path local-path
 r9p --machine [-a address] [-A aname] [-u uname] [-m msize] write path offset payload-hex
+r9p --machine [-a address] [-A aname] [-u uname] [-m msize] write-at path offset
+r9p --machine [-a address] [-A aname] [-u uname] [-m msize] writefd path
+r9p --machine [-a address] [-A aname] [-u uname] [-m msize] write-from path offset local-path
 r9p --machine [-a address] [-A aname] [-u uname] [-m msize] create path perm mode
 r9p --machine [-a address] [-A aname] [-u uname] [-m msize] remove path
 ```
+
+The small-payload `read` and `write` machine commands preserve the tab/hex
+record format. Streaming machine commands avoid argv-sized or captured hex
+payloads: `readfd` writes raw bytes to stdout, `read-to` writes raw bytes to a
+local file and prints `read<TAB>count`, `writefd` reads stdin with truncating
+plan9port `writefd` semantics, `write-at` reads stdin at an explicit remote
+offset, and `write-from` streams a local file to an explicit remote offset.
 
 ## Development
 

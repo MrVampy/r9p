@@ -12,7 +12,9 @@ use commands::{
     ls::ls_cmd,
     machine::{machine_list_cmd, machine_remove_cmd},
     mutate::{create_cmd, mkdir_cmd, rm_cmd},
-    read_write::{read_cmd, write_at_cmd, write_cmd},
+    read_write::{
+        read_cmd, read_to_cmd, write_at_cmd, write_cmd, write_from_cmd, ReadMode, WriteMode,
+    },
     stat_rdwr::{rdwr_cmd, stat_cmd},
     version_attach::{attach_cmd, version_cmd},
 };
@@ -47,10 +49,13 @@ fn run() -> CliResult<()> {
     match command.as_str() {
         "version" => version_cmd(config, args),
         "attach" => attach_cmd(config, args),
-        "read" | "readfd" => read_cmd(config, args),
-        "write" => write_cmd(config, args, true),
+        "read" => read_cmd(config, args, ReadMode::Read),
+        "readfd" => read_cmd(config, args, ReadMode::ReadFd),
+        "read-to" if config.machine => read_to_cmd(config, args),
+        "write" => write_cmd(config, args, WriteMode::Write),
         "write-at" => write_at_cmd(config, args),
-        "writefd" => write_cmd(config, args, false),
+        "writefd" => write_cmd(config, args, WriteMode::WriteFd),
+        "write-from" if config.machine => write_from_cmd(config, args),
         "stat" => stat_cmd(config, args),
         "rdwr" => rdwr_cmd(config, args),
         "ls" => ls_cmd(config, args),
@@ -165,8 +170,10 @@ pub(crate) fn usage() -> ! {
     eprintln!("  rdwr name");
     eprintln!("  ls [-ldnt] name...");
     eprintln!("  list name                machine mode");
+    eprintln!("  read-to name local       machine mode");
     eprintln!("  rm name...");
     eprintln!("  remove name              machine mode");
+    eprintln!("  write-from name offset local  machine mode");
     eprintln!("  create name...");
     eprintln!("  mkdir name...");
     eprintln!("  con [-r] name");

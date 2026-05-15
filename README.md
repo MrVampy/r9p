@@ -102,13 +102,17 @@ write-hex<TAB>remote-path<TAB>offset<TAB>payload-hex
 write-from<TAB>remote-path<TAB>offset<TAB>local-path
 read-to<TAB>remote-path<TAB>local-path
 read-hex<TAB>remote-path<TAB>offset<TAB>count
+fresh-stat-error<TAB>remote-path
 ```
 
 Each completed operation prints an indexed record:
 `ok<TAB>line<TAB>write<TAB>count`, `ok<TAB>line<TAB>read<TAB>count`, or
-`ok<TAB>line<TAB>read-hex<TAB>count<TAB>payload-hex`. The line number is the
-source line in the script file, so wrapper errors can point back to the exact
-operation while preserving one 9P session for session-private state.
+`ok<TAB>line<TAB>read-hex<TAB>count<TAB>payload-hex`. `fresh-stat-error`
+opens a separate fresh attach to the same target and succeeds only if statting
+the path fails, which lets wrappers prove session-private paths are not visible
+outside the still-open script session. The line number is the source line in
+the script file, so wrapper errors can point back to the exact operation while
+preserving one 9P session for session-private state.
 
 ## Development
 

@@ -42,6 +42,12 @@ interpret the indexed records above it.
 reads and writes, while output remains tab-record based and local-file payloads
 avoid argv/stdout payload limits.
 
+The operation set also includes `fresh-stat-error`. That operation opens a
+second fresh attach to the same target while the original script session stays
+open, and it succeeds only when statting the named path fails in the fresh
+session. This is still generic 9P client behavior: it lets wrappers prove
+session-local namespace state without teaching `r9p` any backend policy.
+
 ## Open Questions
 
 - Whether a later resident client service should use the same operation grammar

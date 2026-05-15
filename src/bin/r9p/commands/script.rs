@@ -36,12 +36,17 @@ pub(crate) fn machine_script_cmd(config: Config, args: Vec<String>) -> CliResult
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        run_script_line(&mut client, line_number, &line)?;
+        run_script_line(&target, &mut client, line_number, &line)?;
     }
     Ok(())
 }
 
-fn run_script_line(client: &mut BoxedClient, line_number: usize, line: &str) -> CliResult<()> {
+fn run_script_line(
+    target: &Target,
+    client: &mut BoxedClient,
+    line_number: usize,
+    line: &str,
+) -> CliResult<()> {
     let fields = line.split('\t').collect::<Vec<_>>();
     match fields.as_slice() {
         ["write-hex", path, offset, payload_hex] => {
@@ -85,6 +90,9 @@ fn run_script_line(client: &mut BoxedClient, line_number: usize, line: &str) -> 
                 hex_encode(&data)
             );
         }
+        ["fresh-stat-error", path] => {
+            fresh_stat_error(target, path, line_number)?;
+        }
         [op, ..] => {
             return Err(cli_error(format!(
                 "script line {line_number}: unknown operation {op}"
@@ -93,6 +101,27 @@ fn run_script_line(client: &mut BoxedClient, line_number: usize, line: &str) -> 
         [] => {}
     }
     Ok(())
+}
+
+fn fresh_stat_error(target: &Target, path: &str, line_number: usize) -> CliResult<()> {
+    let (mut fresh, _) = connect_path(target)?;
+    let result = match fresh.walk_path(path) {
+        Ok(fid) => {
+            let stat = fresh.stat(fid).map(|_| ());
+            let _ = fresh.clunk(fid);
+            stat
+        }
+        Err(error) => Err(error),
+    };
+    match result {
+        Ok(()) => Err(cli_error(format!(
+            "script line {line_number}: fresh stat unexpectedly succeeded for {path}"
+        ))),
+        Err(_) => {
+            println!("ok\t{line_number}\tfresh-stat-error");
+            Ok(())
+        }
+    }
 }
 
 fn walk_open(client: &mut BoxedClient, path: &str, mode: u8) -> CliResult<Fid> {

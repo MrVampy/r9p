@@ -62,6 +62,8 @@ impl SharedFile {
 struct MachineTree {
     root: Qid,
     data_qid: Qid,
+    private_qid: Qid,
+    private_visible: bool,
     file: SharedFile,
 }
 
@@ -70,6 +72,8 @@ impl MachineTree {
         Self {
             root: Qid::dir(1),
             data_qid: Qid::file(2),
+            private_qid: Qid::file(3),
+            private_visible: false,
             file,
         }
     }
@@ -88,10 +92,12 @@ impl FileTree for MachineTree {
         start: Qid,
         names: &[Vec<u8>],
     ) -> R9pResult<Vec<Qid>> {
-        if start == self.root && names == [b"data".to_vec()] {
-            Ok(vec![self.data_qid])
-        } else {
-            Ok(Vec::new())
+        match names {
+            [name] if start == self.root && name == b"data" => Ok(vec![self.data_qid]),
+            [name] if start == self.root && name == b"private" && self.private_visible => {
+                Ok(vec![self.private_qid])
+            }
+            _ => Ok(Vec::new()),
         }
     }
 
@@ -108,6 +114,16 @@ impl FileTree for MachineTree {
     }
 
     fn read(&mut self, _fid: Fid, qid: Qid, offset: u64, count: u32) -> R9pResult<ReadData> {
+        if qid == self.private_qid {
+            let data = b"priv";
+            let start = usize::try_from(offset)
+                .map_err(|_| R9pError::from("read offset too large"))?
+                .min(data.len());
+            let end = start
+                .saturating_add(usize::try_from(count).unwrap_or(usize::MAX))
+                .min(data.len());
+            return Ok(ReadData::Bytes(data[start..end].to_vec()));
+        }
         if qid != self.data_qid {
             return Ok(ReadData::Directory(Vec::new()));
         }
@@ -130,6 +146,7 @@ impl FileTree for MachineTree {
         if qid != self.data_qid {
             return Err(R9pError::from("not writable"));
         }
+        self.private_visible = true;
         let start = usize::try_from(offset).map_err(|_| R9pError::from("offset too large"))?;
         let end = start
             .checked_add(data.len())
@@ -150,7 +167,11 @@ impl FileTree for MachineTree {
     }
 
     fn stat(&mut self, qid: Qid) -> R9pResult<Stat> {
-        if qid == self.data_qid {
+        if qid == self.private_qid {
+            let mut stat = Stat::new("private", qid, 0o600);
+            stat.length = 4;
+            Ok(stat)
+        } else if qid == self.data_qid {
             let mut stat = Stat::new("data", qid, 0o600);
             stat.length = u64::try_from(
                 self.file
@@ -271,12 +292,12 @@ fn machine_script_runs_multiple_operations_on_one_session() -> TestResult<()> {
     fs::write(
         &script_path,
         format!(
-            "# comment lines are ignored\nwrite-hex\t/data\t2\t5859\nread-hex\t/data\t0\t8\nwrite-from\t/data\t3\t{input_arg}\nread-to\t/data\t{output_arg}\n"
+            "# comment lines are ignored\nwrite-hex\t/data\t2\t5859\nread-hex\t/private\t0\t4\nfresh-stat-error\t/private\nread-hex\t/data\t0\t8\nwrite-from\t/data\t3\t{input_arg}\nread-to\t/data\t{output_arg}\n"
         ),
     )?;
     let script_arg = script_path.to_string_lossy().into_owned();
     let shared = SharedFile::new(b"abcdef".to_vec());
-    let (address, handle) = start_server(shared.clone())?;
+    let (address, handle) = start_server_connections(shared.clone(), 2)?;
 
     let output = run_machine(&address, &["script", &script_arg], None)?;
     let _ = fs::remove_file(&input_path);
@@ -284,11 +305,11 @@ fn machine_script_runs_multiple_operations_on_one_session() -> TestResult<()> {
     assert_success(&output)?;
     assert_stdout(
         &output,
-        "ok\t2\twrite\t2\nok\t3\tread-hex\t6\t616258596566\nok\t4\twrite\t5\nok\t5\tread\t8\n",
+        "ok\t2\twrite\t2\nok\t3\tread-hex\t4\t70726976\nok\t4\tfresh-stat-error\nok\t5\tread-hex\t6\t616258596566\nok\t6\twrite\t5\nok\t7\tread\t8\n",
     )?;
-    if shared.attach_count() != 1 {
+    if shared.attach_count() != 2 {
         return Err(test_error(
-            "script did not preserve a single attached session",
+            "script did not keep exactly one primary attach plus one fresh check",
         ));
     }
     if shared.bytes()? != b"abX12345" {
@@ -303,24 +324,49 @@ fn machine_script_runs_multiple_operations_on_one_session() -> TestResult<()> {
 }
 
 fn start_server(file: SharedFile) -> TestResult<(String, JoinHandle<Result<(), String>>)> {
+    start_server_connections(file, 1)
+}
+
+fn start_server_connections(
+    file: SharedFile,
+    connections: usize,
+) -> TestResult<(String, JoinHandle<Result<(), String>>)> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let address = listener.local_addr()?.to_string();
     let handle = thread::spawn(move || -> Result<(), String> {
-        let (mut stream, _) = listener
-            .accept()
-            .map_err(|error| format!("accept: {error}"))?;
-        let mut server = Server::new(MachineTree::new(file));
-        while let Some(message) = read_tmessage(&mut stream)? {
-            let reply = server.handle(message);
-            let frame = codec::encode_rmessage_checked(&reply, server.session().msize())
-                .map_err(|error| format!("encode reply: {error}"))?;
-            stream
-                .write_all(&frame)
-                .map_err(|error| format!("write reply: {error}"))?;
+        let mut workers = Vec::new();
+        for _ in 0..connections {
+            let (stream, _) = listener
+                .accept()
+                .map_err(|error| format!("accept: {error}"))?;
+            let connection_file = file.clone();
+            workers.push(thread::spawn(move || {
+                serve_connection(stream, connection_file)
+            }));
+        }
+        for worker in workers {
+            match worker.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => return Err(error),
+                Err(_) => return Err("connection worker panicked".to_string()),
+            }
         }
         Ok(())
     });
     Ok((address, handle))
+}
+
+fn serve_connection(mut stream: TcpStream, file: SharedFile) -> Result<(), String> {
+    let mut server = Server::new(MachineTree::new(file));
+    while let Some(message) = read_tmessage(&mut stream)? {
+        let reply = server.handle(message);
+        let frame = codec::encode_rmessage_checked(&reply, server.session().msize())
+            .map_err(|error| format!("encode reply: {error}"))?;
+        stream
+            .write_all(&frame)
+            .map_err(|error| format!("write reply: {error}"))?;
+    }
+    Ok(())
 }
 
 fn read_tmessage(stream: &mut TcpStream) -> Result<Option<TMessage>, String> {

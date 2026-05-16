@@ -184,6 +184,43 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn read_timeout_drops_waiter_without_poisoning_later_calls() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .map_err(|error| io_error("bind test listener", error))?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| io_error("read listener address", error))?;
+        let server = thread::spawn(move || {
+            let (stream, _) = listener
+                .accept()
+                .map_err(|error| io_error("accept test connection", error))?;
+            scripted_read_timeout_server(stream)
+        });
+        let client = MultiplexedClient::connect(
+            TcpStream::connect(address).map_err(|error| io_error("connect test client", error))?,
+            "glenda",
+            "",
+            8192,
+        )?;
+        let root = client.root_fid();
+
+        let error = client
+            .read_timeout(root, 0, 100, Duration::from_millis(20))
+            .expect_err("first read should time out");
+        assert!(String::from_utf8_lossy(error.message()).contains("9P response timeout"));
+
+        let stat = client.stat(root)?;
+        assert_eq!(stat.name, b"after-read-timeout".to_vec());
+        let stat = client.stat(root)?;
+        assert_eq!(stat.name, b"after-stale-read".to_vec());
+
+        server
+            .join()
+            .map_err(|_| Error::from("server worker panicked"))??;
+        Ok(())
+    }
+
     fn scripted_out_of_order_server(mut stream: TcpStream) -> Result<()> {
         handshake(&mut stream)?;
 
@@ -278,6 +315,55 @@ mod tests {
             &RMessage::Stat {
                 tag: stat_tag,
                 stat: Stat::new("after-timeout", Qid::file(8), 0o444),
+            },
+        )?;
+        Ok(())
+    }
+
+    fn scripted_read_timeout_server(mut stream: TcpStream) -> Result<()> {
+        handshake(&mut stream)?;
+        let timed_out_read = read_tmessage(&mut stream)?;
+        let timed_out_tag = match timed_out_read {
+            TMessage::Read { tag, .. } => tag,
+            other => {
+                return Err(Error::from(format!(
+                    "expected timed-out Tread, got {other:?}"
+                )))
+            }
+        };
+        let stat = read_tmessage(&mut stream)?;
+        let stat_tag = match stat {
+            TMessage::Stat { tag, .. } => tag,
+            other => return Err(Error::from(format!("expected Tstat, got {other:?}"))),
+        };
+        write_response(
+            &mut stream,
+            &RMessage::Stat {
+                tag: stat_tag,
+                stat: Stat::new("after-read-timeout", Qid::file(9), 0o444),
+            },
+        )?;
+        write_response(
+            &mut stream,
+            &RMessage::Read {
+                tag: timed_out_tag,
+                data: b"late read\n".to_vec(),
+            },
+        )?;
+        let stat = read_tmessage(&mut stream)?;
+        let stat_tag = match stat {
+            TMessage::Stat { tag, .. } => tag,
+            other => {
+                return Err(Error::from(format!(
+                    "expected follow-up Tstat, got {other:?}"
+                )))
+            }
+        };
+        write_response(
+            &mut stream,
+            &RMessage::Stat {
+                tag: stat_tag,
+                stat: Stat::new("after-stale-read", Qid::file(10), 0o444),
             },
         )?;
         Ok(())

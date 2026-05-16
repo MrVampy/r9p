@@ -371,11 +371,51 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
         }
     }
 
+    pub fn read_timeout(
+        &self,
+        fid: Fid,
+        offset: u64,
+        count: u32,
+        timeout: Duration,
+    ) -> Result<Vec<u8>> {
+        let count = codec::clamp_read_count(self.msize(), count);
+        let op = {
+            let mut protocol = lock(&self.inner.protocol, "lock 9P protocol client")?;
+            protocol.read(fid, offset, count).map_err(protocol_error)?
+        };
+        match self.call_op_timeout(op, timeout)? {
+            Completion::Read { data } => Ok(data),
+            other => Err(unexpected("Rread", other)),
+        }
+    }
+
     pub fn read_full(&self, fid: Fid, mut offset: u64, count: u32) -> Result<Vec<u8>> {
         let mut remaining = count;
         let mut out = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
         while remaining > 0 {
             let data = self.read(fid, offset, remaining)?;
+            if data.is_empty() {
+                break;
+            }
+            let n = u32::try_from(data.len()).map_err(|_| Error::from("read count overflow"))?;
+            out.extend(data);
+            offset = offset.saturating_add(u64::from(n));
+            remaining = remaining.saturating_sub(n);
+        }
+        Ok(out)
+    }
+
+    pub fn read_full_timeout(
+        &self,
+        fid: Fid,
+        mut offset: u64,
+        count: u32,
+        timeout: Duration,
+    ) -> Result<Vec<u8>> {
+        let mut remaining = count;
+        let mut out = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
+        while remaining > 0 {
+            let data = self.read_timeout(fid, offset, remaining, timeout)?;
             if data.is_empty() {
                 break;
             }

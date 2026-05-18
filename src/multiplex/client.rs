@@ -458,6 +458,43 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
         Ok(total)
     }
 
+    pub fn write_timeout(
+        &self,
+        fid: Fid,
+        mut offset: u64,
+        mut data: &[u8],
+        timeout: Duration,
+    ) -> Result<u32> {
+        if data.is_empty() {
+            return self.write_once_timeout(fid, offset, data, timeout);
+        }
+
+        let mut total = 0_u32;
+        let max = usize::try_from(self.max_write_payload()).unwrap_or(usize::MAX);
+        while !data.is_empty() {
+            let chunk_len = data.len().min(max);
+            let chunk = &data[..chunk_len];
+            let count = self.write_once_timeout(fid, offset, chunk, timeout)?;
+            if count == 0 {
+                return Err(Error::from("zero-length 9P write progress"));
+            }
+            let count_usize =
+                usize::try_from(count).map_err(|_| Error::from("write count overflow"))?;
+            if count_usize > chunk_len {
+                return Err(Error::from(
+                    "9P server reported more bytes written than requested",
+                ));
+            }
+            total = total.saturating_add(count);
+            offset = offset.saturating_add(u64::from(count));
+            data = &data[count_usize..];
+            if count_usize < chunk_len {
+                break;
+            }
+        }
+        Ok(total)
+    }
+
     pub fn write_once(&self, fid: Fid, offset: u64, data: &[u8]) -> Result<u32> {
         let op = {
             let mut protocol = lock(&self.inner.protocol, "lock 9P protocol client")?;
@@ -466,6 +503,25 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
                 .map_err(protocol_error)?
         };
         match self.call_op(op)? {
+            Completion::Write { count } => Ok(count),
+            other => Err(unexpected("Rwrite", other)),
+        }
+    }
+
+    pub fn write_once_timeout(
+        &self,
+        fid: Fid,
+        offset: u64,
+        data: &[u8],
+        timeout: Duration,
+    ) -> Result<u32> {
+        let op = {
+            let mut protocol = lock(&self.inner.protocol, "lock 9P protocol client")?;
+            protocol
+                .write(fid, offset, data.to_vec())
+                .map_err(protocol_error)?
+        };
+        match self.call_op_timeout(op, timeout)? {
             Completion::Write { count } => Ok(count),
             other => Err(unexpected("Rwrite", other)),
         }

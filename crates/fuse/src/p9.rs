@@ -1,16 +1,21 @@
 use crate::error::{p9_error, Error, Result};
 use r9p::{
     blocking,
+    client::{Client as ProtocolClient, Completion, Op},
     fid::Fid,
+    message::Tag,
     multiplex::{MultiplexTransport, MultiplexedClient},
     qid::Qid,
     stat::Stat,
 };
 use std::{
+    cell::Cell,
+    collections::{BTreeMap, BTreeSet},
     env,
     io::{self, Read, Write},
     net::{Shutdown, TcpStream},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -25,14 +30,33 @@ pub const OTRUNC: u8 = blocking::OTRUNC;
 #[derive(Clone)]
 pub struct Client {
     inner: MultiplexedClient<ClientStream>,
+    tracker: RequestTracker,
 }
 
 impl Client {
     pub fn connect(address: &str, uname: &str, aname: &str, msize: u32) -> Result<Self> {
+        Self::connect_with_tracker(address, uname, aname, msize, RequestTracker::default())
+    }
+
+    pub fn connect_with_tracker(
+        address: &str,
+        uname: &str,
+        aname: &str,
+        msize: u32,
+        tracker: RequestTracker,
+    ) -> Result<Self> {
         let stream = connect_stream(address)?;
         let inner =
             MultiplexedClient::connect(stream, uname, aname, msize).map_err(client_error)?;
-        Ok(Self { inner })
+        Ok(Self { inner, tracker })
+    }
+
+    pub fn tracker(&self) -> RequestTracker {
+        self.tracker.clone()
+    }
+
+    pub fn interrupt_fuse_unique(&self, unique: u64, timeout: Duration) -> Result<usize> {
+        self.tracker.interrupt(unique, timeout)
     }
 
     pub fn root_fid(&self) -> Fid {
@@ -60,9 +84,26 @@ impl Client {
     }
 
     pub fn walk_timeout(&self, fid: Fid, names: &[Vec<u8>], timeout: Duration) -> Result<Fid> {
-        self.inner
-            .walk_timeout(fid, names, timeout)
-            .map_err(client_error)
+        let names = names.to_vec();
+        let expected_len = names.len();
+        let mut newfid = None;
+        let completion = self.call_timeout(timeout, |protocol| {
+            let op = protocol.walk(fid, names)?;
+            newfid = op.fid;
+            Ok(op)
+        })?;
+        match completion {
+            Completion::Walk { qids } if qids.len() == expected_len => {
+                newfid.ok_or_else(|| Error::new(libc::EIO, "walk did not allocate a fid"))
+            }
+            Completion::Walk { .. } => {
+                if let Some(newfid) = newfid {
+                    let _ = self.clunk_timeout(newfid, timeout);
+                }
+                Err(Error::new(libc::ENOENT, "partial walk"))
+            }
+            other => Err(unexpected("Rwalk", other)),
+        }
     }
 
     pub fn open(&self, fid: Fid, mode: u8) -> Result<Qid> {
@@ -70,9 +111,10 @@ impl Client {
     }
 
     pub fn open_timeout(&self, fid: Fid, mode: u8, timeout: Duration) -> Result<Qid> {
-        self.inner
-            .open_timeout(fid, mode, timeout)
-            .map_err(client_error)
+        match self.call_timeout(timeout, |protocol| protocol.open(fid, mode))? {
+            Completion::Open { qid, .. } => Ok(qid),
+            other => Err(unexpected("Ropen", other)),
+        }
     }
 
     pub fn create_timeout(
@@ -83,9 +125,21 @@ impl Client {
         mode: u8,
         timeout: Duration,
     ) -> Result<(Fid, Qid)> {
-        self.inner
-            .create_timeout(parent_fid, name, perm, mode, timeout)
-            .map_err(client_error)
+        let fid = self.clone_fid_timeout(parent_fid, timeout)?;
+        let reply = self.call_timeout(timeout, |protocol| {
+            protocol.create(fid, name.to_vec(), perm, mode)
+        });
+        match reply {
+            Ok(Completion::Create { qid, .. }) => Ok((fid, qid)),
+            Ok(other) => {
+                let _ = self.clunk_timeout(fid, timeout);
+                Err(unexpected("Rcreate", other))
+            }
+            Err(error) => {
+                let _ = self.clunk_timeout(fid, timeout);
+                Err(error)
+            }
+        }
     }
 
     pub fn read_timeout(
@@ -95,9 +149,11 @@ impl Client {
         count: u32,
         timeout: Duration,
     ) -> Result<Vec<u8>> {
-        self.inner
-            .read_timeout(fid, offset, count, timeout)
-            .map_err(client_error)
+        let count = r9p::codec::clamp_read_count(self.inner.msize(), count);
+        match self.call_timeout(timeout, |protocol| protocol.read(fid, offset, count))? {
+            Completion::Read { data } => Ok(data),
+            other => Err(unexpected("Rread", other)),
+        }
     }
 
     pub fn read_full_timeout(
@@ -119,9 +175,51 @@ impl Client {
         data: &[u8],
         timeout: Duration,
     ) -> Result<u32> {
-        self.inner
-            .write_timeout(fid, offset, data, timeout)
-            .map_err(client_error)
+        let mut data = data;
+        if data.is_empty() {
+            return self.write_once_timeout(fid, offset, data, timeout);
+        }
+        let mut offset = offset;
+        let mut total = 0_u32;
+        let max = usize::try_from(self.inner.max_write_payload()).unwrap_or(usize::MAX);
+        while !data.is_empty() {
+            let chunk_len = data.len().min(max);
+            let chunk = &data[..chunk_len];
+            let count = self.write_once_timeout(fid, offset, chunk, timeout)?;
+            if count == 0 {
+                return Err(Error::new(libc::EIO, "zero-length 9P write progress"));
+            }
+            let count_usize = usize::try_from(count)
+                .map_err(|_| Error::new(libc::EOVERFLOW, "write count overflow"))?;
+            if count_usize > chunk_len {
+                return Err(Error::new(
+                    libc::EPROTO,
+                    "9P server reported more bytes written than requested",
+                ));
+            }
+            total = total.saturating_add(count);
+            offset = offset.saturating_add(u64::from(count));
+            data = &data[count_usize..];
+            if count_usize < chunk_len {
+                break;
+            }
+        }
+        Ok(total)
+    }
+
+    fn write_once_timeout(
+        &self,
+        fid: Fid,
+        offset: u64,
+        data: &[u8],
+        timeout: Duration,
+    ) -> Result<u32> {
+        match self.call_timeout(timeout, |protocol| {
+            protocol.write(fid, offset, data.to_vec())
+        })? {
+            Completion::Write { count } => Ok(count),
+            other => Err(unexpected("Rwrite", other)),
+        }
     }
 
     pub fn clunk(&self, fid: Fid) -> Result<()> {
@@ -129,7 +227,10 @@ impl Client {
     }
 
     pub fn clunk_timeout(&self, fid: Fid, timeout: Duration) -> Result<()> {
-        self.inner.clunk_timeout(fid, timeout).map_err(client_error)
+        match self.call_timeout(timeout, |protocol| protocol.clunk(fid))? {
+            Completion::Clunk => Ok(()),
+            other => Err(unexpected("Rclunk", other)),
+        }
     }
 
     pub fn remove(&self, fid: Fid) -> Result<()> {
@@ -141,12 +242,158 @@ impl Client {
     }
 
     pub fn stat_timeout(&self, fid: Fid, timeout: Duration) -> Result<Stat> {
-        self.inner.stat_timeout(fid, timeout).map_err(client_error)
+        match self.call_timeout(timeout, |protocol| protocol.stat(fid))? {
+            Completion::Stat { stat } => Ok(stat),
+            other => Err(unexpected("Rstat", other)),
+        }
     }
 
     pub fn wstat(&self, fid: Fid, stat: Stat) -> Result<()> {
         self.inner.wstat(fid, stat).map_err(client_error)
     }
+
+    fn call_timeout<F>(&self, timeout: Duration, build: F) -> Result<Completion>
+    where
+        F: FnOnce(&mut ProtocolClient) -> r9p::Result<Op>,
+    {
+        let inner = self.inner.clone();
+        let tracked_inner = inner.clone();
+        let tracker = self.tracker.clone();
+        inner
+            .call_timeout(build, timeout, move |tag| {
+                tracker.track_current(tag, tracked_inner.clone())
+            })
+            .map_err(client_error)
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct RequestTracker {
+    inner: Arc<Mutex<RequestTrackerState>>,
+}
+
+#[derive(Default)]
+struct RequestTrackerState {
+    active: BTreeMap<u64, Vec<TrackedRequest>>,
+    interrupted: BTreeSet<u64>,
+}
+
+#[derive(Clone)]
+struct TrackedRequest {
+    tag: Tag,
+    client: MultiplexedClient<ClientStream>,
+}
+
+struct ActiveRequestGuard {
+    tracker: RequestTracker,
+    unique: Option<u64>,
+    tag: Tag,
+}
+
+impl RequestTracker {
+    fn track_current(
+        &self,
+        tag: Tag,
+        client: MultiplexedClient<ClientStream>,
+    ) -> ActiveRequestGuard {
+        let Some(unique) = current_fuse_unique() else {
+            return ActiveRequestGuard {
+                tracker: self.clone(),
+                unique: None,
+                tag,
+            };
+        };
+        let should_flush = {
+            let mut state = self.inner.lock().ok();
+            if let Some(state) = state.as_mut() {
+                state
+                    .active
+                    .entry(unique)
+                    .or_default()
+                    .push(TrackedRequest {
+                        tag,
+                        client: client.clone(),
+                    });
+                state.interrupted.contains(&unique)
+            } else {
+                false
+            }
+        };
+        if should_flush {
+            let _ = client.flush_tag_timeout(tag, Duration::from_millis(250));
+        }
+        ActiveRequestGuard {
+            tracker: self.clone(),
+            unique: Some(unique),
+            tag,
+        }
+    }
+
+    fn interrupt(&self, unique: u64, timeout: Duration) -> Result<usize> {
+        let requests = {
+            let mut state = self
+                .inner
+                .lock()
+                .map_err(|_| Error::new(libc::EIO, "FUSE request tracker lock poisoned"))?;
+            state.interrupted.insert(unique);
+            state.active.get(&unique).cloned().unwrap_or_default()
+        };
+        for request in &requests {
+            let _ = request.client.flush_tag_timeout(request.tag, timeout);
+        }
+        Ok(requests.len())
+    }
+
+    fn finish(&self, unique: Option<u64>, tag: Tag) {
+        let Some(unique) = unique else {
+            return;
+        };
+        let Ok(mut state) = self.inner.lock() else {
+            return;
+        };
+        let remove_unique = if let Some(requests) = state.active.get_mut(&unique) {
+            requests.retain(|request| request.tag != tag);
+            requests.is_empty()
+        } else {
+            true
+        };
+        if remove_unique {
+            state.active.remove(&unique);
+            state.interrupted.remove(&unique);
+        }
+    }
+}
+
+impl Drop for ActiveRequestGuard {
+    fn drop(&mut self) {
+        self.tracker.finish(self.unique, self.tag);
+    }
+}
+
+thread_local! {
+    static CURRENT_FUSE_UNIQUE: Cell<Option<u64>> = const { Cell::new(None) };
+}
+
+pub fn with_fuse_unique<T>(unique: u64, run: impl FnOnce() -> T) -> T {
+    struct Guard {
+        previous: Option<u64>,
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            CURRENT_FUSE_UNIQUE.with(|cell| cell.set(self.previous));
+        }
+    }
+
+    CURRENT_FUSE_UNIQUE.with(|cell| {
+        let previous = cell.replace(Some(unique));
+        let _guard = Guard { previous };
+        run()
+    })
+}
+
+fn current_fuse_unique() -> Option<u64> {
+    CURRENT_FUSE_UNIQUE.with(Cell::get)
 }
 
 enum ClientStream {
@@ -280,6 +527,10 @@ fn connect_unix_stream(path: &Path) -> Result<ClientStream> {
 pub fn parse_tcp_address(address: &str) -> Result<String> {
     blocking::parse_tcp_address(address)
         .map_err(|error| Error::new(libc::EINVAL, error.display_lossy().to_string()))
+}
+
+fn unexpected(expected: &str, got: Completion) -> Error {
+    Error::new(libc::EPROTO, format!("expected {expected}, got {got:?}"))
 }
 
 fn client_error(error: r9p::Error) -> Error {

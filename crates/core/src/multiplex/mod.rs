@@ -282,6 +282,7 @@ mod tests {
                 )))
             }
         };
+        read_flush_for(&mut stream, timed_out_tag)?;
         let read = read_tmessage(&mut stream)?;
         let read_tag = match read {
             TMessage::Read { tag, .. } => tag,
@@ -331,6 +332,7 @@ mod tests {
                 )))
             }
         };
+        read_flush_for(&mut stream, timed_out_tag)?;
         let stat = read_tmessage(&mut stream)?;
         let stat_tag = match stat {
             TMessage::Stat { tag, .. } => tag,
@@ -367,6 +369,15 @@ mod tests {
             },
         )?;
         Ok(())
+    }
+
+    fn read_flush_for(stream: &mut TcpStream, oldtag: crate::message::Tag) -> Result<()> {
+        let flush = read_tmessage(stream)?;
+        let flush_tag = match flush {
+            TMessage::Flush { tag, oldtag: seen } if seen == oldtag => tag,
+            other => return Err(Error::from(format!("expected Tflush, got {other:?}"))),
+        };
+        write_response(stream, &RMessage::Flush { tag: flush_tag })
     }
 
     fn handshake(stream: &mut TcpStream) -> Result<()> {

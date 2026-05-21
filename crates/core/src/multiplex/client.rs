@@ -211,11 +211,23 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
     }
 
     pub fn flush_tag(&self, oldtag: Tag) -> Result<()> {
+        self.flush_tag_with(oldtag, None)
+    }
+
+    pub fn flush_tag_timeout(&self, oldtag: Tag, timeout: Duration) -> Result<()> {
+        self.flush_tag_with(oldtag, Some(timeout))
+    }
+
+    fn flush_tag_with(&self, oldtag: Tag, timeout: Option<Duration>) -> Result<()> {
         let op = {
             let mut protocol = lock(&self.inner.protocol, "lock 9P protocol client")?;
             protocol.flush(oldtag).map_err(protocol_error)?
         };
-        match self.call_op(op)? {
+        let completion = match timeout {
+            Some(timeout) => self.call_op_timeout_inner(op, timeout, |_| {}, false)?,
+            None => self.call_op(op)?,
+        };
+        match completion {
             Completion::Flush => {
                 self.cancel_waiter(oldtag, Error::from("9P request flushed"));
                 Ok(())
@@ -605,11 +617,45 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
     }
 
     fn call_op_timeout(&self, op: Op, timeout: Duration) -> Result<Completion> {
+        self.call_op_timeout_inner(op, timeout, |_| {}, true)
+    }
+
+    pub fn call_timeout<F, G, H>(
+        &self,
+        build: F,
+        timeout: Duration,
+        observe: G,
+    ) -> Result<Completion>
+    where
+        F: FnOnce(&mut ProtocolClient) -> Result<Op>,
+        G: FnOnce(Tag) -> H,
+    {
+        let op = {
+            let mut protocol = lock(&self.inner.protocol, "lock 9P protocol client")?;
+            build(&mut protocol).map_err(protocol_error)?
+        };
+        self.call_op_timeout_inner(op, timeout, observe, true)
+    }
+
+    fn call_op_timeout_inner<G, H>(
+        &self,
+        op: Op,
+        timeout: Duration,
+        observe: G,
+        flush_on_timeout: bool,
+    ) -> Result<Completion>
+    where
+        G: FnOnce(Tag) -> H,
+    {
         let expected_tag = op.tag;
         let pending = self.submit_op(op)?;
+        let _guard = observe(expected_tag);
         let response = match pending.receiver.recv_timeout(timeout) {
             Ok(response) => response?,
             Err(RecvTimeoutError::Timeout) => {
+                if flush_on_timeout {
+                    let _ = self.flush_tag_timeout(expected_tag, bounded_flush_timeout(timeout));
+                }
                 self.cancel_waiter(
                     expected_tag,
                     Error::from(format!(
@@ -643,6 +689,10 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
             let _ = sender.send(Err(error));
         }
     }
+}
+
+fn bounded_flush_timeout(timeout: Duration) -> Duration {
+    timeout.min(Duration::from_millis(250))
 }
 
 impl<S: MultiplexTransport> Drop for MultiplexedInner<S> {

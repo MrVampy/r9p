@@ -3,23 +3,23 @@
 use super::{
     reply::{read_struct, reply_bytes, reply_empty, reply_error},
     wire::{
-        FuseInHeader, FuseInitIn, FuseInitOut, DEFAULT_MAX_WRITE, FUSE_ACCESS, FUSE_ASYNC_READ,
-        FUSE_ATOMIC_O_TRUNC, FUSE_AUTO_INVAL_DATA, FUSE_BATCH_FORGET, FUSE_BIG_WRITES,
-        FUSE_BUFFER_SIZE, FUSE_COMPAT_22_INIT_OUT_SIZE, FUSE_COMPAT_INIT_OUT_SIZE, FUSE_CREATE,
-        FUSE_DESTROY, FUSE_DONT_MASK, FUSE_DO_READDIRPLUS, FUSE_EXPORT_SUPPORT, FUSE_FLUSH,
-        FUSE_FORGET, FUSE_FSYNC, FUSE_FSYNCDIR, FUSE_GETATTR, FUSE_GETLK, FUSE_GETXATTR, FUSE_INIT,
-        FUSE_KERNEL_MINOR_VERSION, FUSE_KERNEL_VERSION, FUSE_LINK, FUSE_LISTXATTR, FUSE_LOOKUP,
-        FUSE_MKDIR, FUSE_MKNOD, FUSE_OPEN, FUSE_OPENDIR, FUSE_PARALLEL_DIROPS, FUSE_POLL,
-        FUSE_READ, FUSE_READDIR, FUSE_READDIRPLUS, FUSE_RELEASE, FUSE_RELEASEDIR, FUSE_REMOVEXATTR,
-        FUSE_RENAME, FUSE_RMDIR, FUSE_SETATTR, FUSE_SETLK, FUSE_SETLKW, FUSE_SETXATTR, FUSE_STATFS,
-        FUSE_SYMLINK, FUSE_UNLINK, FUSE_WRITE,
+        FuseInHeader, FuseInitIn, FuseInitOut, FuseInterruptIn, DEFAULT_MAX_WRITE, FUSE_ACCESS,
+        FUSE_ASYNC_READ, FUSE_ATOMIC_O_TRUNC, FUSE_AUTO_INVAL_DATA, FUSE_BATCH_FORGET,
+        FUSE_BIG_WRITES, FUSE_BUFFER_SIZE, FUSE_COMPAT_22_INIT_OUT_SIZE, FUSE_COMPAT_INIT_OUT_SIZE,
+        FUSE_CREATE, FUSE_DESTROY, FUSE_DONT_MASK, FUSE_DO_READDIRPLUS, FUSE_EXPORT_SUPPORT,
+        FUSE_FLUSH, FUSE_FORGET, FUSE_FSYNC, FUSE_FSYNCDIR, FUSE_GETATTR, FUSE_GETLK,
+        FUSE_GETXATTR, FUSE_INIT, FUSE_INTERRUPT, FUSE_KERNEL_MINOR_VERSION, FUSE_KERNEL_VERSION,
+        FUSE_LINK, FUSE_LISTXATTR, FUSE_LOOKUP, FUSE_MKDIR, FUSE_MKNOD, FUSE_OPEN, FUSE_OPENDIR,
+        FUSE_PARALLEL_DIROPS, FUSE_POLL, FUSE_READ, FUSE_READDIR, FUSE_READDIRPLUS, FUSE_RELEASE,
+        FUSE_RELEASEDIR, FUSE_REMOVEXATTR, FUSE_RENAME, FUSE_RMDIR, FUSE_SETATTR, FUSE_SETLK,
+        FUSE_SETLKW, FUSE_SETXATTR, FUSE_STATFS, FUSE_SYMLINK, FUSE_UNLINK, FUSE_WRITE,
     },
     R9pFuse,
 };
 use crate::{
     error::{Error, Result},
     node::{NodeTable, ROOT_NODEID},
-    p9::Client,
+    p9::{with_fuse_unique, Client},
 };
 use std::{
     fs::File,
@@ -113,6 +113,7 @@ impl R9pFuse {
             FUSE_FLUSH | FUSE_FSYNC | FUSE_FSYNCDIR | FUSE_ACCESS => {
                 reply_empty(file, header.unique)
             }
+            FUSE_INTERRUPT => self.interrupt(header, payload),
             FUSE_STATFS => self.statfs(file, header),
             FUSE_DESTROY => Ok(()),
             FUSE_POLL => self.poll(file, header, payload),
@@ -129,6 +130,26 @@ impl R9pFuse {
                 );
             }
             reply_error(file, header.unique, error.errno)?;
+        }
+        Ok(())
+    }
+
+    fn interrupt(&mut self, header: FuseInHeader, payload: &[u8]) -> Result<()> {
+        let Ok(input) = read_struct::<FuseInterruptIn>(payload) else {
+            return Ok(());
+        };
+        let flushed = self
+            .client
+            .snapshot()
+            .and_then(|client| {
+                client.interrupt_fuse_unique(input.unique, self.config.request_timeout)
+            })
+            .unwrap_or(0);
+        if self.config.debug {
+            eprintln!(
+                "r9p mount: interrupt unique={} target={} flushed={}",
+                header.unique, input.unique, flushed
+            );
         }
         Ok(())
     }
@@ -178,11 +199,13 @@ impl R9pFuse {
         if self.config.debug {
             eprintln!("r9p mount: reconnecting to {}", self.config.address);
         }
-        let mut client = Client::connect(
+        let tracker = self.client.snapshot()?.tracker();
+        let mut client = Client::connect_with_tracker(
             &self.config.address,
             &self.config.uname,
             &self.config.aname,
             self.config.msize,
+            tracker,
         )?;
         {
             let mut nodes = self.nodes()?;
@@ -300,7 +323,9 @@ fn fuse_worker_loop(mut fs: R9pFuse, receiver: Arc<Mutex<Receiver<FuseJob>>>) {
 fn dispatch_fuse_job(fs: &mut R9pFuse, mut job: FuseJob) {
     let header = job.header;
     let result = panic::catch_unwind(AssertUnwindSafe(|| {
-        fs.dispatch(&mut job.writer, header, &job.payload)
+        with_fuse_unique(header.unique, || {
+            fs.dispatch(&mut job.writer, header, &job.payload)
+        })
     }));
     match result {
         Ok(Ok(())) => {}

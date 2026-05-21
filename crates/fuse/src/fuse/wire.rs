@@ -38,6 +38,7 @@ pub(super) const FUSE_SETLK: u32 = 32;
 pub(super) const FUSE_SETLKW: u32 = 33;
 pub(super) const FUSE_ACCESS: u32 = 34;
 pub(super) const FUSE_CREATE: u32 = 35;
+pub(super) const FUSE_INTERRUPT: u32 = 36;
 pub(super) const FUSE_DESTROY: u32 = 38;
 pub(super) const FUSE_POLL: u32 = 40;
 pub(super) const FUSE_BATCH_FORGET: u32 = 42;
@@ -265,6 +266,12 @@ pub(super) struct FuseWriteIn {
 pub(super) struct FuseWriteOut {
     pub(super) size: u32,
     pub(super) padding: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(super) struct FuseInterruptIn {
+    pub(super) unique: u64,
 }
 
 #[repr(C)]

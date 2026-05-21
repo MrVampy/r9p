@@ -4,30 +4,32 @@ This map defines the local sources agents should inspect before making source-sp
 
 ## r9p Source
 
-- `crates/r9p/src/codec.rs`
+- `crates/core/src/codec.rs`
   - 9P frame encoding/decoding.
   - Message-size math, read/write payload limits, stat-entry chunking.
-- `crates/r9p/src/message.rs`
+- `crates/core/src/message.rs`
   - T-message and R-message shape.
   - Tags, `NOTAG`, and protocol variants.
-- `crates/r9p/src/fid.rs`
+- `crates/core/src/fid.rs`
   - Fid state and `NOFID`.
-- `crates/r9p/src/flush.rs`
+- `crates/core/src/flush.rs`
   - Live-tag table, duplicate-tag rejection, flush and stale-completion behavior.
-- `crates/r9p/src/server/`
+- `crates/core/src/server/`
   - Generic file-tree trait, session state, open/read/write/stat/walk handling.
-- `crates/r9p/src/client.rs`
+- `crates/core/src/client.rs`
   - Runtime-neutral client operation builder and response admission.
-- `crates/r9p/src/multiplex/`
+- `crates/core/src/multiplex/`
   - Layered blocking transport facade for concurrent tagged client calls.
-- `crates/r9p/src/stat.rs`
+- `crates/core/src/stat.rs`
   - 9P stat record shape and mode helpers.
-- `crates/r9p/tests/memory_tree.rs`
+- `crates/core/tests/memory_tree.rs`
   - Minimal end-to-end server/client fixture.
-- `crates/r9p-cli/src/`
+- `crates/cli/src/`
   - The `r9p` binary and one-shot client command dispatch.
-- `crates/r9p-cli/tests/cli_machine.rs`
+- `crates/cli/tests/cli_machine.rs`
   - Machine-output and streaming command regression tests.
+- `crates/fuse/src/`
+  - Linux FUSE bridge over the `r9p` client primitives.
 
 Use these when the question is "what does `r9p` do now?"
 

@@ -1,7 +1,8 @@
 [workspace]
 members = [
-    "crates/r9p",
-    "crates/r9p-cli",
+    "crates/core",
+    "crates/cli",
+    "crates/fuse",
 ]
 resolver = "2"
 
@@ -17,4 +18,6 @@ todo = "deny"
 unwrap_used = "deny"
 
 [workspace.dependencies]
-r9p = { path = "crates/r9p" }
+fuse = { path = "crates/fuse" }
+libc = "=0.2.186"
+r9p = { path = "crates/core" }

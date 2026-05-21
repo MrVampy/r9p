@@ -1,5 +1,5 @@
 [package]
-name = "r9p-cli"
+name = "cli"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 version = "0.1.0"
@@ -16,4 +16,5 @@ name = "r9p"
 path = "src/main.rs"
 
 [dependencies]
+fuse.workspace = true
 r9p.workspace = true

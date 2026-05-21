@@ -34,6 +34,12 @@ serving, and `export` for serving plus descriptor emission. The reusable core
 crate remains broader than that binary and continues to serve embedded clients
 and servers.
 
+The FUSE mount adapter follows the mature libfuse/Linux concurrency shape: a
+bounded worker pool handles kernel requests, and the FUSE INIT reply advertises
+bounded `max_background` and congestion settings. This makes recursive walks
+and slow peer operations apply backpressure at the mount boundary instead of
+spawning unbounded per-request threads in the client process.
+
 ## Non-Goals
 
 - No Racme editor semantics.

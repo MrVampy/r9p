@@ -21,7 +21,7 @@ impl R9pFuse {
         let name = c_string(payload)?.to_vec();
         if self.config.debug {
             eprintln!(
-                "r9pfuse: lookup parent={} name={}",
+                "r9p mount: lookup parent={} name={}",
                 header.nodeid,
                 String::from_utf8_lossy(&name)
             );
@@ -55,11 +55,11 @@ impl R9pFuse {
             (nodeid, generation, inserted.clunk_fid)
         };
         if self.config.debug {
-            eprintln!("r9pfuse: lookup bound node {nodeid} with fid {fid}");
+            eprintln!("r9p mount: lookup bound node {nodeid} with fid {fid}");
         }
         if let Some(clunk_fid) = clunk_fid {
             if self.config.debug {
-                eprintln!("r9pfuse: lookup discarded fid {clunk_fid}");
+                eprintln!("r9p mount: lookup discarded fid {clunk_fid}");
             }
             let _ = client.clunk_timeout(clunk_fid, self.config.request_timeout);
         }

@@ -21,10 +21,21 @@ use crate::{
     node::{NodeTable, ROOT_NODEID},
     p9::Client,
 };
-use std::{fs::File, io::Read, mem::size_of, sync::MutexGuard, thread};
+use std::{
+    fs::File,
+    io::Read,
+    mem::size_of,
+    panic::{self, AssertUnwindSafe},
+    sync::{
+        mpsc::{sync_channel, Receiver, SyncSender},
+        Arc, Mutex, MutexGuard,
+    },
+    thread::{self, JoinHandle},
+};
 
 impl R9pFuse {
     pub(super) fn run(&self, file: &mut File) -> Result<()> {
+        let mut workers = WorkerPool::start(self)?;
         let mut buf = vec![0_u8; FUSE_BUFFER_SIZE];
         loop {
             let n = match file.read(&mut buf) {
@@ -43,7 +54,7 @@ impl R9pFuse {
             let payload = &buf[size_of::<FuseInHeader>()..n];
             if self.config.debug {
                 eprintln!(
-                    "r9pfuse: opcode={} unique={} nodeid={}",
+                    "r9p mount: opcode={} unique={} nodeid={}",
                     header.opcode, header.unique, header.nodeid
                 );
             }
@@ -53,16 +64,18 @@ impl R9pFuse {
                     .map_err(|error| Error::io("clone /dev/fuse writer", error))?;
                 let mut worker = self.clone();
                 worker.dispatch(&mut writer, header, payload)?;
+                workers.shutdown();
                 return Ok(());
             }
-            let mut writer = file
+            let writer = file
                 .try_clone()
                 .map_err(|error| Error::io("clone /dev/fuse writer", error))?;
             let payload = payload.to_vec();
-            let mut worker = self.clone();
-            thread::spawn(move || {
-                let _ = worker.dispatch(&mut writer, header, &payload);
-            });
+            workers.submit(FuseJob {
+                writer,
+                header,
+                payload,
+            })?;
         }
     }
 
@@ -106,9 +119,9 @@ impl R9pFuse {
             _ => reply_error(file, header.unique, libc::ENOSYS),
         };
         if let Err(error) = result {
-            if self.config.debug {
+            if self.config.debug || should_log_operation_error(&error) {
                 eprintln!(
-                    "r9pfuse: opcode={} unique={} error={} {}",
+                    "r9p mount: opcode={} unique={} error={} {}",
                     header.opcode,
                     header.unique,
                     error.errno,
@@ -148,8 +161,8 @@ impl R9pFuse {
             minor: negotiated_minor,
             max_readahead: input.max_readahead,
             flags: input.flags & supported,
-            max_background: 0,
-            congestion_threshold: 0,
+            max_background: self.config.max_background,
+            congestion_threshold: self.config.congestion_threshold,
             max_write: DEFAULT_MAX_WRITE,
             time_gran: 1,
             max_pages: 0,
@@ -163,7 +176,7 @@ impl R9pFuse {
 
     pub(super) fn reconnect(&mut self) -> Result<()> {
         if self.config.debug {
-            eprintln!("r9pfuse: reconnecting to {}", self.config.address);
+            eprintln!("r9p mount: reconnecting to {}", self.config.address);
         }
         let mut client = Client::connect(
             &self.config.address,
@@ -177,14 +190,14 @@ impl R9pFuse {
             self.client.replace(client)?;
         }
         if self.config.debug {
-            eprintln!("r9pfuse: reconnect complete");
+            eprintln!("r9p mount: reconnect complete");
         }
         Ok(())
     }
 
     pub(super) fn refresh_node(&mut self, nodeid: u64) -> Result<()> {
         if self.config.debug {
-            eprintln!("r9pfuse: refreshing path-backed node {nodeid}");
+            eprintln!("r9p mount: refreshing path-backed node {nodeid}");
         }
         if nodeid == ROOT_NODEID {
             let client = self.client.snapshot()?;
@@ -209,6 +222,119 @@ impl R9pFuse {
         }
         Ok(())
     }
+}
+
+struct FuseJob {
+    writer: File,
+    header: FuseInHeader,
+    payload: Vec<u8>,
+}
+
+struct WorkerPool {
+    sender: Option<SyncSender<FuseJob>>,
+    handles: Vec<JoinHandle<()>>,
+}
+
+impl WorkerPool {
+    fn start(fs: &R9pFuse) -> Result<Self> {
+        let worker_count = fs.config.max_workers.max(1);
+        let queue_depth = usize::from(fs.config.max_background).max(1);
+        let (sender, receiver) = sync_channel(queue_depth);
+        let receiver = Arc::new(Mutex::new(receiver));
+        let mut handles = Vec::with_capacity(worker_count);
+        for worker_index in 0..worker_count {
+            let receiver = Arc::clone(&receiver);
+            let worker = fs.clone();
+            let handle = thread::Builder::new()
+                .name(format!("r9p-fuse-{worker_index}"))
+                .spawn(move || fuse_worker_loop(worker, receiver))
+                .map_err(|error| Error::io("spawn FUSE worker", error))?;
+            handles.push(handle);
+        }
+        Ok(Self {
+            sender: Some(sender),
+            handles,
+        })
+    }
+
+    fn submit(&self, job: FuseJob) -> Result<()> {
+        let sender = self
+            .sender
+            .as_ref()
+            .ok_or_else(|| Error::new(libc::EIO, "FUSE worker queue is shut down"))?;
+        sender
+            .send(job)
+            .map_err(|_| Error::new(libc::EIO, "FUSE worker queue is closed"))
+    }
+
+    fn shutdown(&mut self) {
+        self.sender.take();
+        for handle in self.handles.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for WorkerPool {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+fn fuse_worker_loop(mut fs: R9pFuse, receiver: Arc<Mutex<Receiver<FuseJob>>>) {
+    loop {
+        let job = {
+            let receiver = match receiver.lock() {
+                Ok(receiver) => receiver,
+                Err(_) => return,
+            };
+            match receiver.recv() {
+                Ok(job) => job,
+                Err(_) => return,
+            }
+        };
+        dispatch_fuse_job(&mut fs, job);
+    }
+}
+
+fn dispatch_fuse_job(fs: &mut R9pFuse, mut job: FuseJob) {
+    let header = job.header;
+    let result = panic::catch_unwind(AssertUnwindSafe(|| {
+        fs.dispatch(&mut job.writer, header, &job.payload)
+    }));
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            eprintln!(
+                "r9p mount: opcode={} unique={} dispatch failure={} {}",
+                header.opcode,
+                header.unique,
+                error.errno,
+                error.message()
+            );
+            let _ = reply_error(&mut job.writer, header.unique, error.errno);
+        }
+        Err(_) => {
+            eprintln!(
+                "r9p mount: opcode={} unique={} worker panic",
+                header.opcode, header.unique
+            );
+            let _ = reply_error(&mut job.writer, header.unique, libc::EIO);
+        }
+    }
+}
+
+fn should_log_operation_error(error: &Error) -> bool {
+    matches!(
+        error.errno,
+        libc::EIO
+            | libc::EREMOTEIO
+            | libc::EPROTO
+            | libc::ETIMEDOUT
+            | libc::ENOTCONN
+            | libc::ECONNRESET
+            | libc::ECONNABORTED
+    )
 }
 
 fn init_out_size(minor: u32) -> usize {

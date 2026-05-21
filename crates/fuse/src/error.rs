@@ -70,9 +70,14 @@ const PLAN9_ERRNO_PATTERNS: &[(&str, i32)] = &[
     ("range", libc::ENOENT),
     ("operation not permitted", libc::EPERM),
     ("not permitted", libc::EPERM),
+    ("forbidden", libc::EACCES),
+    ("unauthorized", libc::EACCES),
     ("permission", libc::EACCES),
     ("access", libc::EACCES),
     ("denied", libc::EACCES),
+    ("not writable", libc::EACCES),
+    ("write not allowed", libc::EACCES),
+    ("not readable", libc::EACCES),
     ("already exists", libc::EEXIST),
     ("file exists", libc::EEXIST),
     (" exists", libc::EEXIST),
@@ -96,6 +101,11 @@ const PLAN9_ERRNO_PATTERNS: &[(&str, i32)] = &[
     ("interrupt", libc::EINTR),
     ("bad message", libc::EBADMSG),
     ("bad file", libc::EBADF),
+    ("preflight", libc::EINVAL),
+    ("missing_import_closure", libc::EINVAL),
+    ("missing import closure", libc::EINVAL),
+    ("rejected", libc::EINVAL),
+    ("decode", libc::EINVAL),
     ("invalid", libc::EINVAL),
     ("illegal", libc::EINVAL),
     ("argument", libc::EINVAL),
@@ -154,6 +164,23 @@ mod tests {
         assert_eq!(errno_for_9p_error("read only file system"), libc::EROFS);
         assert_eq!(errno_for_9p_error("timed out"), libc::ETIMEDOUT);
         assert_eq!(errno_for_9p_error("connection lost"), libc::ECONNABORTED);
+    }
+
+    #[test]
+    fn maps_vault_admission_and_reload_diagnostics() {
+        assert_eq!(
+            errno_for_9p_error(
+                "runtime_framework_reload_missing_import_closure:module:contracts@types"
+            ),
+            libc::EINVAL
+        );
+        assert_eq!(
+            errno_for_9p_error(
+                "framework_reload_automatic_participant_activation_preflight_failed"
+            ),
+            libc::EINVAL
+        );
+        assert_eq!(errno_for_9p_error("not writable"), libc::EACCES);
     }
 
     #[test]

@@ -32,6 +32,13 @@ use std::{
 use util::duration_parts;
 use wire::{FuseAttr, FuseAttrOut, FuseEntryOut};
 
+pub const DEFAULT_MAX_WORKERS: usize = 10;
+pub const DEFAULT_MAX_BACKGROUND: u16 = 12;
+
+pub fn default_congestion_threshold(max_background: u16) -> u16 {
+    ((u32::from(max_background) * 3 / 4).max(1)) as u16
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub address: String,
@@ -42,6 +49,9 @@ pub struct Config {
     pub attr_timeout: Duration,
     pub entry_timeout: Duration,
     pub request_timeout: Duration,
+    pub max_workers: usize,
+    pub max_background: u16,
+    pub congestion_threshold: u16,
     pub debug: bool,
 }
 
@@ -84,7 +94,8 @@ impl ClientSlot {
 }
 
 impl R9pFuse {
-    pub fn mount(config: Config) -> Result<()> {
+    pub fn mount(mut config: Config) -> Result<()> {
+        normalize_config(&mut config);
         let client = Client::connect(&config.address, &config.uname, &config.aname, config.msize)?;
         let root_stat = client.stat(client.root_fid())?;
         let nodes = Arc::new(Mutex::new(NodeTable::new(client.root_fid(), root_stat)));
@@ -144,7 +155,7 @@ impl R9pFuse {
         match (existing, needs_rebind) {
             (Some(fid), false) => {
                 if self.config.debug {
-                    eprintln!("r9pfuse: node {nodeid} uses cached fid {fid}");
+                    eprintln!("r9p mount: node {nodeid} uses cached fid {fid}");
                 }
                 Ok((client, fid))
             }
@@ -154,7 +165,7 @@ impl R9pFuse {
                 let stat = client.stat_timeout(fid, self.config.request_timeout)?;
                 let old_fid = self.nodes()?.replace_binding(nodeid, fid, stat)?;
                 if self.config.debug {
-                    eprintln!("r9pfuse: node {nodeid} rebound to fid {fid}");
+                    eprintln!("r9p mount: node {nodeid} rebound to fid {fid}");
                 }
                 if let Some(old_fid) = old_fid {
                     let _ = client.clunk_timeout(old_fid, self.config.request_timeout);
@@ -209,6 +220,18 @@ impl R9pFuse {
     }
 }
 
+fn normalize_config(config: &mut Config) {
+    if config.max_workers == 0 {
+        config.max_workers = DEFAULT_MAX_WORKERS;
+    }
+    if config.max_background == 0 {
+        config.max_background = DEFAULT_MAX_BACKGROUND;
+    }
+    if config.congestion_threshold == 0 || config.congestion_threshold > config.max_background {
+        config.congestion_threshold = default_congestion_threshold(config.max_background);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::ops::encode_dirents;
@@ -216,10 +239,15 @@ mod tests {
         flags_to_9p_mode, fuse_open_flags, is_namespace_shape_error, is_transport_error,
     };
     use super::wire::FOPEN_DIRECT_IO;
+    use super::{
+        default_congestion_threshold, normalize_config, Config, DEFAULT_MAX_BACKGROUND,
+        DEFAULT_MAX_WORKERS,
+    };
     use crate::error::Error;
     use crate::node::DirEntry;
     use crate::p9::{ORDWR, OREAD, OTRUNC, OWRITE};
     use r9p::{qid::Qid, stat::Stat};
+    use std::time::Duration;
 
     #[test]
     fn maps_truncating_write_flags_to_9p_mode() {
@@ -288,5 +316,38 @@ mod tests {
             libc::EPROTO,
             "9P client state: response tag mismatch",
         )));
+    }
+
+    #[test]
+    fn default_congestion_threshold_matches_kernel_ratio() {
+        assert_eq!(default_congestion_threshold(12), 9);
+        assert_eq!(default_congestion_threshold(1), 1);
+    }
+
+    #[test]
+    fn mount_config_normalization_keeps_worker_and_background_limits_nonzero() {
+        let mut config = Config {
+            address: "127.0.0.1:564".to_string(),
+            mountpoint: "/tmp/r9p-mount".to_string(),
+            uname: "codex".to_string(),
+            aname: "/".to_string(),
+            msize: 8192,
+            attr_timeout: Duration::ZERO,
+            entry_timeout: Duration::ZERO,
+            request_timeout: Duration::from_secs(5),
+            max_workers: 0,
+            max_background: 0,
+            congestion_threshold: 99,
+            debug: false,
+        };
+
+        normalize_config(&mut config);
+
+        assert_eq!(config.max_workers, DEFAULT_MAX_WORKERS);
+        assert_eq!(config.max_background, DEFAULT_MAX_BACKGROUND);
+        assert_eq!(
+            config.congestion_threshold,
+            default_congestion_threshold(DEFAULT_MAX_BACKGROUND)
+        );
     }
 }

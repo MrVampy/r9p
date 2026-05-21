@@ -56,7 +56,7 @@ r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] rm path...
 r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] create path...
 r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] mkdir path...
 r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] con [-r] path
-r9p mount [--uname uname] [--aname aname] [--attr-timeout seconds] [--entry-timeout seconds] [--request-timeout seconds] endpoint mountpoint
+r9p mount [--uname uname] [--aname aname] [--attr-timeout seconds] [--entry-timeout seconds] [--request-timeout seconds] [--max-workers count] [--max-background count] [--congestion-threshold count] endpoint mountpoint
 r9p serve [--bind address] root
 r9p export [--bind address] [--descriptor machine] [--descriptor-file path] [--auth boundary] root
 ```
@@ -69,6 +69,14 @@ always uses the noauth attach path today.
 
 The CLI is a blocking client facade over the reusable library. It is not the
 boundary of the library itself.
+
+`r9p mount` runs a bounded worker pool rather than spawning one OS thread per
+FUSE request. The defaults follow the conservative libfuse/Linux shape:
+`--max-workers 10`, `--max-background 12`, and a derived congestion threshold
+of 75 percent. These knobs are per mount and exist to let the kernel and the
+mount client apply backpressure during broad walks or slow peer operations
+instead of turning a recursive filesystem operation into an unbounded thread
+or memory spike.
 
 `--machine` keeps the same connection flags but emits tab-separated records
 with byte fields hex-encoded. It is intended for typed wrappers that need a

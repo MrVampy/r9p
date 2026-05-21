@@ -7,6 +7,9 @@ use crate::{
     target::Config,
 };
 
+const MAX_CONFIGURED_WORKERS: usize = 1024;
+const MAX_CONFIGURED_BACKGROUND: u16 = 1024;
+
 pub(crate) fn mount_cmd(global: Config, args: Vec<String>) -> CliResult<()> {
     let config = parse_mount_config(global, args)?;
     fuse::mount(config).map_err(|error| cli_error(format!("mount: {}", error.message())))
@@ -32,9 +35,13 @@ pub(crate) fn parse_mount_config(global: Config, args: Vec<String>) -> CliResult
         attr_timeout: Duration::ZERO,
         entry_timeout: Duration::ZERO,
         request_timeout: Duration::from_secs(5),
+        max_workers: fuse::DEFAULT_MAX_WORKERS,
+        max_background: fuse::DEFAULT_MAX_BACKGROUND,
+        congestion_threshold: fuse::default_congestion_threshold(fuse::DEFAULT_MAX_BACKGROUND),
         debug: false,
     };
 
+    let mut congestion_threshold_set = false;
     let mut positional = Vec::new();
     let mut index = 0_usize;
     while index < args.len() {
@@ -52,6 +59,38 @@ pub(crate) fn parse_mount_config(global: Config, args: Vec<String>) -> CliResult
                 index += 1;
                 config.request_timeout =
                     parse_duration(args.get(index), "missing request timeout")?;
+            }
+            "--max-workers" => {
+                index += 1;
+                config.max_workers = parse_usize_limit(
+                    args.get(index),
+                    "missing max workers",
+                    "max workers",
+                    MAX_CONFIGURED_WORKERS,
+                )?;
+            }
+            "--max-background" => {
+                index += 1;
+                config.max_background = parse_u16_limit(
+                    args.get(index),
+                    "missing max background",
+                    "max background",
+                    MAX_CONFIGURED_BACKGROUND,
+                )?;
+                if !congestion_threshold_set {
+                    config.congestion_threshold =
+                        fuse::default_congestion_threshold(config.max_background);
+                }
+            }
+            "--congestion-threshold" => {
+                index += 1;
+                config.congestion_threshold = parse_u16_limit(
+                    args.get(index),
+                    "missing congestion threshold",
+                    "congestion threshold",
+                    MAX_CONFIGURED_BACKGROUND,
+                )?;
+                congestion_threshold_set = true;
             }
             "-A" | "--aname" => {
                 index += 1;
@@ -91,6 +130,11 @@ pub(crate) fn parse_mount_config(global: Config, args: Vec<String>) -> CliResult
     if positional.len() != 2 {
         return Err(cli_error("expected endpoint and mountpoint"));
     }
+    if config.congestion_threshold > config.max_background {
+        return Err(cli_error(
+            "congestion threshold must be less than or equal to max background",
+        ));
+    }
     config.address = positional[0].clone();
     config.mountpoint = positional[1].clone();
     Ok(config)
@@ -107,9 +151,45 @@ fn parse_duration(value: Option<&String>, missing: &'static str) -> CliResult<Du
     Ok(Duration::from_secs_f64(seconds))
 }
 
+fn parse_usize_limit(
+    value: Option<&String>,
+    missing: &'static str,
+    label: &'static str,
+    limit: usize,
+) -> CliResult<usize> {
+    let value = value.ok_or_else(|| cli_error(missing))?;
+    let parsed = value
+        .parse::<usize>()
+        .map_err(|_| cli_error(format!("invalid {label} {value}")))?;
+    if parsed == 0 || parsed > limit {
+        return Err(cli_error(format!(
+            "{label} must be between 1 and {limit}: {value}"
+        )));
+    }
+    Ok(parsed)
+}
+
+fn parse_u16_limit(
+    value: Option<&String>,
+    missing: &'static str,
+    label: &'static str,
+    limit: u16,
+) -> CliResult<u16> {
+    let value = value.ok_or_else(|| cli_error(missing))?;
+    let parsed = value
+        .parse::<u16>()
+        .map_err(|_| cli_error(format!("invalid {label} {value}")))?;
+    if parsed == 0 || parsed > limit {
+        return Err(cli_error(format!(
+            "{label} must be between 1 and {limit}: {value}"
+        )));
+    }
+    Ok(parsed)
+}
+
 fn mount_usage(code: i32) -> ! {
     eprintln!(
-        "usage: r9p mount [--aname aname] [--uname uname] [--msize msize] [--attr-timeout seconds] [--entry-timeout seconds] [--request-timeout seconds] endpoint mountpoint"
+        "usage: r9p mount [--aname aname] [--uname uname] [--msize msize] [--attr-timeout seconds] [--entry-timeout seconds] [--request-timeout seconds] [--max-workers count] [--max-background count] [--congestion-threshold count] endpoint mountpoint"
     );
     std::process::exit(code);
 }
@@ -143,6 +223,12 @@ mod tests {
                 "/".to_string(),
                 "--request-timeout".to_string(),
                 "0.25".to_string(),
+                "--max-workers".to_string(),
+                "8".to_string(),
+                "--max-background".to_string(),
+                "24".to_string(),
+                "--congestion-threshold".to_string(),
+                "18".to_string(),
                 "--attr-timeout".to_string(),
                 "1.5".to_string(),
                 "--entry-timeout".to_string(),
@@ -162,7 +248,55 @@ mod tests {
         assert_eq!(config.request_timeout, Duration::from_millis(250));
         assert_eq!(config.attr_timeout, Duration::from_millis(1500));
         assert_eq!(config.entry_timeout, Duration::from_secs(2));
+        assert_eq!(config.max_workers, 8);
+        assert_eq!(config.max_background, 24);
+        assert_eq!(config.congestion_threshold, 18);
         assert_eq!(config.msize, 8192);
+    }
+
+    #[test]
+    fn derives_congestion_threshold_from_max_background() {
+        let config = parse_mount_config(
+            global(),
+            vec![
+                "--max-background".to_string(),
+                "16".to_string(),
+                "127.0.0.1:564".to_string(),
+                "/tmp/r9p-mount".to_string(),
+            ],
+        )
+        .expect("mount options should parse");
+
+        assert_eq!(config.max_background, 16);
+        assert_eq!(config.congestion_threshold, 12);
+    }
+
+    #[test]
+    fn rejects_unbounded_worker_and_queue_knobs() {
+        for args in [
+            vec![
+                "--max-workers".to_string(),
+                "0".to_string(),
+                "127.0.0.1:564".to_string(),
+                "/tmp/r9p-mount".to_string(),
+            ],
+            vec![
+                "--max-background".to_string(),
+                "2048".to_string(),
+                "127.0.0.1:564".to_string(),
+                "/tmp/r9p-mount".to_string(),
+            ],
+            vec![
+                "--max-background".to_string(),
+                "4".to_string(),
+                "--congestion-threshold".to_string(),
+                "8".to_string(),
+                "127.0.0.1:564".to_string(),
+                "/tmp/r9p-mount".to_string(),
+            ],
+        ] {
+            assert!(parse_mount_config(global(), args).is_err());
+        }
     }
 
     #[test]

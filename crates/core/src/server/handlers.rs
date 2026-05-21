@@ -147,18 +147,6 @@ impl<T> Server<T> {
                 {
                     return Err(Error::from_static(EFIDLIMIT));
                 }
-                if wnames.is_empty() {
-                    if newfid != fid {
-                        self.session.insert_new_fid(newfid, source)?;
-                    }
-                    return Ok(self.finish_with_reply(
-                        key,
-                        RMessage::Walk {
-                            tag,
-                            qids: Vec::new(),
-                        },
-                    ));
-                }
                 Ok(ServerEvent::Dispatch(ServerRequest {
                     key,
                     kind: ServerRequestKind::Walk {
@@ -303,16 +291,26 @@ impl<T> Server<T> {
                 ServerRequestKind::Walk {
                     fid,
                     newfid,
+                    start,
                     wnames,
-                    ..
                 },
                 ServerCompletion::Walk { qids },
             ) => {
-                if qids.is_empty() {
-                    return Err(Error::from_static(EEXIST));
-                }
                 if qids.len() > wnames.len() {
                     return Err(Error::from("walk returned too many qids"));
+                }
+                if wnames.is_empty() {
+                    if newfid != fid {
+                        self.session
+                            .insert_new_fid(*newfid, FidState::new(*start))?;
+                    }
+                    return Ok(RMessage::Walk {
+                        tag,
+                        qids: Vec::new(),
+                    });
+                }
+                if qids.is_empty() {
+                    return Err(Error::from_static(EEXIST));
                 }
                 if qids.len() == wnames.len() {
                     let qid = qids[qids.len() - 1];

@@ -2,6 +2,7 @@
 members = [
     "crates/core",
     "crates/cli",
+    "crates/fs",
     "crates/fuse",
 ]
 resolver = "2"
@@ -19,5 +20,6 @@ unwrap_used = "deny"
 
 [workspace.dependencies]
 fuse = { path = "crates/fuse" }
+fs = { path = "crates/fs" }
 libc = "=0.2.186"
 r9p = { path = "crates/core" }

@@ -6,7 +6,16 @@ version = 4
 name = "cli"
 version = "0.1.0"
 dependencies = [
+ "fs",
  "fuse",
+ "r9p",
+]
+
+[[package]]
+name = "fs"
+version = "0.1.0"
+dependencies = [
+ "libc",
  "r9p",
 ]
 

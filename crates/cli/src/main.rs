@@ -17,6 +17,7 @@ use commands::{
         read_cmd, read_to_cmd, write_at_cmd, write_cmd, write_from_cmd, ReadMode, WriteMode,
     },
     script::machine_script_cmd,
+    serve::serve_cmd,
     stat_rdwr::{rdwr_cmd, stat_cmd},
     version_attach::{attach_cmd, version_cmd},
 };
@@ -60,6 +61,7 @@ fn run() -> CliResult<()> {
         "write-from" if config.machine => write_from_cmd(config, args),
         "script" if config.machine => machine_script_cmd(config, args),
         "mount" => mount_cmd(config, args),
+        "serve" => serve_cmd(config, args),
         "stat" => stat_cmd(config, args),
         "rdwr" => rdwr_cmd(config, args),
         "ls" => ls_cmd(config, args),
@@ -183,6 +185,7 @@ pub(crate) fn usage() -> ! {
     eprintln!("  script file              machine mode");
     eprintln!("  script service file      machine mode without -a");
     eprintln!("  mount [--aname aname] [--uname uname] endpoint mountpoint");
+    eprintln!("  serve [--bind address] root");
     eprintln!("  create name...");
     eprintln!("  mkdir name...");
     eprintln!("  con [-r] name");

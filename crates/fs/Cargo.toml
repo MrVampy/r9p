@@ -1,9 +1,9 @@
 [package]
-name = "cli"
+name = "fs"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 version = "0.1.0"
-description = "Command-line 9P client for the r9p communication suite"
+description = "Read-only local filesystem 9P server adapter for the r9p communication suite"
 repository = "https://github.com/MrVampy/r9p"
 
 [lints.clippy]
@@ -11,11 +11,6 @@ dbg_macro = "deny"
 todo = "deny"
 unwrap_used = "deny"
 
-[[bin]]
-name = "r9p"
-path = "src/main.rs"
-
 [dependencies]
-fuse.workspace = true
-fs.workspace = true
+libc.workspace = true
 r9p.workspace = true

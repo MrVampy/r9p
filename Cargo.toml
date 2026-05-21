@@ -1,14 +1,20 @@
-[package]
-name = "r9p"
+[workspace]
+members = [
+    "crates/r9p",
+    "crates/r9p-cli",
+]
+resolver = "2"
+
+[workspace.package]
 edition = "2021"
 license = "MIT OR Apache-2.0"
 version = "0.1.0"
-description = "Reusable Rust 9P2000 protocol primitives for substrate-shaped systems"
 repository = "https://github.com/MrVampy/r9p"
 
-[lints.clippy]
+[workspace.lints.clippy]
 dbg_macro = "deny"
 todo = "deny"
 unwrap_used = "deny"
 
-[dependencies]
+[workspace.dependencies]
+r9p = { path = "crates/r9p" }

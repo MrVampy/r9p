@@ -5,3 +5,10 @@ version = 4
 [[package]]
 name = "r9p"
 version = "0.1.0"
+
+[[package]]
+name = "r9p-cli"
+version = "0.1.0"
+dependencies = [
+ "r9p",
+]

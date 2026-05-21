@@ -4,26 +4,30 @@ This map defines the local sources agents should inspect before making source-sp
 
 ## r9p Source
 
-- `src/codec.rs`
+- `crates/r9p/src/codec.rs`
   - 9P frame encoding/decoding.
   - Message-size math, read/write payload limits, stat-entry chunking.
-- `src/message.rs`
+- `crates/r9p/src/message.rs`
   - T-message and R-message shape.
   - Tags, `NOTAG`, and protocol variants.
-- `src/fid.rs`
+- `crates/r9p/src/fid.rs`
   - Fid state and `NOFID`.
-- `src/flush.rs`
+- `crates/r9p/src/flush.rs`
   - Live-tag table, duplicate-tag rejection, flush and stale-completion behavior.
-- `src/server.rs`
+- `crates/r9p/src/server/`
   - Generic file-tree trait, session state, open/read/write/stat/walk handling.
-- `src/client.rs`
+- `crates/r9p/src/client.rs`
   - Runtime-neutral client operation builder and response admission.
-- `src/multiplex.rs`
+- `crates/r9p/src/multiplex/`
   - Layered blocking transport facade for concurrent tagged client calls.
-- `src/stat.rs`
+- `crates/r9p/src/stat.rs`
   - 9P stat record shape and mode helpers.
-- `tests/memory_tree.rs`
+- `crates/r9p/tests/memory_tree.rs`
   - Minimal end-to-end server/client fixture.
+- `crates/r9p-cli/src/`
+  - The `r9p` binary and one-shot client command dispatch.
+- `crates/r9p-cli/tests/cli_machine.rs`
+  - Machine-output and streaming command regression tests.
 
 Use these when the question is "what does `r9p` do now?"
 

@@ -61,6 +61,9 @@ pub(super) const FUSE_AUTO_INVAL_DATA: u32 = 1 << 12;
 pub(super) const FUSE_DO_READDIRPLUS: u32 = 1 << 13;
 pub(super) const FUSE_PARALLEL_DIROPS: u32 = 1 << 18;
 
+pub(super) const FUSE_NOTIFY_INVAL_INODE: i32 = 2;
+pub(super) const FUSE_NOTIFY_INVAL_ENTRY: i32 = 3;
+
 pub(super) const FOPEN_DIRECT_IO: u32 = 1 << 0;
 
 pub(super) const FUSE_KERNEL_VERSION: u32 = 7;
@@ -272,6 +275,22 @@ pub(super) struct FuseWriteOut {
 #[derive(Clone, Copy)]
 pub(super) struct FuseInterruptIn {
     pub(super) unique: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(super) struct FuseNotifyInvalInodeOut {
+    pub(super) ino: u64,
+    pub(super) off: i64,
+    pub(super) len: i64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(super) struct FuseNotifyInvalEntryOut {
+    pub(super) parent: u64,
+    pub(super) namelen: u32,
+    pub(super) flags: u32,
 }
 
 #[repr(C)]

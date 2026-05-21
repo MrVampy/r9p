@@ -3,7 +3,10 @@
 use crate::{
     error::{Error, Result},
     fuse::{
-        reply::{read_struct, reply_bytes, reply_empty, reply_error, reply_struct},
+        reply::{
+            notify_inval_entry, notify_inval_inode, read_struct, reply_bytes, reply_empty,
+            reply_error, reply_struct,
+        },
         util::{flags_to_9p_mode, fuse_open_flags, is_namespace_shape_error, is_transport_error},
         wire::{
             FuseInHeader, FuseOpenIn, FuseOpenOut, FuseReadIn, FuseReleaseIn, FuseWriteIn,
@@ -189,7 +192,7 @@ impl R9pFuse {
             }
             Err(error) => return Err(error),
         };
-        let stale_fids = if is_namespace_control_write_path(&node_path) {
+        let stale_bindings = if is_namespace_control_write_path(&node_path) {
             self.refresh_path_bindings_after_namespace_change()?
         } else {
             Vec::new()
@@ -199,12 +202,15 @@ impl R9pFuse {
             padding: 0,
         };
         reply_struct(file, header.unique, &out)?;
-        if !stale_fids.is_empty() {
+        if !stale_bindings.is_empty() {
+            notify_namespace_invalidations(file, &stale_bindings);
             if let Ok(client) = self.client_snapshot() {
                 let timeout = self.control_timeout();
                 thread::spawn(move || {
-                    for fid in stale_fids {
-                        let _ = client.clunk_timeout(fid, timeout);
+                    for binding in stale_bindings {
+                        if let Some(fid) = binding.fid {
+                            let _ = client.clunk_timeout(fid, timeout);
+                        }
                     }
                 });
             }
@@ -226,6 +232,16 @@ impl R9pFuse {
                 .clunk_timeout(handle.fid, self.control_timeout());
         }
         reply_empty(file, header.unique)
+    }
+}
+
+fn notify_namespace_invalidations(file: &mut File, stale_bindings: &[crate::node::StaleBinding]) {
+    let _ = notify_inval_inode(file, crate::node::ROOT_NODEID);
+    for binding in stale_bindings {
+        let _ = notify_inval_inode(file, binding.nodeid);
+        if let Some(parent_nodeid) = binding.parent_nodeid {
+            let _ = notify_inval_entry(file, parent_nodeid, &binding.name);
+        }
     }
 }
 

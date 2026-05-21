@@ -198,7 +198,7 @@ impl R9pFuse {
 
     pub(in crate::fuse) fn refresh_path_bindings_after_namespace_change(
         &mut self,
-    ) -> Result<Vec<r9p::fid::Fid>> {
+    ) -> Result<Vec<crate::node::StaleBinding>> {
         Ok(self.nodes()?.mark_path_bindings_stale())
     }
 

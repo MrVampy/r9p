@@ -1,7 +1,10 @@
 //! FUSE reply framing and small byte-slice helpers shared across the
 //! dispatcher and op handlers.
 
-use super::wire::FuseOutHeader;
+use super::wire::{
+    FuseNotifyInvalEntryOut, FuseNotifyInvalInodeOut, FuseOutHeader, FUSE_NOTIFY_INVAL_ENTRY,
+    FUSE_NOTIFY_INVAL_INODE,
+};
 use crate::error::{Error, Result};
 use std::{
     fs::File,
@@ -46,6 +49,62 @@ pub(super) fn reply_bytes(file: &mut File, unique: u64, payload: &[u8]) -> Resul
         .map_err(|error| Error::io("write FUSE reply", error))?;
     if written != len {
         return Err(Error::new(libc::EIO, "short FUSE reply write"));
+    }
+    Ok(())
+}
+
+pub(super) fn notify_inval_inode(file: &mut File, nodeid: u64) -> Result<()> {
+    let payload = FuseNotifyInvalInodeOut {
+        ino: nodeid,
+        off: 0,
+        len: 0,
+    };
+    notify_bytes(
+        file,
+        FUSE_NOTIFY_INVAL_INODE,
+        &[IoSlice::new(as_bytes(&payload))],
+    )
+}
+
+pub(super) fn notify_inval_entry(file: &mut File, parent: u64, name: &[u8]) -> Result<()> {
+    let namelen = u32::try_from(name.len())
+        .map_err(|_| Error::new(libc::ENAMETOOLONG, "FUSE entry name too long"))?;
+    let payload = FuseNotifyInvalEntryOut {
+        parent,
+        namelen,
+        flags: 0,
+    };
+    let nul = [0_u8; 1];
+    notify_bytes(
+        file,
+        FUSE_NOTIFY_INVAL_ENTRY,
+        &[
+            IoSlice::new(as_bytes(&payload)),
+            IoSlice::new(name),
+            IoSlice::new(&nul),
+        ],
+    )
+}
+
+fn notify_bytes(file: &mut File, code: i32, payloads: &[IoSlice<'_>]) -> Result<()> {
+    let payload_len = payloads.iter().map(|slice| slice.len()).sum::<usize>();
+    let len = size_of::<FuseOutHeader>()
+        .checked_add(payload_len)
+        .ok_or_else(|| Error::new(libc::EOVERFLOW, "FUSE notification too large"))?;
+    let header = FuseOutHeader {
+        len: u32::try_from(len)
+            .map_err(|_| Error::new(libc::EOVERFLOW, "FUSE notification too large"))?,
+        error: code,
+        unique: 0,
+    };
+    let mut slices = Vec::with_capacity(payloads.len() + 1);
+    slices.push(IoSlice::new(as_bytes(&header)));
+    slices.extend_from_slice(payloads);
+    let written = file
+        .write_vectored(&slices)
+        .map_err(|error| Error::io("write FUSE notification", error))?;
+    if written != len {
+        return Err(Error::new(libc::EIO, "short FUSE notification write"));
     }
     Ok(())
 }

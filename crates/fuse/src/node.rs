@@ -54,6 +54,14 @@ pub struct InsertedNode {
     pub clunk_fid: Option<Fid>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleBinding {
+    pub nodeid: u64,
+    pub parent_nodeid: Option<u64>,
+    pub name: Vec<u8>,
+    pub fid: Option<Fid>,
+}
+
 #[derive(Debug)]
 pub struct NodeTable {
     nodes: BTreeMap<u64, Node>,
@@ -386,18 +394,36 @@ impl NodeTable {
         Ok(replaced)
     }
 
-    pub fn mark_path_bindings_stale(&mut self) -> Vec<Fid> {
-        let mut stale_fids = Vec::new();
+    pub fn mark_path_bindings_stale(&mut self) -> Vec<StaleBinding> {
+        let path_index = self
+            .nodes
+            .iter()
+            .map(|(nodeid, node)| (node.path.clone(), *nodeid))
+            .collect::<BTreeMap<_, _>>();
+        let mut stale = Vec::new();
         for (nodeid, node) in self.nodes.iter_mut() {
             if *nodeid == ROOT_NODEID {
                 continue;
             }
-            if let Some(fid) = node.fid.take() {
-                stale_fids.push(fid);
-            }
+            let parent_nodeid = node
+                .path
+                .split_last()
+                .and_then(|(_, parent)| path_index.get(parent).copied());
+            let name = node
+                .path
+                .last()
+                .cloned()
+                .unwrap_or_else(|| node.stat.name.clone());
+            let fid = node.fid.take();
             node.needs_rebind = true;
+            stale.push(StaleBinding {
+                nodeid: *nodeid,
+                parent_nodeid,
+                name,
+                fid,
+            });
         }
-        stale_fids
+        stale
     }
 }
 
@@ -749,9 +775,18 @@ mod tests {
             .map(|inserted| inserted.nodeid)
             .expect("alpha node should insert");
 
-        let stale_fids = nodes.mark_path_bindings_stale();
+        let stale = nodes.mark_path_bindings_stale();
 
-        assert_eq!(stale_fids, vec![2, 3]);
+        assert_eq!(
+            stale.iter().map(|binding| binding.fid).collect::<Vec<_>>(),
+            vec![Some(2), Some(3)]
+        );
+        assert_eq!(stale[0].nodeid, docs);
+        assert_eq!(stale[0].parent_nodeid, Some(ROOT_NODEID));
+        assert_eq!(stale[0].name, b"docs".to_vec());
+        assert_eq!(stale[1].nodeid, alpha);
+        assert_eq!(stale[1].parent_nodeid, Some(docs));
+        assert_eq!(stale[1].name, b"alpha.md".to_vec());
         let root = nodes.node(ROOT_NODEID).expect("root");
         assert_eq!(root.fid, Some(1));
         assert!(!root.needs_rebind);

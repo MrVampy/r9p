@@ -10,8 +10,12 @@ Current surfaces and consumers:
 - `r9p`, a plan9port `9p`-shaped client CLI for one-shot reads, writes,
   stats, listings, creates, removes, console-style interaction, and stable
   tab/hex machine-readable output.
+- `r9p mount`, the Linux FUSE-to-9P bridge.
+- `r9p serve`, a read-only local filesystem-backed 9P server.
+- `r9p export`, `serve` plus a machine-readable `r9p-export.v1` descriptor.
 - Racme serves an Acme-compatible 9P namespace through `r9p`.
-- `r9pfuse` uses `r9p` to mount 9P namespaces through Linux FUSE.
+- Vault consumes `r9p` for its runtime listener, one-shot client operations,
+  local FUSE mounts, and peer export descriptors.
 
 The architectural boundary is deliberately small:
 
@@ -52,6 +56,9 @@ r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] rm path...
 r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] create path...
 r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] mkdir path...
 r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] con [-r] path
+r9p mount [--uname uname] [--aname aname] [--attr-timeout seconds] [--entry-timeout seconds] [--request-timeout seconds] endpoint mountpoint
+r9p serve [--bind address] root
+r9p export [--bind address] [--descriptor machine] [--descriptor-file path] [--auth boundary] root
 ```
 
 `-a` accepts `host:port`, `tcp!host!port`, bare hosts defaulting to port 564,

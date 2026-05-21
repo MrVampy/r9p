@@ -29,7 +29,11 @@ This map defines the local sources agents should inspect before making source-sp
 - `crates/cli/tests/cli_machine.rs`
   - Machine-output and streaming command regression tests.
 - `crates/fuse/src/`
-  - Linux FUSE bridge over the `r9p` client primitives.
+  - Canonical Linux FUSE bridge over the `r9p` client primitives, exposed as
+    `r9p mount`.
+- `crates/fs/src/`
+  - Read-only local filesystem-backed 9P server adapter used by `r9p serve`
+    and `r9p export`.
 
 Use these when the question is "what does `r9p` do now?"
 
@@ -63,25 +67,28 @@ Use plan9port when the question is "what does the established 9P ecosystem expec
 
 Use Racme when changing extraction-boundary claims or Acme-backed server behavior.
 
-## r9pfuse
+## Historical r9pfuse
 
 - `refs/r9pfuse/crates/r9pfuse/src/p9.rs`
-  - Blocking TCP client facade currently layered over `r9p` primitives.
+  - Historical blocking TCP client facade that predated the workspace cutover.
 - `refs/r9pfuse/crates/r9pfuse/src/fuse.rs`
-  - FUSE/POSIX-to-9P translation.
+  - Historical FUSE/POSIX-to-9P translation.
 - `refs/r9pfuse/crates/r9pfuse/src/node.rs`
-  - Nodeid, fid, and directory-entry bookkeeping.
+  - Historical nodeid, fid, and directory-entry bookkeeping.
 - `refs/r9pfuse/docs/source-map.md`
   - Source map for FUSE bridge behavior.
 
-Use `r9pfuse` when deciding whether a client primitive should move into `r9p` or remain FUSE-specific.
+Use `crates/fuse/src/` for new mount-client work. Use `refs/r9pfuse` only as
+bounded historical comparison while any remaining FUSE-hardening references are
+being retired.
 
 ## Vault
 
 - `refs/vault/docs/operations/9p-endpoint.md`
   - Vault 9P listener policy and backend contract.
 - `refs/vault/docs/operations/plan9port-client.md`
-  - Current operator workflows for `9p`, `9pfuse`, and kernel `v9fs`.
+  - Current operator workflows for `r9p`, `r9p mount`, plan9port `9p`, and
+    kernel `v9fs`.
 - `refs/vault/docs/source-map.md`
   - Vault source-grounding map.
 

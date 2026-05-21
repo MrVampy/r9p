@@ -1,6 +1,7 @@
 pub(crate) mod con;
 pub(crate) mod ls;
 pub(crate) mod machine;
+pub(crate) mod mount;
 pub(crate) mod mutate;
 pub(crate) mod read_write;
 pub(crate) mod script;

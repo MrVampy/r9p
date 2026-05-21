@@ -11,6 +11,7 @@ use commands::{
     con::con_cmd,
     ls::ls_cmd,
     machine::{machine_list_cmd, machine_remove_cmd},
+    mount::mount_cmd,
     mutate::{create_cmd, mkdir_cmd, rm_cmd},
     read_write::{
         read_cmd, read_to_cmd, write_at_cmd, write_cmd, write_from_cmd, ReadMode, WriteMode,
@@ -58,6 +59,7 @@ fn run() -> CliResult<()> {
         "writefd" => write_cmd(config, args, WriteMode::WriteFd),
         "write-from" if config.machine => write_from_cmd(config, args),
         "script" if config.machine => machine_script_cmd(config, args),
+        "mount" => mount_cmd(config, args),
         "stat" => stat_cmd(config, args),
         "rdwr" => rdwr_cmd(config, args),
         "ls" => ls_cmd(config, args),
@@ -79,6 +81,7 @@ pub(crate) fn parse_global_options(args: &mut Vec<String>) -> CliResult<Config> 
         aname: String::new(),
         uname: env::var("USER").unwrap_or_else(|_| "none".to_string()),
         msize: DEFAULT_MSIZE,
+        msize_set: false,
         machine: false,
     };
     let mut rest = Vec::new();
@@ -150,6 +153,7 @@ fn set_global_option(config: &mut Config, option: &str, value: String) -> CliRes
             config.msize = value
                 .parse()
                 .map_err(|_| cli_error(format!("invalid msize {value}")))?;
+            config.msize_set = true;
         }
         _ => return Err(cli_error(format!("unknown option {option}"))),
     }
@@ -178,6 +182,7 @@ pub(crate) fn usage() -> ! {
     eprintln!("  write-from name offset local  machine mode");
     eprintln!("  script file              machine mode");
     eprintln!("  script service file      machine mode without -a");
+    eprintln!("  mount [--aname aname] [--uname uname] endpoint mountpoint");
     eprintln!("  create name...");
     eprintln!("  mkdir name...");
     eprintln!("  con [-r] name");

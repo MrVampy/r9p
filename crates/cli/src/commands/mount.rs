@@ -1,0 +1,209 @@
+use std::time::Duration;
+
+use fuse::Config as MountConfig;
+
+use crate::{
+    errors::{cli_error, CliResult},
+    target::Config,
+};
+
+pub(crate) fn mount_cmd(global: Config, args: Vec<String>) -> CliResult<()> {
+    let config = parse_mount_config(global, args)?;
+    fuse::mount(config).map_err(|error| cli_error(format!("mount: {}", error.message())))
+}
+
+pub(crate) fn parse_mount_config(global: Config, args: Vec<String>) -> CliResult<MountConfig> {
+    if global.address.is_some() {
+        return Err(cli_error(
+            "r9p mount takes the endpoint as a positional argument; do not use global -a",
+        ));
+    }
+
+    let mut config = MountConfig {
+        address: String::new(),
+        mountpoint: String::new(),
+        uname: global.uname,
+        aname: global.aname,
+        msize: if global.msize_set {
+            global.msize
+        } else {
+            r9p::codec::MAX_MSIZE
+        },
+        attr_timeout: Duration::ZERO,
+        entry_timeout: Duration::ZERO,
+        request_timeout: Duration::from_secs(5),
+        debug: false,
+    };
+
+    let mut positional = Vec::new();
+    let mut index = 0_usize;
+    while index < args.len() {
+        match args[index].as_str() {
+            "-D" | "--debug" => config.debug = true,
+            "--attr-timeout" => {
+                index += 1;
+                config.attr_timeout = parse_duration(args.get(index), "missing attr timeout")?;
+            }
+            "--entry-timeout" => {
+                index += 1;
+                config.entry_timeout = parse_duration(args.get(index), "missing entry timeout")?;
+            }
+            "--request-timeout" => {
+                index += 1;
+                config.request_timeout =
+                    parse_duration(args.get(index), "missing request timeout")?;
+            }
+            "-A" | "--aname" => {
+                index += 1;
+                config.aname = args
+                    .get(index)
+                    .ok_or_else(|| cli_error("missing aname"))?
+                    .clone();
+            }
+            "-u" | "--uname" => {
+                index += 1;
+                config.uname = args
+                    .get(index)
+                    .ok_or_else(|| cli_error("missing uname"))?
+                    .clone();
+            }
+            "-m" | "--msize" => {
+                index += 1;
+                let value = args.get(index).ok_or_else(|| cli_error("missing msize"))?;
+                config.msize = value
+                    .parse::<u32>()
+                    .map_err(|_| cli_error(format!("invalid msize {value}")))?;
+            }
+            "-a" => {
+                return Err(cli_error(
+                    "r9p mount uses --aname or -A for aname; -a is not accepted here",
+                ));
+            }
+            "-h" | "--help" => mount_usage(0),
+            arg if arg.starts_with('-') => {
+                return Err(cli_error(format!("unknown mount option {arg}")));
+            }
+            arg => positional.push(arg.to_string()),
+        }
+        index += 1;
+    }
+
+    if positional.len() != 2 {
+        return Err(cli_error("expected endpoint and mountpoint"));
+    }
+    config.address = positional[0].clone();
+    config.mountpoint = positional[1].clone();
+    Ok(config)
+}
+
+fn parse_duration(value: Option<&String>, missing: &'static str) -> CliResult<Duration> {
+    let value = value.ok_or_else(|| cli_error(missing))?;
+    let seconds = value
+        .parse::<f64>()
+        .map_err(|_| cli_error(format!("invalid duration {value}")))?;
+    if !seconds.is_finite() || seconds < 0.0 {
+        return Err(cli_error(format!("invalid duration {value}")));
+    }
+    Ok(Duration::from_secs_f64(seconds))
+}
+
+fn mount_usage(code: i32) -> ! {
+    eprintln!(
+        "usage: r9p mount [--aname aname] [--uname uname] [--msize msize] [--attr-timeout seconds] [--entry-timeout seconds] [--request-timeout seconds] endpoint mountpoint"
+    );
+    std::process::exit(code);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::parse_mount_config;
+    use crate::{target::Config, DEFAULT_MSIZE};
+
+    fn global() -> Config {
+        Config {
+            address: None,
+            aname: String::new(),
+            uname: "codex".to_string(),
+            msize: DEFAULT_MSIZE,
+            msize_set: false,
+            machine: false,
+        }
+    }
+
+    #[test]
+    fn parses_final_mount_options() {
+        let config = parse_mount_config(
+            global(),
+            vec![
+                "--uname".to_string(),
+                "glenda".to_string(),
+                "--aname".to_string(),
+                "/".to_string(),
+                "--request-timeout".to_string(),
+                "0.25".to_string(),
+                "--attr-timeout".to_string(),
+                "1.5".to_string(),
+                "--entry-timeout".to_string(),
+                "2".to_string(),
+                "--msize".to_string(),
+                "8192".to_string(),
+                "127.0.0.1:564".to_string(),
+                "/tmp/r9p-mount".to_string(),
+            ],
+        )
+        .expect("mount options should parse");
+
+        assert_eq!(config.uname, "glenda");
+        assert_eq!(config.aname, "/");
+        assert_eq!(config.address, "127.0.0.1:564");
+        assert_eq!(config.mountpoint, "/tmp/r9p-mount");
+        assert_eq!(config.request_timeout, Duration::from_millis(250));
+        assert_eq!(config.attr_timeout, Duration::from_millis(1500));
+        assert_eq!(config.entry_timeout, Duration::from_secs(2));
+        assert_eq!(config.msize, 8192);
+    }
+
+    #[test]
+    fn rejects_old_mount_short_options() {
+        for option in ["-a", "-E", "-T"] {
+            let result = parse_mount_config(
+                global(),
+                vec![
+                    option.to_string(),
+                    "1".to_string(),
+                    "127.0.0.1:564".to_string(),
+                    "/tmp/r9p-mount".to_string(),
+                ],
+            );
+            assert!(result.is_err(), "{option} should not parse");
+        }
+    }
+
+    #[test]
+    fn dash_upper_a_is_aname_not_attr_timeout() {
+        let config = parse_mount_config(
+            global(),
+            vec![
+                "-A".to_string(),
+                "/".to_string(),
+                "127.0.0.1:564".to_string(),
+                "/tmp/r9p-mount".to_string(),
+            ],
+        )
+        .expect("mount options should parse");
+
+        assert_eq!(config.aname, "/");
+        assert_eq!(config.attr_timeout, Duration::ZERO);
+    }
+
+    #[test]
+    fn mount_rejects_global_address_option() {
+        let mut global = global();
+        global.address = Some("127.0.0.1:564".to_string());
+        let result = parse_mount_config(global, vec!["/tmp/r9p-mount".to_string()]);
+
+        assert!(result.is_err());
+    }
+}

@@ -9,6 +9,7 @@ pub(crate) struct Config {
     pub(crate) aname: String,
     pub(crate) uname: String,
     pub(crate) msize: u32,
+    pub(crate) msize_set: bool,
     pub(crate) machine: bool,
 }
 

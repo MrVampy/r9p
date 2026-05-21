@@ -120,6 +120,12 @@ impl R9pFuse {
             _ => reply_error(file, header.unique, libc::ENOSYS),
         };
         if let Err(error) = result {
+            self.record_diagnostic(
+                "operation_error",
+                header,
+                error.errno,
+                error.message().to_string(),
+            );
             if self.config.debug || should_log_operation_error(&error) {
                 eprintln!(
                     "r9p mount: opcode={} unique={} error={} {}",
@@ -141,9 +147,7 @@ impl R9pFuse {
         let flushed = self
             .client
             .snapshot()
-            .and_then(|client| {
-                client.interrupt_fuse_unique(input.unique, self.config.request_timeout)
-            })
+            .and_then(|client| client.interrupt_fuse_unique(input.unique, self.interrupt_timeout()))
             .unwrap_or(0);
         if self.config.debug {
             eprintln!(
@@ -209,7 +213,7 @@ impl R9pFuse {
         )?;
         {
             let mut nodes = self.nodes()?;
-            let _ = nodes.rebind_all(&mut client, self.config.request_timeout)?;
+            let _ = nodes.rebind_all(&mut client, self.config.lookup_timeout)?;
             self.client.replace(client)?;
         }
         if self.config.debug {
@@ -225,10 +229,10 @@ impl R9pFuse {
         if nodeid == ROOT_NODEID {
             let client = self.client.snapshot()?;
             let root_fid = client.root_fid();
-            let stat = client.stat_timeout(root_fid, self.config.request_timeout)?;
+            let stat = client.stat_timeout(root_fid, self.config.lookup_timeout)?;
             let old_fid = self.nodes()?.replace_binding(nodeid, root_fid, stat)?;
             if let Some(old_fid) = old_fid {
-                let _ = client.clunk_timeout(old_fid, self.config.request_timeout);
+                let _ = client.clunk_timeout(old_fid, self.config.control_timeout);
             }
             return Ok(());
         }
@@ -237,11 +241,11 @@ impl R9pFuse {
             nodes.node(nodeid)?.path.clone()
         };
         let client = self.client.snapshot()?;
-        let fid = client.walk_timeout(client.root_fid(), &path, self.config.request_timeout)?;
-        let stat = client.stat_timeout(fid, self.config.request_timeout)?;
+        let fid = client.walk_timeout(client.root_fid(), &path, self.config.lookup_timeout)?;
+        let stat = client.stat_timeout(fid, self.config.lookup_timeout)?;
         let old_fid = self.nodes()?.replace_binding(nodeid, fid, stat)?;
         if let Some(old_fid) = old_fid {
-            let _ = client.clunk_timeout(old_fid, self.config.request_timeout);
+            let _ = client.clunk_timeout(old_fid, self.config.control_timeout);
         }
         Ok(())
     }
@@ -330,6 +334,12 @@ fn dispatch_fuse_job(fs: &mut R9pFuse, mut job: FuseJob) {
     match result {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
+            fs.record_diagnostic(
+                "dispatch_failure",
+                header,
+                error.errno,
+                error.message().to_string(),
+            );
             eprintln!(
                 "r9p mount: opcode={} unique={} dispatch failure={} {}",
                 header.opcode,
@@ -340,6 +350,7 @@ fn dispatch_fuse_job(fs: &mut R9pFuse, mut job: FuseJob) {
             let _ = reply_error(&mut job.writer, header.unique, error.errno);
         }
         Err(_) => {
+            fs.record_diagnostic("worker_panic", header, libc::EIO, "FUSE worker panic");
             eprintln!(
                 "r9p mount: opcode={} unique={} worker panic",
                 header.opcode, header.unique

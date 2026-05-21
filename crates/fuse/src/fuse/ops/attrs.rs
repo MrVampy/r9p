@@ -40,7 +40,7 @@ impl R9pFuse {
             return reply_struct(file, header.unique, &self.attr_out(&stat));
         };
         let (client, fid) = self.bound_node_fid(header.nodeid)?;
-        let stat = client.stat_timeout(fid, self.config.request_timeout)?;
+        let stat = client.stat_timeout(fid, self.lookup_timeout())?;
         self.nodes()?.update_stat(header.nodeid, stat.clone())?;
         let out = self.attr_out(&stat);
         reply_struct(file, header.unique, &out)
@@ -91,7 +91,7 @@ impl R9pFuse {
         if input.valid & FATTR_SIZE != 0 {
             let mut stat = null_wstat();
             stat.length = input.size;
-            if let Err(error) = client.wstat(fid, stat) {
+            if let Err(error) = client.wstat_timeout(fid, stat, self.mutation_timeout()) {
                 if input.size == 0 {
                     self.truncate_fallback(&client, fid)?;
                 } else {
@@ -104,22 +104,23 @@ impl R9pFuse {
         // durable namespace state. Accept those FUSE setattr fields for editor
         // compatibility, but only translate size changes into 9P mutations.
         let _advisory_fields = input.valid & advisory_setattr_fields();
-        let stat = client.stat(fid)?;
+        let stat = client.stat_timeout(fid, self.lookup_timeout())?;
         let _ = self.nodes()?.update_stat(header.nodeid, stat.clone());
         let out = self.attr_out(&stat);
         reply_struct(file, header.unique, &out)
     }
 
     fn truncate_fallback(&mut self, client: &Client, fid: Fid) -> Result<()> {
-        let clone = client.clone_fid(fid)?;
-        let open_result = client.open(clone, OWRITE | OTRUNC);
+        let timeout = self.mutation_timeout();
+        let clone = client.clone_fid_timeout(fid, timeout)?;
+        let open_result = client.open_timeout(clone, OWRITE | OTRUNC, timeout);
         if open_result.is_err() {
-            if let Err(error) = client.open(clone, OWRITE) {
-                let _ = client.clunk(clone);
+            if let Err(error) = client.open_timeout(clone, OWRITE, timeout) {
+                let _ = client.clunk_timeout(clone, timeout);
                 return Err(error);
             }
         }
-        client.clunk(clone)
+        client.clunk_timeout(clone, timeout)
     }
 }
 

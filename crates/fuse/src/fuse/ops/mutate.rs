@@ -49,10 +49,10 @@ impl R9pFuse {
             }
             Err(error) => return Err(error),
         };
-        client.remove(fid)?;
+        client.remove_timeout(fid, self.mutation_timeout())?;
         let stale_fids = self.nodes()?.remove_path_subtree(&removed_path);
         for stale_fid in stale_fids {
-            let _ = client.clunk_timeout(stale_fid, self.config.request_timeout);
+            let _ = client.clunk_timeout(stale_fid, self.control_timeout());
         }
         reply_empty(file, header.unique)
     }
@@ -93,7 +93,7 @@ impl R9pFuse {
         name: &[u8],
     ) -> Result<(Client, Fid)> {
         let (client, parent_fid) = self.bound_node_fid(parent_nodeid)?;
-        let fid = client.walk_one_timeout(parent_fid, name, self.config.request_timeout)?;
+        let fid = client.walk_one_timeout(parent_fid, name, self.mutation_timeout())?;
         Ok((client, fid))
     }
 
@@ -106,30 +106,28 @@ impl R9pFuse {
         let old_path = self.nodes()?.child_path(parent_nodeid, old_name)?;
         let new_path = self.nodes()?.child_path(parent_nodeid, new_name)?;
         let (client, parent_fid) = self.bound_node_fid(parent_nodeid)?;
-        let fid = client.walk_one_timeout(parent_fid, old_name, self.config.request_timeout)?;
-        let before = client.stat_timeout(fid, self.config.request_timeout)?;
+        let fid = client.walk_one_timeout(parent_fid, old_name, self.mutation_timeout())?;
+        let before = client.stat_timeout(fid, self.lookup_timeout())?;
         let mut replaced_qid = None;
-        if let Ok(existing) =
-            client.walk_one_timeout(parent_fid, new_name, self.config.request_timeout)
-        {
-            let existing_stat = match client.stat_timeout(existing, self.config.request_timeout) {
+        if let Ok(existing) = client.walk_one_timeout(parent_fid, new_name, self.lookup_timeout()) {
+            let existing_stat = match client.stat_timeout(existing, self.lookup_timeout()) {
                 Ok(stat) => stat,
                 Err(error) => {
-                    let _ = client.clunk(existing);
-                    let _ = client.clunk(fid);
+                    let _ = client.clunk_timeout(existing, self.control_timeout());
+                    let _ = client.clunk_timeout(fid, self.control_timeout());
                     return Err(error);
                 }
             };
             if is_dir(&existing_stat) {
-                let _ = client.clunk(existing);
-                let _ = client.clunk(fid);
+                let _ = client.clunk_timeout(existing, self.control_timeout());
+                let _ = client.clunk_timeout(fid, self.control_timeout());
                 return Err(Error::new(
                     libc::EISDIR,
                     "cannot rename a file over a directory",
                 ));
             }
             replaced_qid = Some(existing_stat.qid);
-            let _ = client.clunk(existing);
+            let _ = client.clunk_timeout(existing, self.control_timeout());
         }
         Ok(RenamePlan {
             client,
@@ -160,29 +158,31 @@ impl R9pFuse {
         } = plan;
         if let Err(error) = self.rename_fid(&client, fid, new_name) {
             if error.errno == libc::EEXIST {
-                if let Ok(existing) = client.walk_one(parent_fid, new_name) {
-                    let existing_stat = match client.stat(existing) {
+                if let Ok(existing) =
+                    client.walk_one_timeout(parent_fid, new_name, self.lookup_timeout())
+                {
+                    let existing_stat = match client.stat_timeout(existing, self.lookup_timeout()) {
                         Ok(stat) => stat,
                         Err(error) => {
-                            let _ = client.clunk(existing);
-                            let _ = client.clunk(fid);
+                            let _ = client.clunk_timeout(existing, self.control_timeout());
+                            let _ = client.clunk_timeout(fid, self.control_timeout());
                             return Err(error);
                         }
                     };
                     if is_dir(&existing_stat) {
-                        let _ = client.clunk(existing);
-                        let _ = client.clunk(fid);
+                        let _ = client.clunk_timeout(existing, self.control_timeout());
+                        let _ = client.clunk_timeout(fid, self.control_timeout());
                         return Err(Error::new(
                             libc::EISDIR,
                             "cannot rename a file over a directory",
                         ));
                     }
                     replaced_qid = Some(existing_stat.qid);
-                    let _ = client.remove(existing);
+                    let _ = client.remove_timeout(existing, self.mutation_timeout());
                 }
                 self.rename_fid(&client, fid, new_name)?;
             } else {
-                let _ = client.clunk(fid);
+                let _ = client.clunk_timeout(fid, self.control_timeout());
                 return Err(error);
             }
         }
@@ -195,28 +195,30 @@ impl R9pFuse {
             Some(new_path.clone()),
         ) {
             Some(old_fid) => {
-                let _ = client.clunk(old_fid);
+                let _ = client.clunk_timeout(old_fid, self.control_timeout());
                 true
             }
             None => false,
         };
         if let Some(qid) = replaced_qid {
-            if let Ok(replacement) = client.walk_one(parent_fid, new_name) {
+            if let Ok(replacement) =
+                client.walk_one_timeout(parent_fid, new_name, self.lookup_timeout())
+            {
                 if let Some(old_fid) = self.nodes()?.replace_first_qid(
                     qid,
                     replacement,
                     after.clone(),
                     Some(new_path.clone()),
                 ) {
-                    let _ = client.clunk(old_fid);
+                    let _ = client.clunk_timeout(old_fid, self.control_timeout());
                 } else {
-                    let _ = client.clunk(replacement);
+                    let _ = client.clunk_timeout(replacement, self.control_timeout());
                 }
             }
         }
         if !source_rebound {
             self.nodes()?.refresh_qid(before.qid, after, Some(new_path));
-            let _ = client.clunk(fid);
+            let _ = client.clunk_timeout(fid, self.control_timeout());
         }
         reply_empty(file, unique)
     }
@@ -228,22 +230,22 @@ impl R9pFuse {
         fid: Fid,
         new_name: &[u8],
     ) -> Result<(Fid, Stat)> {
-        match client.stat_timeout(fid, self.config.request_timeout) {
+        match client.stat_timeout(fid, self.lookup_timeout()) {
             Ok(stat) => Ok((fid, stat)),
             Err(error) if is_namespace_shape_error(&error) => {
-                let _ = client.clunk_timeout(fid, self.config.request_timeout);
+                let _ = client.clunk_timeout(fid, self.control_timeout());
                 let rebound =
-                    client.walk_one_timeout(parent_fid, new_name, self.config.request_timeout)?;
-                match client.stat_timeout(rebound, self.config.request_timeout) {
+                    client.walk_one_timeout(parent_fid, new_name, self.lookup_timeout())?;
+                match client.stat_timeout(rebound, self.lookup_timeout()) {
                     Ok(stat) => Ok((rebound, stat)),
                     Err(error) => {
-                        let _ = client.clunk_timeout(rebound, self.config.request_timeout);
+                        let _ = client.clunk_timeout(rebound, self.control_timeout());
                         Err(error)
                     }
                 }
             }
             Err(error) => {
-                let _ = client.clunk_timeout(fid, self.config.request_timeout);
+                let _ = client.clunk_timeout(fid, self.control_timeout());
                 Err(error)
             }
         }
@@ -252,6 +254,6 @@ impl R9pFuse {
     fn rename_fid(&mut self, client: &Client, fid: Fid, new_name: &[u8]) -> Result<()> {
         let mut stat = null_wstat();
         stat.name = new_name.to_vec();
-        client.wstat(fid, stat)
+        client.wstat_timeout(fid, stat, self.mutation_timeout())
     }
 }

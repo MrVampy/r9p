@@ -45,8 +45,8 @@ impl R9pFuse {
 
     fn lookup_once(&mut self, file: &mut File, header: FuseInHeader, name: &[u8]) -> Result<()> {
         let (client, parent_fid) = self.bound_node_fid(header.nodeid)?;
-        let fid = client.walk_one_timeout(parent_fid, name, self.config.request_timeout)?;
-        let stat = client.stat_timeout(fid, self.config.request_timeout)?;
+        let fid = client.walk_one_timeout(parent_fid, name, self.lookup_timeout())?;
+        let stat = client.stat_timeout(fid, self.lookup_timeout())?;
         let (nodeid, generation, clunk_fid) = {
             let mut nodes = self.nodes()?;
             let inserted = nodes.insert_lookup(header.nodeid, fid, stat.clone(), name)?;
@@ -61,7 +61,7 @@ impl R9pFuse {
             if self.config.debug {
                 eprintln!("r9p mount: lookup discarded fid {clunk_fid}");
             }
-            let _ = client.clunk_timeout(clunk_fid, self.config.request_timeout);
+            let _ = client.clunk_timeout(clunk_fid, self.control_timeout());
         }
         let out = self.entry_out(nodeid, generation, &stat);
         reply_struct(file, header.unique, &out)
@@ -96,7 +96,7 @@ impl R9pFuse {
         let fid = self.nodes()?.forget(nodeid, nlookup);
         if let Some(fid) = fid {
             if let Ok(client) = self.client.snapshot() {
-                let _ = client.clunk(fid);
+                let _ = client.clunk_timeout(fid, self.control_timeout());
             }
         }
         Ok(())

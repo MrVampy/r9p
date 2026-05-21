@@ -63,32 +63,37 @@ impl R9pFuse {
             return reply_error(file, header.unique, libc::ENOTDIR);
         }
         let (client, node_fid) = self.bound_node_fid(header.nodeid)?;
-        let fid = client.clone_fid_timeout(node_fid, self.config.request_timeout)?;
+        let open_timeout = if flags_to_9p_mode(input.flags) == OREAD || is_dir_open {
+            self.lookup_timeout()
+        } else {
+            self.mutation_timeout()
+        };
+        let fid = client.clone_fid_timeout(node_fid, open_timeout)?;
         let mut mode = flags_to_9p_mode(input.flags);
         if is_dir_open {
             mode = OREAD;
         }
-        if let Err(error) = client.open_timeout(fid, mode, self.config.request_timeout) {
+        if let Err(error) = client.open_timeout(fid, mode, open_timeout) {
             if mode & OTRUNC != 0
                 && !is_transport_error(&error)
                 && !is_namespace_shape_error(&error)
             {
                 mode &= !OTRUNC;
-                if let Err(error) = client.open_timeout(fid, mode, self.config.request_timeout) {
-                    let _ = client.clunk_timeout(fid, self.config.request_timeout);
+                if let Err(error) = client.open_timeout(fid, mode, open_timeout) {
+                    let _ = client.clunk_timeout(fid, self.control_timeout());
                     return Err(error);
                 }
             } else {
-                let _ = client.clunk_timeout(fid, self.config.request_timeout);
+                let _ = client.clunk_timeout(fid, self.control_timeout());
                 return Err(error);
             }
         }
         let dir_entries = if is_dir_open {
             let mut dir_client = client.clone();
-            match read_directory_entries(&mut dir_client, node_fid, self.config.request_timeout) {
+            match read_directory_entries(&mut dir_client, node_fid, self.read_timeout()) {
                 Ok(entries) => entries,
                 Err(error) => {
-                    let _ = client.clunk_timeout(fid, self.config.request_timeout);
+                    let _ = client.clunk_timeout(fid, self.control_timeout());
                     return Err(error);
                 }
             }
@@ -118,7 +123,7 @@ impl R9pFuse {
             handle.fid,
             input.offset,
             input.size,
-            self.config.request_timeout,
+            self.read_timeout(),
         ) {
             Ok(data) => data,
             Err(error) if is_transport_error(&error) => {
@@ -158,12 +163,15 @@ impl R9pFuse {
             nodes.node(header.nodeid)?.path.clone()
         };
         let handle = self.nodes()?.handle(input.fh)?.clone();
-        let count = match handle.client.write_timeout(
-            handle.fid,
-            input.offset,
-            data,
-            self.config.request_timeout,
-        ) {
+        let write_timeout = if is_namespace_control_write_path(&node_path) {
+            self.control_timeout()
+        } else {
+            self.write_timeout()
+        };
+        let count = match handle
+            .client
+            .write_timeout(handle.fid, input.offset, data, write_timeout)
+        {
             Ok(count) => count,
             Err(error) if is_transport_error(&error) => {
                 self.reconnect()?;
@@ -193,7 +201,7 @@ impl R9pFuse {
         reply_struct(file, header.unique, &out)?;
         if !stale_fids.is_empty() {
             if let Ok(client) = self.client_snapshot() {
-                let timeout = self.request_timeout();
+                let timeout = self.control_timeout();
                 thread::spawn(move || {
                     for fid in stale_fids {
                         let _ = client.clunk_timeout(fid, timeout);
@@ -213,7 +221,9 @@ impl R9pFuse {
         let input = read_struct::<FuseReleaseIn>(payload)?;
         let handle = self.nodes()?.remove_handle(input.fh);
         if let Some(handle) = handle {
-            let _ = handle.client.clunk(handle.fid);
+            let _ = handle
+                .client
+                .clunk_timeout(handle.fid, self.control_timeout());
         }
         reply_empty(file, header.unique)
     }

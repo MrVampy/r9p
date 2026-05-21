@@ -1,3 +1,4 @@
+mod diagnostics;
 mod error;
 mod fuse;
 mod node;

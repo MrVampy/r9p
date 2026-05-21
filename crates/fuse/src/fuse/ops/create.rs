@@ -41,11 +41,11 @@ impl R9pFuse {
                 }
                 Err(error) => return Err(error),
             };
-        let walked = match client.walk_one(parent_fid, name) {
-            Ok(node_fid) => match client.stat(node_fid) {
+        let walked = match client.walk_one_timeout(parent_fid, name, self.lookup_timeout()) {
+            Ok(node_fid) => match client.stat_timeout(node_fid, self.lookup_timeout()) {
                 Ok(stat) => Ok((node_fid, stat)),
                 Err(error) => {
-                    let _ = client.clunk(node_fid);
+                    let _ = client.clunk_timeout(node_fid, self.control_timeout());
                     Err(error)
                 }
             },
@@ -69,12 +69,12 @@ impl R9pFuse {
                 (nodeid, generation, handle, stat, None)
             }
             Err(error) => {
-                let _ = client.clunk(open_fid);
+                let _ = client.clunk_timeout(open_fid, self.control_timeout());
                 return Err(error);
             }
         };
         if let Some(clunk_fid) = clunk_fid {
-            let _ = client.clunk_timeout(clunk_fid, self.config.request_timeout);
+            let _ = client.clunk_timeout(clunk_fid, self.control_timeout());
         }
         let out = FuseCreateOut {
             entry: self.entry_out(nodeid, generation, &stat),
@@ -108,7 +108,7 @@ impl R9pFuse {
                 }
                 Err(error) => return Err(error),
             };
-        let _ = client.clunk(fid);
+        let _ = client.clunk_timeout(fid, self.control_timeout());
         self.insert_created_node(file, header, &client, parent_fid, name)
     }
 
@@ -133,7 +133,7 @@ impl R9pFuse {
                 }
                 Err(error) => return Err(error),
             };
-        let _ = client.clunk(fid);
+        let _ = client.clunk_timeout(fid, self.control_timeout());
         self.insert_created_node(file, header, &client, parent_fid, name)
     }
 
@@ -150,17 +150,12 @@ impl R9pFuse {
         // path-backed state may be rebound, but mutating operations are not
         // duplicated after an ambiguous partial success.
         let (client, parent_fid) = self.bound_node_fid(parent_nodeid)?;
-        let create_fid = client.clone_fid_timeout(parent_fid, self.config.request_timeout)?;
-        let (fid, qid) = match client.create_timeout(
-            create_fid,
-            name,
-            perm,
-            mode,
-            self.config.request_timeout,
-        ) {
+        let timeout = self.mutation_timeout();
+        let create_fid = client.clone_fid_timeout(parent_fid, timeout)?;
+        let (fid, qid) = match client.create_timeout(create_fid, name, perm, mode, timeout) {
             Ok(created) => created,
             Err(error) => {
-                let _ = client.clunk_timeout(create_fid, self.config.request_timeout);
+                let _ = client.clunk_timeout(create_fid, self.control_timeout());
                 return Err(error);
             }
         };
@@ -175,8 +170,8 @@ impl R9pFuse {
         parent_fid: Fid,
         name: &[u8],
     ) -> Result<()> {
-        let node_fid = client.walk_one_timeout(parent_fid, name, self.config.request_timeout)?;
-        let stat = client.stat_timeout(node_fid, self.config.request_timeout)?;
+        let node_fid = client.walk_one_timeout(parent_fid, name, self.lookup_timeout())?;
+        let stat = client.stat_timeout(node_fid, self.lookup_timeout())?;
         let (nodeid, generation, clunk_fid) = {
             let mut nodes = self.nodes()?;
             let inserted = nodes.insert_lookup(header.nodeid, node_fid, stat.clone(), name)?;
@@ -185,7 +180,7 @@ impl R9pFuse {
             (nodeid, generation, inserted.clunk_fid)
         };
         if let Some(clunk_fid) = clunk_fid {
-            let _ = client.clunk_timeout(clunk_fid, self.config.request_timeout);
+            let _ = client.clunk_timeout(clunk_fid, self.control_timeout());
         }
         let out = self.entry_out(nodeid, generation, &stat);
         reply_struct(file, header.unique, &out)

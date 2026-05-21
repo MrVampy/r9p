@@ -59,6 +59,8 @@ const PLAN9_ERRNO_PATTERNS: &[(&str, i32)] = &[
     ("does not exist", libc::ENOENT),
     ("no such device", libc::ENODEV),
     ("not found", libc::ENOENT),
+    ("not_found", libc::ENOENT),
+    ("does_not_exist", libc::ENOENT),
     ("not exist", libc::ENOENT),
     ("no such file", libc::ENOENT),
     ("no such entry", libc::ENOENT),
@@ -72,12 +74,15 @@ const PLAN9_ERRNO_PATTERNS: &[(&str, i32)] = &[
     ("not permitted", libc::EPERM),
     ("forbidden", libc::EACCES),
     ("unauthorized", libc::EACCES),
+    ("permission_denied", libc::EACCES),
     ("permission", libc::EACCES),
     ("access", libc::EACCES),
     ("denied", libc::EACCES),
     ("not writable", libc::EACCES),
+    ("not_writable", libc::EACCES),
     ("write not allowed", libc::EACCES),
     ("not readable", libc::EACCES),
+    ("not_readable", libc::EACCES),
     ("already exists", libc::EEXIST),
     ("file exists", libc::EEXIST),
     (" exists", libc::EEXIST),
@@ -90,13 +95,17 @@ const PLAN9_ERRNO_PATTERNS: &[(&str, i32)] = &[
     ("directory", libc::ENOTDIR),
     ("not empty", libc::ENOTEMPTY),
     ("not implemented", libc::ENOSYS),
+    ("not_implemented", libc::ENOSYS),
     ("unimplemented", libc::ENOSYS),
     ("unsupported", libc::ENOTSUP),
+    ("not_supported", libc::ENOTSUP),
     ("not supported", libc::ENOTSUP),
     ("op unsupported", libc::ENOTSUP),
     ("read-only", libc::EROFS),
     ("read only", libc::EROFS),
     ("timed out", libc::ETIMEDOUT),
+    ("timed_out", libc::ETIMEDOUT),
+    ("client_command_timeout", libc::ETIMEDOUT),
     ("timeout", libc::ETIMEDOUT),
     ("interrupt", libc::EINTR),
     ("bad message", libc::EBADMSG),
@@ -106,11 +115,13 @@ const PLAN9_ERRNO_PATTERNS: &[(&str, i32)] = &[
     ("missing import closure", libc::EINVAL),
     ("rejected", libc::EINVAL),
     ("decode", libc::EINVAL),
+    ("decode_failed", libc::EINVAL),
     ("invalid", libc::EINVAL),
     ("illegal", libc::EINVAL),
     ("argument", libc::EINVAL),
     ("malformed", libc::EINVAL),
     ("parse", libc::EINVAL),
+    ("parse_failed", libc::EINVAL),
     ("bad", libc::EINVAL),
     ("input/output", libc::EIO),
     ("i/o", libc::EIO),
@@ -122,6 +133,7 @@ const PLAN9_ERRNO_PATTERNS: &[(&str, i32)] = &[
     ("pipe", libc::EPIPE),
     ("temporar", libc::EAGAIN),
     ("unavailable", libc::EAGAIN),
+    ("generation_conflict", libc::EAGAIN),
     ("out of memory", libc::ENOMEM),
     ("memory", libc::ENOMEM),
     ("name too long", libc::ENAMETOOLONG),
@@ -181,6 +193,24 @@ mod tests {
             libc::EINVAL
         );
         assert_eq!(errno_for_9p_error("not writable"), libc::EACCES);
+    }
+
+    #[test]
+    fn maps_machine_style_vault_errors() {
+        assert_eq!(
+            errno_for_9p_error("r9p_client_command_timeout:read"),
+            libc::ETIMEDOUT
+        );
+        assert_eq!(
+            errno_for_9p_error("remote_worktree_import_not_implemented"),
+            libc::ENOSYS
+        );
+        assert_eq!(
+            errno_for_9p_error("namespace_generation_conflict"),
+            libc::EAGAIN
+        );
+        assert_eq!(errno_for_9p_error("not_writable"), libc::EACCES);
+        assert_eq!(errno_for_9p_error("parse_failed"), libc::EINVAL);
     }
 
     #[test]

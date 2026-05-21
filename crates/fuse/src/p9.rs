@@ -63,24 +63,12 @@ impl Client {
         self.inner.root_fid()
     }
 
-    pub fn clone_fid(&self, fid: Fid) -> Result<Fid> {
-        self.walk(fid, &[])
-    }
-
     pub fn clone_fid_timeout(&self, fid: Fid, timeout: Duration) -> Result<Fid> {
         self.walk_timeout(fid, &[], timeout)
     }
 
-    pub fn walk_one(&self, fid: Fid, name: &[u8]) -> Result<Fid> {
-        self.walk(fid, &[name.to_vec()])
-    }
-
     pub fn walk_one_timeout(&self, fid: Fid, name: &[u8], timeout: Duration) -> Result<Fid> {
         self.walk_timeout(fid, &[name.to_vec()], timeout)
-    }
-
-    pub fn walk(&self, fid: Fid, names: &[Vec<u8>]) -> Result<Fid> {
-        self.inner.walk(fid, names).map_err(client_error)
     }
 
     pub fn walk_timeout(&self, fid: Fid, names: &[Vec<u8>], timeout: Duration) -> Result<Fid> {
@@ -104,10 +92,6 @@ impl Client {
             }
             other => Err(unexpected("Rwalk", other)),
         }
-    }
-
-    pub fn open(&self, fid: Fid, mode: u8) -> Result<Qid> {
-        self.inner.open(fid, mode).map_err(client_error)
     }
 
     pub fn open_timeout(&self, fid: Fid, mode: u8, timeout: Duration) -> Result<Qid> {
@@ -222,10 +206,6 @@ impl Client {
         }
     }
 
-    pub fn clunk(&self, fid: Fid) -> Result<()> {
-        self.inner.clunk(fid).map_err(client_error)
-    }
-
     pub fn clunk_timeout(&self, fid: Fid, timeout: Duration) -> Result<()> {
         match self.call_timeout(timeout, |protocol| protocol.clunk(fid))? {
             Completion::Clunk => Ok(()),
@@ -233,12 +213,11 @@ impl Client {
         }
     }
 
-    pub fn remove(&self, fid: Fid) -> Result<()> {
-        self.inner.remove(fid).map_err(client_error)
-    }
-
-    pub fn stat(&self, fid: Fid) -> Result<Stat> {
-        self.inner.stat(fid).map_err(client_error)
+    pub fn remove_timeout(&self, fid: Fid, timeout: Duration) -> Result<()> {
+        match self.call_timeout(timeout, |protocol| protocol.remove(fid))? {
+            Completion::Remove => Ok(()),
+            other => Err(unexpected("Rremove", other)),
+        }
     }
 
     pub fn stat_timeout(&self, fid: Fid, timeout: Duration) -> Result<Stat> {
@@ -248,8 +227,11 @@ impl Client {
         }
     }
 
-    pub fn wstat(&self, fid: Fid, stat: Stat) -> Result<()> {
-        self.inner.wstat(fid, stat).map_err(client_error)
+    pub fn wstat_timeout(&self, fid: Fid, stat: Stat, timeout: Duration) -> Result<()> {
+        match self.call_timeout(timeout, |protocol| protocol.wstat(fid, stat))? {
+            Completion::Wstat => Ok(()),
+            other => Err(unexpected("Rwstat", other)),
+        }
     }
 
     fn call_timeout<F>(&self, timeout: Duration, build: F) -> Result<Completion>

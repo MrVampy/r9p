@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::Duration;
 
 use fuse::Config as MountConfig;
@@ -35,9 +36,17 @@ pub(crate) fn parse_mount_config(global: Config, args: Vec<String>) -> CliResult
         attr_timeout: Duration::ZERO,
         entry_timeout: Duration::ZERO,
         request_timeout: Duration::from_secs(5),
+        lookup_timeout: Duration::ZERO,
+        read_timeout: Duration::ZERO,
+        write_timeout: Duration::ZERO,
+        mutation_timeout: Duration::ZERO,
+        control_timeout: Duration::ZERO,
+        interrupt_timeout: Duration::ZERO,
         max_workers: fuse::DEFAULT_MAX_WORKERS,
         max_background: fuse::DEFAULT_MAX_BACKGROUND,
         congestion_threshold: fuse::default_congestion_threshold(fuse::DEFAULT_MAX_BACKGROUND),
+        diagnostics_path: None,
+        diagnostics_capacity: 0,
         debug: false,
     };
 
@@ -59,6 +68,49 @@ pub(crate) fn parse_mount_config(global: Config, args: Vec<String>) -> CliResult
                 index += 1;
                 config.request_timeout =
                     parse_duration(args.get(index), "missing request timeout")?;
+            }
+            "--lookup-timeout" => {
+                index += 1;
+                config.lookup_timeout = parse_duration(args.get(index), "missing lookup timeout")?;
+            }
+            "--read-timeout" => {
+                index += 1;
+                config.read_timeout = parse_duration(args.get(index), "missing read timeout")?;
+            }
+            "--write-timeout" => {
+                index += 1;
+                config.write_timeout = parse_duration(args.get(index), "missing write timeout")?;
+            }
+            "--mutation-timeout" => {
+                index += 1;
+                config.mutation_timeout =
+                    parse_duration(args.get(index), "missing mutation timeout")?;
+            }
+            "--control-timeout" => {
+                index += 1;
+                config.control_timeout =
+                    parse_duration(args.get(index), "missing control timeout")?;
+            }
+            "--interrupt-timeout" => {
+                index += 1;
+                config.interrupt_timeout =
+                    parse_duration(args.get(index), "missing interrupt timeout")?;
+            }
+            "--diagnostics-file" => {
+                index += 1;
+                config.diagnostics_path = Some(PathBuf::from(
+                    args.get(index)
+                        .ok_or_else(|| cli_error("missing diagnostics file"))?,
+                ));
+            }
+            "--diagnostics-capacity" => {
+                index += 1;
+                config.diagnostics_capacity = parse_usize_limit(
+                    args.get(index),
+                    "missing diagnostics capacity",
+                    "diagnostics capacity",
+                    65_536,
+                )?;
             }
             "--max-workers" => {
                 index += 1;
@@ -189,7 +241,7 @@ fn parse_u16_limit(
 
 fn mount_usage(code: i32) -> ! {
     eprintln!(
-        "usage: r9p mount [--aname aname] [--uname uname] [--msize msize] [--attr-timeout seconds] [--entry-timeout seconds] [--request-timeout seconds] [--max-workers count] [--max-background count] [--congestion-threshold count] endpoint mountpoint"
+        "usage: r9p mount [--aname aname] [--uname uname] [--msize msize] [--attr-timeout seconds] [--entry-timeout seconds] [--request-timeout seconds] [--lookup-timeout seconds] [--read-timeout seconds] [--write-timeout seconds] [--mutation-timeout seconds] [--control-timeout seconds] [--interrupt-timeout seconds] [--max-workers count] [--max-background count] [--congestion-threshold count] [--diagnostics-file path] [--diagnostics-capacity count] endpoint mountpoint"
     );
     std::process::exit(code);
 }
@@ -223,6 +275,22 @@ mod tests {
                 "/".to_string(),
                 "--request-timeout".to_string(),
                 "0.25".to_string(),
+                "--lookup-timeout".to_string(),
+                "0.5".to_string(),
+                "--read-timeout".to_string(),
+                "1".to_string(),
+                "--write-timeout".to_string(),
+                "2".to_string(),
+                "--mutation-timeout".to_string(),
+                "3".to_string(),
+                "--control-timeout".to_string(),
+                "4".to_string(),
+                "--interrupt-timeout".to_string(),
+                "0.125".to_string(),
+                "--diagnostics-file".to_string(),
+                "/tmp/r9p-mount-diagnostics.jsonl".to_string(),
+                "--diagnostics-capacity".to_string(),
+                "64".to_string(),
                 "--max-workers".to_string(),
                 "8".to_string(),
                 "--max-background".to_string(),
@@ -246,6 +314,17 @@ mod tests {
         assert_eq!(config.address, "127.0.0.1:564");
         assert_eq!(config.mountpoint, "/tmp/r9p-mount");
         assert_eq!(config.request_timeout, Duration::from_millis(250));
+        assert_eq!(config.lookup_timeout, Duration::from_millis(500));
+        assert_eq!(config.read_timeout, Duration::from_secs(1));
+        assert_eq!(config.write_timeout, Duration::from_secs(2));
+        assert_eq!(config.mutation_timeout, Duration::from_secs(3));
+        assert_eq!(config.control_timeout, Duration::from_secs(4));
+        assert_eq!(config.interrupt_timeout, Duration::from_millis(125));
+        assert_eq!(
+            config.diagnostics_path.as_deref(),
+            Some(std::path::Path::new("/tmp/r9p-mount-diagnostics.jsonl"))
+        );
+        assert_eq!(config.diagnostics_capacity, 64);
         assert_eq!(config.attr_timeout, Duration::from_millis(1500));
         assert_eq!(config.entry_timeout, Duration::from_secs(2));
         assert_eq!(config.max_workers, 8);

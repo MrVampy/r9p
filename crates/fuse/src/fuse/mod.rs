@@ -16,6 +16,7 @@ mod util;
 mod wire;
 
 use crate::{
+    diagnostics::{Diagnostics, DEFAULT_DIAGNOSTICS_CAPACITY},
     error::{Error, Result},
     node::{mode_kind, qid_to_inode, NodeTable},
     p9::Client,
@@ -25,7 +26,7 @@ use r9p::stat::Stat;
 use std::{
     fs::File,
     os::fd::FromRawFd,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
     time::Duration,
 };
@@ -49,9 +50,17 @@ pub struct Config {
     pub attr_timeout: Duration,
     pub entry_timeout: Duration,
     pub request_timeout: Duration,
+    pub lookup_timeout: Duration,
+    pub read_timeout: Duration,
+    pub write_timeout: Duration,
+    pub mutation_timeout: Duration,
+    pub control_timeout: Duration,
+    pub interrupt_timeout: Duration,
     pub max_workers: usize,
     pub max_background: u16,
     pub congestion_threshold: u16,
+    pub diagnostics_path: Option<PathBuf>,
+    pub diagnostics_capacity: usize,
     pub debug: bool,
 }
 
@@ -60,6 +69,7 @@ pub struct R9pFuse {
     client: ClientSlot,
     nodes: Arc<Mutex<NodeTable>>,
     config: Config,
+    diagnostics: Diagnostics,
     uid: u32,
     gid: u32,
 }
@@ -97,8 +107,10 @@ impl R9pFuse {
     pub fn mount(mut config: Config) -> Result<()> {
         normalize_config(&mut config);
         let client = Client::connect(&config.address, &config.uname, &config.aname, config.msize)?;
-        let root_stat = client.stat(client.root_fid())?;
+        let root_stat = client.stat_timeout(client.root_fid(), config.lookup_timeout)?;
         let nodes = Arc::new(Mutex::new(NodeTable::new(client.root_fid(), root_stat)));
+        let diagnostics =
+            Diagnostics::new(config.diagnostics_capacity, config.diagnostics_path.clone());
         let uid = unsafe { libc::getuid() };
         let gid = unsafe { libc::getgid() };
         let fd = mount_fuse(Path::new(&config.mountpoint))?;
@@ -106,6 +118,7 @@ impl R9pFuse {
             client: ClientSlot::new(client),
             nodes,
             config,
+            diagnostics,
             uid,
             gid,
         };
@@ -160,15 +173,14 @@ impl R9pFuse {
                 Ok((client, fid))
             }
             _ => {
-                let fid =
-                    client.walk_timeout(client.root_fid(), &path, self.config.request_timeout)?;
-                let stat = client.stat_timeout(fid, self.config.request_timeout)?;
+                let fid = client.walk_timeout(client.root_fid(), &path, self.lookup_timeout())?;
+                let stat = client.stat_timeout(fid, self.lookup_timeout())?;
                 let old_fid = self.nodes()?.replace_binding(nodeid, fid, stat)?;
                 if self.config.debug {
                     eprintln!("r9p mount: node {nodeid} rebound to fid {fid}");
                 }
                 if let Some(old_fid) = old_fid {
-                    let _ = client.clunk_timeout(old_fid, self.config.request_timeout);
+                    let _ = client.clunk_timeout(old_fid, self.control_timeout());
                 }
                 Ok((client, fid))
             }
@@ -194,8 +206,45 @@ impl R9pFuse {
         self.client.snapshot()
     }
 
-    pub(in crate::fuse) fn request_timeout(&self) -> Duration {
-        self.config.request_timeout
+    pub(in crate::fuse) fn lookup_timeout(&self) -> Duration {
+        self.config.lookup_timeout
+    }
+
+    pub(in crate::fuse) fn read_timeout(&self) -> Duration {
+        self.config.read_timeout
+    }
+
+    pub(in crate::fuse) fn write_timeout(&self) -> Duration {
+        self.config.write_timeout
+    }
+
+    pub(in crate::fuse) fn mutation_timeout(&self) -> Duration {
+        self.config.mutation_timeout
+    }
+
+    pub(in crate::fuse) fn control_timeout(&self) -> Duration {
+        self.config.control_timeout
+    }
+
+    pub(in crate::fuse) fn interrupt_timeout(&self) -> Duration {
+        self.config.interrupt_timeout
+    }
+
+    pub(in crate::fuse) fn record_diagnostic(
+        &self,
+        event: &'static str,
+        header: wire::FuseInHeader,
+        errno: i32,
+        message: impl Into<String>,
+    ) {
+        let _ = self.diagnostics.record(
+            event,
+            header.opcode,
+            header.unique,
+            header.nodeid,
+            errno,
+            message,
+        );
     }
 
     fn attr(&self, stat: &Stat) -> FuseAttr {
@@ -221,8 +270,29 @@ impl R9pFuse {
 }
 
 fn normalize_config(config: &mut Config) {
+    if config.lookup_timeout.is_zero() {
+        config.lookup_timeout = config.request_timeout;
+    }
+    if config.read_timeout.is_zero() {
+        config.read_timeout = config.request_timeout;
+    }
+    if config.write_timeout.is_zero() {
+        config.write_timeout = config.request_timeout;
+    }
+    if config.mutation_timeout.is_zero() {
+        config.mutation_timeout = config.request_timeout;
+    }
+    if config.control_timeout.is_zero() {
+        config.control_timeout = config.request_timeout;
+    }
+    if config.interrupt_timeout.is_zero() {
+        config.interrupt_timeout = config.request_timeout.min(Duration::from_secs(1));
+    }
     if config.max_workers == 0 {
         config.max_workers = DEFAULT_MAX_WORKERS;
+    }
+    if config.diagnostics_capacity == 0 {
+        config.diagnostics_capacity = DEFAULT_DIAGNOSTICS_CAPACITY;
     }
     if config.max_background == 0 {
         config.max_background = DEFAULT_MAX_BACKGROUND;
@@ -335,14 +405,24 @@ mod tests {
             attr_timeout: Duration::ZERO,
             entry_timeout: Duration::ZERO,
             request_timeout: Duration::from_secs(5),
+            lookup_timeout: Duration::ZERO,
+            read_timeout: Duration::ZERO,
+            write_timeout: Duration::ZERO,
+            mutation_timeout: Duration::ZERO,
+            control_timeout: Duration::ZERO,
+            interrupt_timeout: Duration::ZERO,
             max_workers: 0,
             max_background: 0,
             congestion_threshold: 99,
+            diagnostics_path: None,
+            diagnostics_capacity: 0,
             debug: false,
         };
 
         normalize_config(&mut config);
 
+        assert_eq!(config.lookup_timeout, Duration::from_secs(5));
+        assert_eq!(config.interrupt_timeout, Duration::from_secs(1));
         assert_eq!(config.max_workers, DEFAULT_MAX_WORKERS);
         assert_eq!(config.max_background, DEFAULT_MAX_BACKGROUND);
         assert_eq!(

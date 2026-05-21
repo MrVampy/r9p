@@ -56,7 +56,7 @@ r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] rm path...
 r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] create path...
 r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] mkdir path...
 r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] con [-r] path
-r9p mount [--uname uname] [--aname aname] [--attr-timeout seconds] [--entry-timeout seconds] [--request-timeout seconds] [--max-workers count] [--max-background count] [--congestion-threshold count] endpoint mountpoint
+r9p mount [--uname uname] [--aname aname] [--attr-timeout seconds] [--entry-timeout seconds] [--request-timeout seconds] [--lookup-timeout seconds] [--read-timeout seconds] [--write-timeout seconds] [--mutation-timeout seconds] [--control-timeout seconds] [--interrupt-timeout seconds] [--max-workers count] [--max-background count] [--congestion-threshold count] [--diagnostics-file path] [--diagnostics-capacity count] endpoint mountpoint
 r9p serve [--bind address] root
 r9p export [--bind address] [--descriptor machine] [--descriptor-file path] [--auth boundary] root
 ```
@@ -77,6 +77,16 @@ of 75 percent. These knobs are per mount and exist to let the kernel and the
 mount client apply backpressure during broad walks or slow peer operations
 instead of turning a recursive filesystem operation into an unbounded thread
 or memory spike.
+
+`r9p mount` also bounds backing 9P calls and propagates cancellation: timed-out
+9P calls send `Tflush`, and Linux `FUSE_INTERRUPT` requests flush the active 9P
+tag for the interrupted kernel request. `--request-timeout` remains the default
+for all 9P operations, while `--lookup-timeout`, `--read-timeout`,
+`--write-timeout`, `--mutation-timeout`, `--control-timeout`, and
+`--interrupt-timeout` let a mount tune the expensive paths independently.
+`--diagnostics-file` records JSONL operation diagnostics with opcode, unique,
+nodeid, errno, and message fields. Namespace-control writes explicitly
+invalidate affected FUSE inode and dentry cache entries.
 
 `--machine` keeps the same connection flags but emits tab-separated records
 with byte fields hex-encoded. It is intended for typed wrappers that need a
@@ -134,6 +144,7 @@ preserving one 9P session for session-private state.
 ```bash
 cargo run --bin r9p -- -a 127.0.0.1:9564 ls /
 cargo test
+cargo test -p cli --test fuse_mount -- --ignored
 cargo clippy -- -D warnings
 nix flake check
 ```

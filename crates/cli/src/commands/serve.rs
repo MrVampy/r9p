@@ -8,6 +8,9 @@ use std::{
     thread,
 };
 
+use crate::export_descriptor::{
+    AuthBoundary, ExportDescriptor, ExportMode, Protocol, TransportClass, EXPORT_FORMAT_V1,
+};
 use fs::LocalTree;
 use r9p::{
     codec,
@@ -22,7 +25,21 @@ use crate::{
 
 pub(crate) fn serve_cmd(global: Config, args: Vec<String>) -> CliResult<()> {
     let config = parse_serve_config(global, args)?;
-    serve(config)
+    let bound = BoundListener::bind(&config)?;
+    eprintln!(
+        "r9p: serving {} on {}",
+        config.root.display(),
+        bound.display_endpoint()
+    );
+    bound.run(config)
+}
+
+pub(crate) fn export_cmd(global: Config, args: Vec<String>) -> CliResult<()> {
+    let config = parse_export_config(global, args)?;
+    let bound = BoundListener::bind(&config.serve)?;
+    let descriptor = export_descriptor(&config, &bound)?;
+    write_descriptor(&config, &descriptor)?;
+    bound.run(config.serve)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +56,21 @@ pub(crate) struct ServeConfig {
 enum BindTarget {
     Tcp(SocketAddr),
     Unix(PathBuf),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExportConfig {
+    serve: ServeConfig,
+    descriptor_file: Option<PathBuf>,
+    auth: AuthBoundary,
+}
+
+enum BoundListener {
+    Tcp(TcpListener),
+    Unix {
+        path: PathBuf,
+        listener: UnixListener,
+    },
 }
 
 pub(crate) fn parse_serve_config(global: Config, args: Vec<String>) -> CliResult<ServeConfig> {
@@ -94,54 +126,160 @@ pub(crate) fn parse_serve_config(global: Config, args: Vec<String>) -> CliResult
     })
 }
 
-fn serve(config: ServeConfig) -> CliResult<()> {
-    match config.bind.clone() {
-        BindTarget::Tcp(address) => serve_tcp(config, address),
-        BindTarget::Unix(path) => serve_unix(config, path),
+fn parse_export_config(global: Config, args: Vec<String>) -> CliResult<ExportConfig> {
+    if global.address.is_some() {
+        return Err(cli_error(
+            "r9p export uses --bind for its listen address; do not use global -a",
+        ));
+    }
+
+    let mut bind = None;
+    let mut max_fids = 4096_usize;
+    let mut descriptor_file = None;
+    let mut descriptor_format = "machine".to_string();
+    let mut auth = AuthBoundary::none();
+    let mut positional = Vec::new();
+    let mut index = 0_usize;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--bind" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| cli_error("missing bind address"))?;
+                bind = Some(parse_bind_target(value)?);
+            }
+            "--max-fids" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| cli_error("missing max fid count"))?;
+                max_fids = value
+                    .parse::<usize>()
+                    .map_err(|_| cli_error(format!("invalid max fid count {value}")))?;
+            }
+            "--descriptor" => {
+                index += 1;
+                descriptor_format = args
+                    .get(index)
+                    .ok_or_else(|| cli_error("missing descriptor format"))?
+                    .clone();
+            }
+            "--descriptor-file" => {
+                index += 1;
+                descriptor_file = Some(PathBuf::from(
+                    args.get(index)
+                        .ok_or_else(|| cli_error("missing descriptor file"))?,
+                ));
+            }
+            "--auth" => {
+                index += 1;
+                auth = AuthBoundary::parse(
+                    args.get(index)
+                        .ok_or_else(|| cli_error("missing auth boundary"))?,
+                )?;
+            }
+            "-h" | "--help" => export_usage(0),
+            arg if arg.starts_with('-') => {
+                return Err(cli_error(format!("unknown export option {arg}")));
+            }
+            arg => positional.push(arg.to_string()),
+        }
+        index += 1;
+    }
+
+    if positional.len() != 1 {
+        return Err(cli_error("expected root directory"));
+    }
+    if !matches!(descriptor_format.as_str(), "machine" | EXPORT_FORMAT_V1) {
+        return Err(cli_error(format!(
+            "unsupported descriptor format {descriptor_format}"
+        )));
+    }
+
+    Ok(ExportConfig {
+        serve: ServeConfig {
+            root: PathBuf::from(&positional[0]),
+            bind: bind.unwrap_or_else(default_unix_bind),
+            uname: global.uname,
+            aname: global.aname,
+            msize: global.msize,
+            max_fids,
+        },
+        descriptor_file,
+        auth,
+    })
+}
+
+impl BoundListener {
+    fn bind(config: &ServeConfig) -> CliResult<Self> {
+        match &config.bind {
+            BindTarget::Tcp(address) => {
+                let listener = TcpListener::bind(address)
+                    .map_err(|error| cli_error(format!("bind {address}: {error}")))?;
+                Ok(Self::Tcp(listener))
+            }
+            BindTarget::Unix(path) => {
+                remove_stale_socket(path)?;
+                let listener = UnixListener::bind(path)
+                    .map_err(|error| cli_error(format!("bind {}: {error}", path.display())))?;
+                Ok(Self::Unix {
+                    path: path.clone(),
+                    listener,
+                })
+            }
+        }
+    }
+
+    fn endpoint_bind(&self) -> CliResult<String> {
+        match self {
+            Self::Tcp(listener) => Ok(listener.local_addr()?.to_string()),
+            Self::Unix { path, .. } => Ok(format!("unix:{}", path.display())),
+        }
+    }
+
+    fn display_endpoint(&self) -> String {
+        self.endpoint_bind()
+            .unwrap_or_else(|_| "<unavailable>".to_string())
+    }
+
+    const fn transport_class(&self) -> TransportClass {
+        match self {
+            Self::Tcp(_) => TransportClass::Tcp,
+            Self::Unix { .. } => TransportClass::Unix,
+        }
+    }
+
+    fn run(self, config: ServeConfig) -> CliResult<()> {
+        match self {
+            Self::Tcp(listener) => {
+                for stream in listener.incoming() {
+                    let stream = stream
+                        .map_err(|error| cli_error(format!("accept TCP connection: {error}")))?;
+                    spawn_connection(stream, config.clone());
+                }
+            }
+            Self::Unix { listener, .. } => {
+                for stream in listener.incoming() {
+                    let stream = stream
+                        .map_err(|error| cli_error(format!("accept unix connection: {error}")))?;
+                    spawn_connection(stream, config.clone());
+                }
+            }
+        }
+        Ok(())
     }
 }
 
-fn serve_tcp(config: ServeConfig, address: SocketAddr) -> CliResult<()> {
-    let listener = TcpListener::bind(address)
-        .map_err(|error| cli_error(format!("bind {address}: {error}")))?;
-    eprintln!(
-        "r9p: serving {} on {}",
-        config.root.display(),
-        listener.local_addr()?
-    );
-    for stream in listener.incoming() {
-        let stream =
-            stream.map_err(|error| cli_error(format!("accept TCP connection: {error}")))?;
-        let session = config.clone();
-        thread::spawn(move || {
-            if let Err(error) = serve_connection(stream, session) {
-                eprintln!("r9p: serve connection: {error}");
-            }
-        });
-    }
-    Ok(())
-}
-
-fn serve_unix(config: ServeConfig, path: PathBuf) -> CliResult<()> {
-    remove_stale_socket(&path)?;
-    let listener = UnixListener::bind(&path)
-        .map_err(|error| cli_error(format!("bind {}: {error}", path.display())))?;
-    eprintln!(
-        "r9p: serving {} on unix:{}",
-        config.root.display(),
-        path.display()
-    );
-    for stream in listener.incoming() {
-        let stream =
-            stream.map_err(|error| cli_error(format!("accept unix connection: {error}")))?;
-        let session = config.clone();
-        thread::spawn(move || {
-            if let Err(error) = serve_connection(stream, session) {
-                eprintln!("r9p: serve connection: {error}");
-            }
-        });
-    }
-    Ok(())
+fn spawn_connection<S>(stream: S, config: ServeConfig)
+where
+    S: Read + Write + Send + 'static,
+{
+    thread::spawn(move || {
+        if let Err(error) = serve_connection(stream, config) {
+            eprintln!("r9p: serve connection: {error}");
+        }
+    });
 }
 
 fn remove_stale_socket(path: &Path) -> CliResult<()> {
@@ -267,14 +405,57 @@ fn default_unix_bind() -> BindTarget {
     BindTarget::Unix(std::env::temp_dir().join(format!("r9p-serve-{}.sock", std::process::id())))
 }
 
+fn export_descriptor(config: &ExportConfig, bound: &BoundListener) -> CliResult<ExportDescriptor> {
+    let aname = if config.serve.aname.is_empty() {
+        "/".to_string()
+    } else {
+        config.serve.aname.clone()
+    };
+    Ok(ExportDescriptor {
+        endpoint_bind: bound.endpoint_bind()?,
+        aname: aname.clone(),
+        uname: config.serve.uname.clone(),
+        exported_root: aname,
+        transport_class: bound.transport_class(),
+        mode: ExportMode::ReadOnly,
+        auth: config.auth.clone(),
+        pid: std::process::id(),
+        protocol: Protocol::NineP2000,
+        msize: config.serve.msize,
+        expires_at: None,
+        local_root_label: Some(config.serve.root.display().to_string()),
+    })
+}
+
+fn write_descriptor(config: &ExportConfig, descriptor: &ExportDescriptor) -> CliResult<()> {
+    let rendered = descriptor.render()?;
+    let _validated = ExportDescriptor::parse(&rendered)?;
+    if let Some(path) = &config.descriptor_file {
+        std_fs::write(path, rendered)
+            .map_err(|error| cli_error(format!("write descriptor {}: {error}", path.display())))?;
+    } else {
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(rendered.as_bytes())?;
+        stdout.flush()?;
+    }
+    Ok(())
+}
+
 fn serve_usage(code: i32) -> ! {
     eprintln!("usage: r9p serve [--bind address] [--max-fids count] root");
     std::process::exit(code);
 }
 
+fn export_usage(code: i32) -> ! {
+    eprintln!(
+        "usage: r9p export [--bind address] [--max-fids count] [--descriptor machine] [--descriptor-file path] [--auth boundary] root"
+    );
+    std::process::exit(code);
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parse_serve_config, BindTarget};
+    use super::{parse_export_config, parse_serve_config, BindTarget};
     use crate::{target::Config, DEFAULT_MSIZE};
     use std::{net::SocketAddr, path::PathBuf};
 
@@ -352,5 +533,24 @@ mod tests {
             ],
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parses_export_descriptor_file_and_auth_boundary() {
+        let config = parse_export_config(
+            global(),
+            vec![
+                "--bind".to_string(),
+                "unix:/tmp/r9p.sock".to_string(),
+                "--descriptor-file".to_string(),
+                "/tmp/r9p.desc".to_string(),
+                "--auth".to_string(),
+                "uds-peercred:1000:100".to_string(),
+                "/tmp/export".to_string(),
+            ],
+        )
+        .expect("export config should parse");
+        assert_eq!(config.descriptor_file, Some(PathBuf::from("/tmp/r9p.desc")));
+        assert_eq!(config.auth.render(), "uds-peercred:1000:100");
     }
 }

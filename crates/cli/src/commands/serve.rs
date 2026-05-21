@@ -9,7 +9,8 @@ use std::{
 };
 
 use crate::export_descriptor::{
-    AuthBoundary, ExportDescriptor, ExportMode, Protocol, TransportClass, EXPORT_FORMAT_V1,
+    AuthBoundary, AuthClass, ExportDescriptor, ExportMode, Protocol, TransportClass,
+    EXPORT_FORMAT_V1,
 };
 use fs::LocalTree;
 use r9p::{
@@ -116,6 +117,7 @@ pub(crate) fn parse_serve_config(global: Config, args: Vec<String>) -> CliResult
     }
 
     let bind = bind.unwrap_or_else(default_unix_bind);
+    validate_serve_bind(&bind)?;
     Ok(ServeConfig {
         root: PathBuf::from(&positional[0]),
         bind,
@@ -197,10 +199,13 @@ fn parse_export_config(global: Config, args: Vec<String>) -> CliResult<ExportCon
         )));
     }
 
+    let bind = bind.unwrap_or_else(default_unix_bind);
+    validate_export_bind(&bind, &auth)?;
+
     Ok(ExportConfig {
         serve: ServeConfig {
             root: PathBuf::from(&positional[0]),
-            bind: bind.unwrap_or_else(default_unix_bind),
+            bind,
             uname: global.uname,
             aname: global.aname,
             msize: global.msize,
@@ -396,13 +401,45 @@ fn parse_tcp_bind(value: &str) -> CliResult<BindTarget> {
         .to_socket_addrs()
         .map_err(|error| cli_error(format!("invalid tcp bind address {value}: {error}")))?;
     let address = addrs
-        .find(|address| address.ip().is_loopback())
-        .ok_or_else(|| cli_error("r9p serve only admits loopback TCP binds in Plan 47"))?;
+        .next()
+        .ok_or_else(|| cli_error(format!("tcp bind address {value} resolved no addresses")))?;
     Ok(BindTarget::Tcp(address))
 }
 
 fn default_unix_bind() -> BindTarget {
     BindTarget::Unix(std::env::temp_dir().join(format!("r9p-serve-{}.sock", std::process::id())))
+}
+
+fn validate_serve_bind(bind: &BindTarget) -> CliResult<()> {
+    if let BindTarget::Tcp(address) = bind {
+        if !address.ip().is_loopback() {
+            return Err(cli_error(
+                "r9p serve only admits loopback TCP binds in Plan 47; use r9p export --auth for an authenticated network boundary",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_export_bind(bind: &BindTarget, auth: &AuthBoundary) -> CliResult<()> {
+    match bind {
+        BindTarget::Tcp(address) if address.ip().is_loopback() => Ok(()),
+        BindTarget::Tcp(_) => match auth.class {
+            AuthClass::WireGuard | AuthClass::Tailscale => Ok(()),
+            AuthClass::None => Err(cli_error(
+                "r9p export requires --auth for non-loopback TCP binds",
+            )),
+            AuthClass::UnixPeerCred => Err(cli_error(
+                "r9p export cannot use uds-peercred auth for TCP binds",
+            )),
+        },
+        BindTarget::Unix(_) => match auth.class {
+            AuthClass::None | AuthClass::UnixPeerCred => Ok(()),
+            AuthClass::WireGuard | AuthClass::Tailscale => Err(cli_error(
+                "r9p export cannot use network auth boundaries for unix socket binds",
+            )),
+        },
+    }
 }
 
 fn export_descriptor(config: &ExportConfig, bound: &BoundListener) -> CliResult<ExportDescriptor> {
@@ -525,6 +562,43 @@ mod tests {
     #[test]
     fn rejects_non_loopback_tcp_bind_without_auth_boundary() {
         let result = parse_serve_config(
+            global(),
+            vec![
+                "--bind".to_string(),
+                "192.0.2.10:564".to_string(),
+                "/tmp/export".to_string(),
+            ],
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parses_non_loopback_export_bind_with_network_auth_boundary() {
+        let config = parse_export_config(
+            global(),
+            vec![
+                "--bind".to_string(),
+                "192.0.2.10:564".to_string(),
+                "--auth".to_string(),
+                "wg:m7-dev-lan".to_string(),
+                "/tmp/export".to_string(),
+            ],
+        )
+        .expect("export config should parse");
+        assert_eq!(
+            config.serve.bind,
+            BindTarget::Tcp(
+                "192.0.2.10:564"
+                    .parse::<SocketAddr>()
+                    .expect("socket address")
+            )
+        );
+        assert_eq!(config.auth.render(), "wg:m7-dev-lan");
+    }
+
+    #[test]
+    fn rejects_non_loopback_export_bind_without_auth_boundary() {
+        let result = parse_export_config(
             global(),
             vec![
                 "--bind".to_string(),

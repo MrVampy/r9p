@@ -135,13 +135,25 @@ impl ExportDescriptor {
     }
 
     fn validate_authority_boundary(&self) -> CliResult<()> {
-        if self.transport_class == TransportClass::Tcp
-            && self.auth.class == AuthClass::None
-            && !tcp_endpoint_is_loopback(&self.endpoint_bind)
-        {
-            return Err(cli_error(
-                "descriptor auth=none is only admitted for loopback TCP",
-            ));
+        match (self.transport_class, self.auth.class) {
+            (TransportClass::Tcp, AuthClass::None)
+                if !tcp_endpoint_is_loopback(&self.endpoint_bind) =>
+            {
+                return Err(cli_error(
+                    "descriptor auth=none is only admitted for loopback TCP",
+                ));
+            }
+            (TransportClass::Tcp, AuthClass::UnixPeerCred) => {
+                return Err(cli_error(
+                    "descriptor uds-peercred auth is not valid for TCP",
+                ));
+            }
+            (TransportClass::Unix, AuthClass::WireGuard | AuthClass::Tailscale) => {
+                return Err(cli_error(
+                    "descriptor network auth boundaries are not valid for unix sockets",
+                ));
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -212,6 +224,9 @@ impl AuthBoundary {
             .split_once(':')
             .ok_or_else(|| cli_error(format!("invalid auth boundary {value}")))?;
         let class = AuthClass::parse(class)?;
+        if class == AuthClass::None || details.is_empty() {
+            return Err(cli_error(format!("invalid auth boundary {value}")));
+        }
         Ok(Self {
             class,
             details: details.to_string(),
@@ -365,5 +380,30 @@ mod tests {
         descriptor.endpoint_bind = "192.0.2.1:564".to_string();
         let rendered = descriptor.render().expect("descriptor should render");
         assert!(ExportDescriptor::parse(&rendered).is_err());
+    }
+
+    #[test]
+    fn descriptor_accepts_network_auth_for_non_loopback_tcp() {
+        let mut descriptor = descriptor();
+        descriptor.endpoint_bind = "192.0.2.1:564".to_string();
+        descriptor.auth = AuthBoundary::parse("wg:m7-dev-lan").expect("auth should parse");
+        let rendered = descriptor.render().expect("descriptor should render");
+        let parsed = ExportDescriptor::parse(&rendered).expect("descriptor should parse");
+        assert_eq!(parsed.auth.render(), "wg:m7-dev-lan");
+    }
+
+    #[test]
+    fn descriptor_rejects_transport_incompatible_auth_boundaries() {
+        let mut tcp = descriptor();
+        tcp.auth = AuthBoundary::parse("uds-peercred:1000:100").expect("auth should parse");
+        assert!(ExportDescriptor::parse(&tcp.render().expect("descriptor should render")).is_err());
+
+        let mut unix = descriptor();
+        unix.transport_class = TransportClass::Unix;
+        unix.endpoint_bind = "unix:/tmp/r9p.sock".to_string();
+        unix.auth = AuthBoundary::parse("wg:m7-dev-lan").expect("auth should parse");
+        assert!(
+            ExportDescriptor::parse(&unix.render().expect("descriptor should render")).is_err()
+        );
     }
 }

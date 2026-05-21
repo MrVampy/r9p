@@ -24,7 +24,7 @@ pub(crate) fn dial_target(target: &Target) -> CliResult<Box<dyn ReadWrite>> {
 }
 
 pub(crate) fn dial_address(address: &str) -> CliResult<Box<dyn ReadWrite>> {
-    if let Some(path) = address.strip_prefix("unix!") {
+    if let Some(path) = unix_address_path(address) {
         return dial_unix_socket(Path::new(path));
     }
     let socket = blocking::parse_tcp_address(address)?;
@@ -34,6 +34,12 @@ pub(crate) fn dial_address(address: &str) -> CliResult<Box<dyn ReadWrite>> {
         .set_nodelay(true)
         .map_err(|error| cli_error(format!("set TCP_NODELAY: {error}")))?;
     Ok(Box::new(stream))
+}
+
+fn unix_address_path(address: &str) -> Option<&str> {
+    address
+        .strip_prefix("unix!")
+        .or_else(|| address.strip_prefix("unix:"))
 }
 
 #[cfg(unix)]
@@ -64,4 +70,22 @@ pub(crate) fn read_response(stream: &mut Box<dyn ReadWrite>) -> CliResult<RMessa
     frame.resize(rest_len + 4, 0);
     stream.read_exact(&mut frame[4..])?;
     Ok(codec::decode_rmessage(&frame)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unix_address_path;
+
+    #[test]
+    fn accepts_legacy_and_descriptor_unix_address_forms() {
+        assert_eq!(
+            unix_address_path("unix!/tmp/r9p.sock"),
+            Some("/tmp/r9p.sock")
+        );
+        assert_eq!(
+            unix_address_path("unix:/tmp/r9p.sock"),
+            Some("/tmp/r9p.sock")
+        );
+        assert_eq!(unix_address_path("127.0.0.1:564"), None);
+    }
 }

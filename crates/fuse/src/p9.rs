@@ -19,6 +19,8 @@ use std::{
     time::Duration,
 };
 
+const TCP_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 
@@ -452,6 +454,9 @@ fn connect_stream(address: &str) -> Result<ClientStream> {
             stream
                 .set_nodelay(true)
                 .map_err(|error| Error::io("set TCP_NODELAY", error))?;
+            stream
+                .set_write_timeout(Some(TCP_WRITE_TIMEOUT))
+                .map_err(|error| Error::io("set TCP write timeout", error))?;
             Ok(ClientStream::Tcp(stream))
         }
         ConnectTarget::Unix(path) => connect_unix_stream(&path),

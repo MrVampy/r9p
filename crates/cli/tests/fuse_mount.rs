@@ -1,5 +1,6 @@
 use std::{
-    fs, io,
+    fs,
+    io::{self, Read},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     thread,
@@ -78,6 +79,69 @@ fn fuse_mount_handles_parallel_recursive_reads() -> io::Result<()> {
     let _ = fs::remove_dir_all(&mountpoint);
     let _ = fs::remove_file(descriptor);
     let _ = fs::remove_file(diagnostics);
+    Ok(())
+}
+
+#[test]
+#[ignore = "host-gated: requires /dev/fuse, fusermount, and user mount permission"]
+fn fuse_mount_lazy_unmount_drains_open_handles() -> io::Result<()> {
+    if !host_can_run_fuse() {
+        return Ok(());
+    }
+
+    let root = unique_temp_dir("r9p-fuse-lazy-export")?;
+    let mountpoint = unique_temp_dir("r9p-fuse-lazy-mount")?;
+    let descriptor = root.with_extension("desc");
+    seed_tree(&root)?;
+
+    let mut export = ChildGuard::spawn(
+        Command::new(r9p_bin())
+            .arg("export")
+            .arg("--bind")
+            .arg("127.0.0.1:0")
+            .arg("--descriptor-file")
+            .arg(&descriptor)
+            .arg(&root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )?;
+    let endpoint = wait_for_descriptor_endpoint(&descriptor)?;
+
+    let mut mount = ChildGuard::spawn(
+        Command::new(r9p_bin())
+            .arg("mount")
+            .arg("--request-timeout")
+            .arg("1")
+            .arg("--control-timeout")
+            .arg("1")
+            .arg(endpoint)
+            .arg(&mountpoint)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )?;
+    let mounted_file = mountpoint.join("dir-0/file-0.txt");
+    wait_for_mounted_file(&mounted_file)?;
+
+    let mut open_file = fs::File::open(&mounted_file)?;
+    lazy_unmount(&mountpoint)?;
+    wait_for_mount_detached(&mountpoint)?;
+
+    let mut contents = String::new();
+    open_file.read_to_string(&mut contents)?;
+    if !contents.contains("dir=0 file=0") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "open handle returned unexpected contents after lazy unmount",
+        ));
+    }
+    drop(open_file);
+
+    mount.wait_until_exit(Duration::from_secs(5))?;
+    export.kill();
+    export.wait_or_kill()?;
+    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(&mountpoint);
+    let _ = fs::remove_file(descriptor);
     Ok(())
 }
 
@@ -206,6 +270,51 @@ fn unmount(path: &Path) {
     }
 }
 
+fn lazy_unmount(path: &Path) -> io::Result<()> {
+    for command in [
+        ("fusermount3", vec!["-u", "-z"]),
+        ("fusermount", vec!["-u", "-z"]),
+        ("umount", vec!["-l"]),
+    ] {
+        let (binary, args) = command;
+        if Command::new(binary)
+            .args(args)
+            .arg(path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+    }
+    Err(io::Error::other("lazy unmount failed"))
+}
+
+fn wait_for_mount_detached(path: &Path) -> io::Result<()> {
+    let started = Instant::now();
+    while started.elapsed() <= Duration::from_secs(5) {
+        if !is_mountpoint(path) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "mountpoint did not detach",
+    ))
+}
+
+fn is_mountpoint(path: &Path) -> bool {
+    Command::new("mountpoint")
+        .arg("-q")
+        .arg(path)
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
 struct ChildGuard {
     child: Option<Child>,
 }
@@ -227,6 +336,28 @@ impl ChildGuard {
                 let _ = child.kill();
             }
             let _ = child.wait()?;
+        }
+        Ok(())
+    }
+
+    fn wait_until_exit(&mut self, timeout: Duration) -> io::Result<()> {
+        if let Some(mut child) = self.child.take() {
+            let started = Instant::now();
+            loop {
+                if child.try_wait()?.is_some() {
+                    let _ = child.wait()?;
+                    return Ok(());
+                }
+                if started.elapsed() > timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "child did not exit after lazy unmount",
+                    ));
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
         }
         Ok(())
     }

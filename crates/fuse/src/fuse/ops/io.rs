@@ -166,7 +166,7 @@ impl R9pFuse {
             nodes.node(header.nodeid)?.path.clone()
         };
         let handle = self.nodes()?.handle(input.fh)?.clone();
-        let write_timeout = if is_namespace_control_write_path(&node_path) {
+        let write_timeout = if is_runtime_control_write_path(&node_path) {
             self.control_timeout()
         } else {
             self.write_timeout()
@@ -192,7 +192,7 @@ impl R9pFuse {
             }
             Err(error) => return Err(error),
         };
-        let stale_bindings = if is_namespace_control_write_path(&node_path) {
+        let stale_bindings = if refreshes_namespace_bindings(&node_path) {
             self.refresh_path_bindings_after_namespace_change()?
         } else {
             Vec::new()
@@ -245,7 +245,16 @@ fn notify_namespace_invalidations(file: &mut File, stale_bindings: &[crate::node
     }
 }
 
-fn is_namespace_control_write_path(path: &[Vec<u8>]) -> bool {
+fn is_runtime_control_write_path(path: &[Vec<u8>]) -> bool {
+    path.len() >= 2
+        && path[0].as_slice() == b"runtime"
+        && path
+            .last()
+            .map(|segment| segment.as_slice() == b"ctl")
+            .unwrap_or(false)
+}
+
+fn refreshes_namespace_bindings(path: &[Vec<u8>]) -> bool {
     path_matches(path, &[b"runtime", b"namespaces", b"current", b"mount"])
         || path_matches(path, &[b"runtime", b"namespaces", b"current", b"unmount"])
         || is_worktree_control_write_path(path)
@@ -269,7 +278,7 @@ fn path_matches(path: &[Vec<u8>], expected: &[&[u8]]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_namespace_control_write_path;
+    use super::{is_runtime_control_write_path, refreshes_namespace_bindings};
 
     fn path(segments: &[&[u8]]) -> Vec<Vec<u8>> {
         segments.iter().map(|segment| segment.to_vec()).collect()
@@ -277,7 +286,7 @@ mod tests {
 
     #[test]
     fn worktree_ctl_writes_refresh_namespace_bindings() {
-        assert!(is_namespace_control_write_path(&path(&[
+        assert!(refreshes_namespace_bindings(&path(&[
             b"runtime",
             b"worktrees",
             b"wt-plan45",
@@ -287,11 +296,42 @@ mod tests {
 
     #[test]
     fn worktree_children_do_not_all_refresh_namespace_bindings() {
-        assert!(!is_namespace_control_write_path(&path(&[
+        assert!(!refreshes_namespace_bindings(&path(&[
             b"runtime",
             b"worktrees",
             b"wt-plan45",
             b"status",
+        ])));
+    }
+
+    #[test]
+    fn runtime_ctl_writes_use_control_timeout() {
+        assert!(is_runtime_control_write_path(&path(&[
+            b"runtime",
+            b"framework",
+            b"reload",
+            b"ctl",
+        ])));
+        assert!(is_runtime_control_write_path(&path(&[
+            b"runtime",
+            b"framework",
+            b"staging",
+            b"providers",
+            b"current",
+            b"ctl",
+        ])));
+        assert!(is_runtime_control_write_path(&path(&[
+            b"runtime",
+            b"services",
+            b"r9p-listener",
+            b"ctl",
+        ])));
+    }
+
+    #[test]
+    fn non_runtime_ctl_writes_use_regular_timeout() {
+        assert!(!is_runtime_control_write_path(&path(&[
+            b"entries", b"note", b"ctl",
         ])));
     }
 }

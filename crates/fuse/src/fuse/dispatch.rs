@@ -36,12 +36,23 @@ use std::{
 impl R9pFuse {
     pub(super) fn run(&self, file: &mut File) -> Result<()> {
         let mut workers = WorkerPool::start(self)?;
+        let mut change_feed = self.start_change_feed(file)?;
         let mut buf = vec![0_u8; FUSE_BUFFER_SIZE];
         loop {
             let n = match file.read(&mut buf) {
-                Ok(0) => return Ok(()),
+                Ok(0) => {
+                    if let Some(feed) = change_feed.take() {
+                        feed.stop_and_join();
+                    }
+                    return Ok(());
+                }
                 Ok(n) => n,
-                Err(error) if error.raw_os_error() == Some(libc::ENODEV) => return Ok(()),
+                Err(error) if error.raw_os_error() == Some(libc::ENODEV) => {
+                    if let Some(feed) = change_feed.take() {
+                        feed.stop_and_join();
+                    }
+                    return Ok(());
+                }
                 Err(error) => return Err(Error::io("read /dev/fuse", error)),
             };
             if n < size_of::<FuseInHeader>() {
@@ -64,6 +75,9 @@ impl R9pFuse {
                     .map_err(|error| Error::io("clone /dev/fuse writer", error))?;
                 let mut worker = self.clone();
                 worker.dispatch(&mut writer, header, payload)?;
+                if let Some(feed) = change_feed.take() {
+                    feed.stop_and_join();
+                }
                 workers.shutdown();
                 return Ok(());
             }

@@ -1,0 +1,412 @@
+//! Runtime namespace-change feed consumer.
+//!
+//! The mount consumes generic path-change records only. Vault-specific domain
+//! events are projected into this shape by the runtime before they reach this
+//! Rust mechanism.
+
+use super::{
+    reply::{notify_inval_entry, notify_inval_inode},
+    util::is_transport_error,
+    R9pFuse,
+};
+use crate::{
+    error::{Error, Result},
+    node::StaleBinding,
+    p9::{Client, OREAD},
+};
+use r9p::fid::Fid;
+use std::{
+    fs::File,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread::{self, JoinHandle},
+    time::Duration,
+};
+
+pub(super) const DEFAULT_CHANGE_FEED_BACKPRESSURE_LIMIT: usize = 4096;
+
+pub(super) struct ChangeFeedHandle {
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl ChangeFeedHandle {
+    pub(super) fn stop_and_join(mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for ChangeFeedHandle {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl R9pFuse {
+    pub(super) fn start_change_feed(&self, file: &File) -> Result<Option<ChangeFeedHandle>> {
+        let Some(path) = self.config.change_feed_path.clone() else {
+            self.status.set_change_feed("disabled", None, None);
+            return Ok(None);
+        };
+        let mut file = file
+            .try_clone()
+            .map_err(|error| Error::io("clone /dev/fuse for change feed", error))?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let mut fs = self.clone();
+        let handle = thread::Builder::new()
+            .name("r9p-fuse-change-feed".to_string())
+            .spawn(move || change_feed_loop(&mut fs, &mut file, path, thread_stop))
+            .map_err(|error| Error::io("spawn namespace change-feed consumer", error))?;
+        Ok(Some(ChangeFeedHandle {
+            stop,
+            handle: Some(handle),
+        }))
+    }
+
+    fn apply_namespace_change(&mut self, file: &mut File, change: NamespaceChange) -> Result<()> {
+        if !scope_matches(self.config.change_feed_scope.as_deref(), &change.scope) {
+            return Ok(());
+        }
+        let path = parse_namespace_path(&change.path)?;
+        let old_path = change
+            .old_path
+            .as_deref()
+            .map(parse_namespace_path)
+            .transpose()?;
+        let invalidation = {
+            let mut nodes = self.nodes()?;
+            match change.change_kind.as_str() {
+                "created" => PathInvalidation {
+                    stale: nodes.mark_path_stale(&path),
+                    parent_entries: nodes.parent_entry(&path).into_iter().collect(),
+                    coarse: false,
+                },
+                "removed" => PathInvalidation {
+                    stale: nodes.mark_path_prefix_stale(&path),
+                    parent_entries: nodes.parent_entry(&path).into_iter().collect(),
+                    coarse: false,
+                },
+                "renamed" => {
+                    let mut stale = old_path
+                        .as_deref()
+                        .map(|old| nodes.mark_path_prefix_stale(old))
+                        .unwrap_or_default();
+                    stale.extend(nodes.mark_path_prefix_stale(&path));
+                    let mut parent_entries = Vec::new();
+                    if let Some(old) = old_path.as_deref() {
+                        parent_entries.extend(nodes.parent_entry(old));
+                    }
+                    parent_entries.extend(nodes.parent_entry(&path));
+                    PathInvalidation {
+                        stale,
+                        parent_entries,
+                        coarse: false,
+                    }
+                }
+                "modified" => PathInvalidation {
+                    stale: nodes.mark_path_stale(&path),
+                    parent_entries: nodes.parent_entry(&path).into_iter().collect(),
+                    coarse: false,
+                },
+                _ => {
+                    return Err(Error::new(
+                        libc::EINVAL,
+                        format!("unknown namespace change kind {}", change.change_kind),
+                    ));
+                }
+            }
+        };
+        notify_invalidations(file, &invalidation);
+        self.clunk_stale_bindings(invalidation.stale);
+        self.status
+            .set_change_feed("connected", Some(change.event_id), None);
+        Ok(())
+    }
+
+    fn apply_coarse_invalidation(&mut self, file: &mut File, reason: &str) {
+        let stale = self
+            .nodes()
+            .map(|mut nodes| nodes.mark_path_bindings_stale())
+            .unwrap_or_default();
+        let invalidation = PathInvalidation {
+            stale,
+            parent_entries: Vec::new(),
+            coarse: true,
+        };
+        notify_invalidations(file, &invalidation);
+        self.clunk_stale_bindings(invalidation.stale);
+        self.record_mount_diagnostic("change_feed_coarse_invalidation", 0, reason);
+    }
+
+    fn clunk_stale_bindings(&self, stale: Vec<StaleBinding>) {
+        if stale.is_empty() {
+            return;
+        }
+        if let Ok(client) = self.client_snapshot() {
+            let timeout = self.control_timeout();
+            thread::spawn(move || {
+                for binding in stale {
+                    if let Some(fid) = binding.fid {
+                        let _ = client.clunk_timeout(fid, timeout);
+                    }
+                }
+            });
+        }
+    }
+}
+
+fn change_feed_loop(fs: &mut R9pFuse, file: &mut File, path: String, stop: Arc<AtomicBool>) {
+    fs.status.set_change_feed("connecting", None, None);
+    while !stop.load(Ordering::SeqCst) {
+        match consume_feed_until_error(fs, file, &path, &stop) {
+            Ok(()) => {}
+            Err(error) => {
+                fs.status
+                    .set_change_feed("degraded", None, Some(error.message().to_string()));
+                fs.record_mount_diagnostic(
+                    "change_feed_disconnected",
+                    error.errno,
+                    error.message(),
+                );
+                fs.apply_coarse_invalidation(file, "change feed degraded");
+                if is_transport_error(&error) {
+                    let _ = fs.reconnect();
+                }
+                sleep_interruptible(fs.config.change_feed_poll_interval, &stop);
+            }
+        }
+    }
+}
+
+fn consume_feed_until_error(
+    fs: &mut R9pFuse,
+    file: &mut File,
+    path: &str,
+    stop: &AtomicBool,
+) -> Result<()> {
+    let client = fs.client_snapshot()?;
+    let fid = open_feed(&client, path, fs.lookup_timeout())?;
+    fs.status.set_change_feed("connected", None, None);
+    while !stop.load(Ordering::SeqCst) {
+        match client.read_full_timeout(fid, 0, 64 * 1024, fs.control_timeout()) {
+            Ok(data) if data.is_empty() => {
+                return Err(Error::new(libc::EPIPE, "change feed ended"))
+            }
+            Ok(data) => apply_feed_chunk(fs, file, &data)?,
+            Err(error) if error.errno == libc::ETIMEDOUT => {}
+            Err(error) => {
+                let _ = client.clunk_timeout(fid, fs.control_timeout());
+                return Err(error);
+            }
+        }
+    }
+    let _ = client.clunk_timeout(fid, fs.control_timeout());
+    Ok(())
+}
+
+fn open_feed(client: &Client, path: &str, timeout: Duration) -> Result<Fid> {
+    let segments = parse_namespace_path(path)?;
+    let fid = client.walk_timeout(client.root_fid(), &segments, timeout)?;
+    if let Err(error) = client.open_timeout(fid, OREAD, timeout) {
+        let _ = client.clunk_timeout(fid, timeout);
+        return Err(error);
+    }
+    Ok(fid)
+}
+
+fn apply_feed_chunk(fs: &mut R9pFuse, file: &mut File, data: &[u8]) -> Result<()> {
+    let text = String::from_utf8_lossy(data);
+    let records = text
+        .lines()
+        .filter_map(parse_namespace_change_record)
+        .collect::<Vec<_>>();
+    if records.len() > fs.config.change_feed_backpressure_limit {
+        fs.apply_coarse_invalidation(file, "change feed backpressure limit exceeded");
+        return Ok(());
+    }
+    for record in records {
+        fs.apply_namespace_change(file, record)?;
+    }
+    Ok(())
+}
+
+fn notify_invalidations(file: &mut File, invalidation: &PathInvalidation) {
+    if invalidation.coarse {
+        let _ = notify_inval_inode(file, crate::node::ROOT_NODEID);
+    }
+    for binding in &invalidation.stale {
+        let _ = notify_inval_inode(file, binding.nodeid);
+        if let Some(parent_nodeid) = binding.parent_nodeid {
+            let _ = notify_inval_entry(file, parent_nodeid, &binding.name);
+        }
+    }
+    for (parent, name) in &invalidation.parent_entries {
+        let _ = notify_inval_entry(file, *parent, name);
+    }
+}
+
+fn sleep_interruptible(duration: Duration, stop: &AtomicBool) {
+    let step = Duration::from_millis(50);
+    let mut slept = Duration::ZERO;
+    while slept < duration && !stop.load(Ordering::SeqCst) {
+        let remaining = duration.saturating_sub(slept);
+        let current = remaining.min(step);
+        thread::sleep(current);
+        slept = slept.saturating_add(current);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NamespaceChange {
+    scope: String,
+    path: String,
+    change_kind: String,
+    generation: u64,
+    event_id: String,
+    old_path: Option<String>,
+}
+
+struct PathInvalidation {
+    stale: Vec<StaleBinding>,
+    parent_entries: Vec<(u64, Vec<u8>)>,
+    coarse: bool,
+}
+
+fn parse_namespace_change_record(line: &str) -> Option<NamespaceChange> {
+    let fields = line.split('\t').collect::<Vec<_>>();
+    parse_key_value_record(&fields).or_else(|| parse_positional_record(&fields))
+}
+
+fn parse_key_value_record(fields: &[&str]) -> Option<NamespaceChange> {
+    let mut scope = None;
+    let mut path = None;
+    let mut change_kind = None;
+    let mut generation = None;
+    let mut event_id = None;
+    let mut old_path = None;
+    for field in fields {
+        let Some((key, value)) = field.split_once('=') else {
+            continue;
+        };
+        match key {
+            "scope" => scope = Some(value.to_string()),
+            "path" => path = Some(value.to_string()),
+            "change_kind" | "kind" => change_kind = Some(value.to_string()),
+            "generation" => generation = value.parse::<u64>().ok(),
+            "event_id" => event_id = Some(value.to_string()),
+            "old_path" | "from" => old_path = Some(value.to_string()),
+            _ => {}
+        }
+    }
+    Some(NamespaceChange {
+        scope: scope?,
+        path: path?,
+        change_kind: change_kind?,
+        generation: generation?,
+        event_id: event_id?,
+        old_path,
+    })
+}
+
+fn parse_positional_record(fields: &[&str]) -> Option<NamespaceChange> {
+    match fields {
+        ["namespace_change", event_id, generation, scope, change_kind, path] => {
+            Some(NamespaceChange {
+                scope: (*scope).to_string(),
+                path: (*path).to_string(),
+                change_kind: (*change_kind).to_string(),
+                generation: generation.parse().ok()?,
+                event_id: (*event_id).to_string(),
+                old_path: None,
+            })
+        }
+        ["namespace_change", event_id, generation, scope, "renamed", old_path, path] => {
+            Some(NamespaceChange {
+                scope: (*scope).to_string(),
+                path: (*path).to_string(),
+                change_kind: "renamed".to_string(),
+                generation: generation.parse().ok()?,
+                event_id: (*event_id).to_string(),
+                old_path: Some((*old_path).to_string()),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn parse_namespace_path(path: &str) -> Result<Vec<Vec<u8>>> {
+    if !path.starts_with('/') {
+        return Err(Error::new(
+            libc::EINVAL,
+            format!("namespace change path must be absolute: {path}"),
+        ));
+    }
+    Ok(path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| segment.as_bytes().to_vec())
+        .collect())
+}
+
+fn scope_matches(configured_scope: Option<&str>, event_scope: &str) -> bool {
+    event_scope == "shared"
+        || configured_scope
+            .map(|scope| scope == event_scope)
+            .unwrap_or(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_namespace_change_record, parse_namespace_path, scope_matches};
+
+    #[test]
+    fn parses_key_value_namespace_change_record() {
+        let record = parse_namespace_change_record(
+            "namespace_change\tevent_id=e1\tgeneration=42\tscope=shared\tchange_kind=created\tpath=/runtime/x",
+        )
+        .expect("record should parse");
+
+        assert_eq!(record.event_id, "e1");
+        assert_eq!(record.generation, 42);
+        assert_eq!(record.scope, "shared");
+        assert_eq!(record.change_kind, "created");
+        assert_eq!(record.path, "/runtime/x");
+    }
+
+    #[test]
+    fn parses_positional_rename_record() {
+        let record = parse_namespace_change_record(
+            "namespace_change\te2\t43\tsession:abc\trenamed\t/runtime/old\t/runtime/new",
+        )
+        .expect("record should parse");
+
+        assert_eq!(record.old_path.as_deref(), Some("/runtime/old"));
+        assert_eq!(record.path, "/runtime/new");
+    }
+
+    #[test]
+    fn namespace_paths_are_absolute() {
+        assert_eq!(
+            parse_namespace_path("/runtime/status").expect("path should parse"),
+            vec![b"runtime".to_vec(), b"status".to_vec()]
+        );
+        assert!(parse_namespace_path("runtime/status").is_err());
+    }
+
+    #[test]
+    fn change_feed_scope_matches_shared_or_configured_scope() {
+        assert!(scope_matches(Some("session:a"), "shared"));
+        assert!(scope_matches(Some("session:a"), "session:a"));
+        assert!(!scope_matches(Some("session:a"), "session:b"));
+        assert!(scope_matches(None, "session:b"));
+    }
+}

@@ -395,6 +395,24 @@ impl NodeTable {
     }
 
     pub fn mark_path_bindings_stale(&mut self) -> Vec<StaleBinding> {
+        self.mark_path_prefix_stale(&[])
+    }
+
+    pub fn mark_path_stale(&mut self, path: &[Vec<u8>]) -> Vec<StaleBinding> {
+        self.mark_path_with(path, false)
+    }
+
+    pub fn mark_path_prefix_stale(&mut self, path: &[Vec<u8>]) -> Vec<StaleBinding> {
+        self.mark_path_with(path, true)
+    }
+
+    pub fn parent_entry(&self, path: &[Vec<u8>]) -> Option<(u64, Vec<u8>)> {
+        let (name, parent) = path.split_last()?;
+        self.nodeid_at_path(parent)
+            .map(|parent_nodeid| (parent_nodeid, name.clone()))
+    }
+
+    fn mark_path_with(&mut self, path: &[Vec<u8>], include_descendants: bool) -> Vec<StaleBinding> {
         let path_index = self
             .nodes
             .iter()
@@ -403,6 +421,16 @@ impl NodeTable {
         let mut stale = Vec::new();
         for (nodeid, node) in self.nodes.iter_mut() {
             if *nodeid == ROOT_NODEID {
+                continue;
+            }
+            let matches = if path.is_empty() {
+                true
+            } else if include_descendants {
+                path_has_prefix(&node.path, path)
+            } else {
+                node.path == path
+            };
+            if !matches {
                 continue;
             }
             let parent_nodeid = node
@@ -731,6 +759,34 @@ mod tests {
         assert_eq!(
             nodes.node(alpha).expect("alpha").path,
             vec![b"notes".to_vec(), b"alpha.md".to_vec()]
+        );
+    }
+
+    #[test]
+    fn targeted_stale_marking_leaves_unrelated_nodes_fresh() {
+        let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
+        let a = nodes
+            .insert_lookup(ROOT_NODEID, 2, Stat::new("a", Qid::dir(2), 0o555), b"a")
+            .map(|inserted| inserted.nodeid)
+            .expect("a node should insert");
+        let b = nodes
+            .insert_lookup(ROOT_NODEID, 3, Stat::new("b", Qid::dir(3), 0o555), b"b")
+            .map(|inserted| inserted.nodeid)
+            .expect("b node should insert");
+        let child = nodes
+            .insert_lookup(a, 4, Stat::new("child", Qid::file(4), 0o444), b"child")
+            .map(|inserted| inserted.nodeid)
+            .expect("child node should insert");
+
+        let stale = nodes.mark_path_prefix_stale(&[b"a".to_vec()]);
+
+        assert_eq!(stale.len(), 2);
+        assert!(nodes.node(a).expect("a").needs_rebind);
+        assert!(nodes.node(child).expect("child").needs_rebind);
+        assert!(!nodes.node(b).expect("b").needs_rebind);
+        assert_eq!(
+            nodes.parent_entry(&[b"a".to_vec(), b"child".to_vec()]),
+            Some((a, b"child".to_vec()))
         );
     }
 

@@ -8,10 +8,12 @@
 //! * [`dispatch`] — event loop and opcode dispatch.
 //! * [`ops`] — per-opcode handler implementations.
 
+mod change_feed;
 mod dispatch;
 mod mount;
 mod ops;
 mod reply;
+mod status;
 mod util;
 mod wire;
 
@@ -23,6 +25,7 @@ use crate::{
 };
 use mount::mount_fuse;
 use r9p::stat::Stat;
+use status::MountStatus;
 use std::{
     fs::File,
     os::fd::FromRawFd,
@@ -35,6 +38,7 @@ use wire::{FuseAttr, FuseAttrOut, FuseEntryOut};
 
 pub const DEFAULT_MAX_WORKERS: usize = 10;
 pub const DEFAULT_MAX_BACKGROUND: u16 = 12;
+pub const DEFAULT_CHANGE_FEED_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 pub fn default_congestion_threshold(max_background: u16) -> u16 {
     ((u32::from(max_background) * 3 / 4).max(1)) as u16
@@ -61,6 +65,11 @@ pub struct Config {
     pub congestion_threshold: u16,
     pub diagnostics_path: Option<PathBuf>,
     pub diagnostics_capacity: usize,
+    pub status_path: Option<PathBuf>,
+    pub change_feed_path: Option<String>,
+    pub change_feed_scope: Option<String>,
+    pub change_feed_poll_interval: Duration,
+    pub change_feed_backpressure_limit: usize,
     pub debug: bool,
 }
 
@@ -70,6 +79,7 @@ pub struct R9pFuse {
     nodes: Arc<Mutex<NodeTable>>,
     config: Config,
     diagnostics: Diagnostics,
+    status: MountStatus,
     uid: u32,
     gid: u32,
 }
@@ -108,6 +118,7 @@ impl R9pFuse {
         normalize_config(&mut config);
         let diagnostics =
             Diagnostics::new(config.diagnostics_capacity, config.diagnostics_path.clone());
+        let status = MountStatus::new(config.status_path.clone());
         let client = Client::connect(&config.address, &config.uname, &config.aname, config.msize)?;
         let _ = diagnostics.record(
             "mount_attached",
@@ -132,6 +143,7 @@ impl R9pFuse {
             nodes,
             config,
             diagnostics,
+            status,
             uid,
             gid,
         };
@@ -273,6 +285,15 @@ impl R9pFuse {
         });
     }
 
+    pub(in crate::fuse) fn record_mount_diagnostic(
+        &self,
+        event: &'static str,
+        errno: i32,
+        message: impl Into<String>,
+    ) {
+        let _ = self.diagnostics.record(event, 0, 0, 0, errno, message);
+    }
+
     pub(in crate::fuse) fn diagnostic_context(
         &self,
         header: wire::FuseInHeader,
@@ -397,6 +418,12 @@ fn normalize_config(config: &mut Config) {
     if config.diagnostics_capacity == 0 {
         config.diagnostics_capacity = DEFAULT_DIAGNOSTICS_CAPACITY;
     }
+    if config.change_feed_poll_interval.is_zero() {
+        config.change_feed_poll_interval = DEFAULT_CHANGE_FEED_POLL_INTERVAL;
+    }
+    if config.change_feed_backpressure_limit == 0 {
+        config.change_feed_backpressure_limit = change_feed::DEFAULT_CHANGE_FEED_BACKPRESSURE_LIMIT;
+    }
     if config.max_background == 0 {
         config.max_background = DEFAULT_MAX_BACKGROUND;
     }
@@ -413,8 +440,8 @@ mod tests {
     };
     use super::wire::FOPEN_DIRECT_IO;
     use super::{
-        default_congestion_threshold, normalize_config, Config, DEFAULT_MAX_BACKGROUND,
-        DEFAULT_MAX_WORKERS,
+        change_feed, default_congestion_threshold, normalize_config, Config,
+        DEFAULT_CHANGE_FEED_POLL_INTERVAL, DEFAULT_MAX_BACKGROUND, DEFAULT_MAX_WORKERS,
     };
     use crate::error::Error;
     use crate::node::DirEntry;
@@ -519,6 +546,11 @@ mod tests {
             congestion_threshold: 99,
             diagnostics_path: None,
             diagnostics_capacity: 0,
+            status_path: None,
+            change_feed_path: None,
+            change_feed_scope: None,
+            change_feed_poll_interval: Duration::ZERO,
+            change_feed_backpressure_limit: 0,
             debug: false,
         };
 
@@ -527,6 +559,14 @@ mod tests {
         assert_eq!(config.lookup_timeout, Duration::from_secs(5));
         assert_eq!(config.interrupt_timeout, Duration::from_secs(1));
         assert_eq!(config.max_workers, DEFAULT_MAX_WORKERS);
+        assert_eq!(
+            config.change_feed_poll_interval,
+            DEFAULT_CHANGE_FEED_POLL_INTERVAL
+        );
+        assert_eq!(
+            config.change_feed_backpressure_limit,
+            change_feed::DEFAULT_CHANGE_FEED_BACKPRESSURE_LIMIT
+        );
         assert_eq!(config.max_background, DEFAULT_MAX_BACKGROUND);
         assert_eq!(
             config.congestion_threshold,

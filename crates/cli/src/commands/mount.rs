@@ -47,6 +47,11 @@ pub(crate) fn parse_mount_config(global: Config, args: Vec<String>) -> CliResult
         congestion_threshold: fuse::default_congestion_threshold(fuse::DEFAULT_MAX_BACKGROUND),
         diagnostics_path: None,
         diagnostics_capacity: 0,
+        status_path: None,
+        change_feed_path: None,
+        change_feed_scope: None,
+        change_feed_poll_interval: Duration::ZERO,
+        change_feed_backpressure_limit: 0,
         debug: false,
     };
 
@@ -110,6 +115,43 @@ pub(crate) fn parse_mount_config(global: Config, args: Vec<String>) -> CliResult
                     "missing diagnostics capacity",
                     "diagnostics capacity",
                     65_536,
+                )?;
+            }
+            "--status-file" => {
+                index += 1;
+                config.status_path = Some(PathBuf::from(
+                    args.get(index)
+                        .ok_or_else(|| cli_error("missing status file"))?,
+                ));
+            }
+            "--change-feed" => {
+                index += 1;
+                config.change_feed_path = Some(
+                    args.get(index)
+                        .ok_or_else(|| cli_error("missing change feed path"))?
+                        .clone(),
+                );
+            }
+            "--change-feed-scope" => {
+                index += 1;
+                config.change_feed_scope = Some(
+                    args.get(index)
+                        .ok_or_else(|| cli_error("missing change feed scope"))?
+                        .clone(),
+                );
+            }
+            "--change-feed-poll-interval" => {
+                index += 1;
+                config.change_feed_poll_interval =
+                    parse_duration(args.get(index), "missing change feed poll interval")?;
+            }
+            "--change-feed-backpressure" => {
+                index += 1;
+                config.change_feed_backpressure_limit = parse_usize_limit(
+                    args.get(index),
+                    "missing change feed backpressure limit",
+                    "change feed backpressure limit",
+                    1_000_000,
                 )?;
             }
             "--max-workers" => {
@@ -241,7 +283,7 @@ fn parse_u16_limit(
 
 fn mount_usage(code: i32) -> ! {
     eprintln!(
-        "usage: r9p mount [--aname aname] [--uname uname] [--msize msize] [--attr-timeout seconds] [--entry-timeout seconds] [--request-timeout seconds] [--lookup-timeout seconds] [--read-timeout seconds] [--write-timeout seconds] [--mutation-timeout seconds] [--control-timeout seconds] [--interrupt-timeout seconds] [--max-workers count] [--max-background count] [--congestion-threshold count] [--diagnostics-file path] [--diagnostics-capacity count] endpoint mountpoint"
+        "usage: r9p mount [--aname aname] [--uname uname] [--msize msize] [--attr-timeout seconds] [--entry-timeout seconds] [--request-timeout seconds] [--lookup-timeout seconds] [--read-timeout seconds] [--write-timeout seconds] [--mutation-timeout seconds] [--control-timeout seconds] [--interrupt-timeout seconds] [--max-workers count] [--max-background count] [--congestion-threshold count] [--diagnostics-file path] [--diagnostics-capacity count] [--status-file path] [--change-feed namespace-path] [--change-feed-scope scope] [--change-feed-poll-interval seconds] [--change-feed-backpressure count] endpoint mountpoint"
     );
     std::process::exit(code);
 }
@@ -291,6 +333,16 @@ mod tests {
                 "/tmp/r9p-mount-diagnostics.jsonl".to_string(),
                 "--diagnostics-capacity".to_string(),
                 "64".to_string(),
+                "--status-file".to_string(),
+                "/tmp/r9p-mount-status.json".to_string(),
+                "--change-feed".to_string(),
+                "/runtime/events/namespace/stream".to_string(),
+                "--change-feed-scope".to_string(),
+                "session:mount-a".to_string(),
+                "--change-feed-poll-interval".to_string(),
+                "0.75".to_string(),
+                "--change-feed-backpressure".to_string(),
+                "128".to_string(),
                 "--max-workers".to_string(),
                 "8".to_string(),
                 "--max-background".to_string(),
@@ -325,6 +377,17 @@ mod tests {
             Some(std::path::Path::new("/tmp/r9p-mount-diagnostics.jsonl"))
         );
         assert_eq!(config.diagnostics_capacity, 64);
+        assert_eq!(
+            config.status_path.as_deref(),
+            Some(std::path::Path::new("/tmp/r9p-mount-status.json"))
+        );
+        assert_eq!(
+            config.change_feed_path.as_deref(),
+            Some("/runtime/events/namespace/stream")
+        );
+        assert_eq!(config.change_feed_scope.as_deref(), Some("session:mount-a"));
+        assert_eq!(config.change_feed_poll_interval, Duration::from_millis(750));
+        assert_eq!(config.change_feed_backpressure_limit, 128);
         assert_eq!(config.attr_timeout, Duration::from_millis(1500));
         assert_eq!(config.entry_timeout, Duration::from_secs(2));
         assert_eq!(config.max_workers, 8);
@@ -370,6 +433,12 @@ mod tests {
                 "4".to_string(),
                 "--congestion-threshold".to_string(),
                 "8".to_string(),
+                "127.0.0.1:564".to_string(),
+                "/tmp/r9p-mount".to_string(),
+            ],
+            vec![
+                "--change-feed-backpressure".to_string(),
+                "0".to_string(),
                 "127.0.0.1:564".to_string(),
                 "/tmp/r9p-mount".to_string(),
             ],

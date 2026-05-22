@@ -193,23 +193,32 @@ fn consume_feed_until_error(
     path: &str,
     stop: &AtomicBool,
 ) -> Result<()> {
-    let client = fs.client_snapshot()?;
-    let fid = open_feed(&client, path, fs.lookup_timeout())?;
     fs.status.set_change_feed("connected", None, None);
+    let mut since_event_id = None;
     while !stop.load(Ordering::SeqCst) {
+        let poll_path = feed_poll_path(path, since_event_id.as_deref());
+        let client = fs.client_snapshot()?;
+        let fid = open_feed(&client, &poll_path, fs.lookup_timeout())?;
         match client.read_full_timeout(fid, 0, 64 * 1024, fs.control_timeout()) {
             Ok(data) if data.is_empty() => {
-                return Err(Error::new(libc::EPIPE, "change feed ended"))
+                let _ = client.clunk_timeout(fid, fs.control_timeout());
             }
-            Ok(data) => apply_feed_chunk(fs, file, &data)?,
-            Err(error) if error.errno == libc::ETIMEDOUT => {}
+            Ok(data) => {
+                let _ = client.clunk_timeout(fid, fs.control_timeout());
+                if let Some(event_id) = apply_feed_chunk(fs, file, &data)? {
+                    since_event_id = Some(event_id);
+                }
+            }
+            Err(error) if error.errno == libc::ETIMEDOUT => {
+                let _ = client.clunk_timeout(fid, fs.control_timeout());
+            }
             Err(error) => {
                 let _ = client.clunk_timeout(fid, fs.control_timeout());
                 return Err(error);
             }
         }
+        sleep_interruptible(fs.config.change_feed_poll_interval, stop);
     }
-    let _ = client.clunk_timeout(fid, fs.control_timeout());
     Ok(())
 }
 
@@ -223,20 +232,34 @@ fn open_feed(client: &Client, path: &str, timeout: Duration) -> Result<Fid> {
     Ok(fid)
 }
 
-fn apply_feed_chunk(fs: &mut R9pFuse, file: &mut File, data: &[u8]) -> Result<()> {
+fn apply_feed_chunk(fs: &mut R9pFuse, file: &mut File, data: &[u8]) -> Result<Option<String>> {
     let text = String::from_utf8_lossy(data);
     let records = text
         .lines()
         .filter_map(parse_namespace_change_record)
         .collect::<Vec<_>>();
     if records.len() > fs.config.change_feed_backpressure_limit {
+        let last_event_id = records.last().map(|record| record.event_id.clone());
         fs.apply_coarse_invalidation(file, "change feed backpressure limit exceeded");
-        return Ok(());
+        return Ok(last_event_id);
     }
+    let last_event_id = records.last().map(|record| record.event_id.clone());
     for record in records {
         fs.apply_namespace_change(file, record)?;
     }
-    Ok(())
+    Ok(last_event_id)
+}
+
+fn feed_poll_path(base_path: &str, since_event_id: Option<&str>) -> String {
+    let Some(event_id) = since_event_id else {
+        return base_path.to_string();
+    };
+    let trimmed = base_path.trim_end_matches('/');
+    let root = trimmed
+        .rsplit_once("/since/")
+        .map(|(root, _)| root)
+        .unwrap_or(trimmed);
+    format!("{root}/since/{event_id}")
 }
 
 fn notify_invalidations(file: &mut File, invalidation: &PathInvalidation) {
@@ -366,7 +389,9 @@ fn scope_matches(configured_scope: Option<&str>, event_scope: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_namespace_change_record, parse_namespace_path, scope_matches};
+    use super::{
+        feed_poll_path, parse_namespace_change_record, parse_namespace_path, scope_matches,
+    };
 
     #[test]
     fn parses_key_value_namespace_change_record() {
@@ -408,5 +433,24 @@ mod tests {
         assert!(scope_matches(Some("session:a"), "session:a"));
         assert!(!scope_matches(Some("session:a"), "session:b"));
         assert!(scope_matches(None, "session:b"));
+    }
+
+    #[test]
+    fn feed_poll_path_advances_with_since_cursor() {
+        assert_eq!(
+            feed_poll_path("/runtime/events/namespace/stream", Some("event-7")),
+            "/runtime/events/namespace/stream/since/event-7"
+        );
+        assert_eq!(
+            feed_poll_path(
+                "/runtime/events/namespace/stream/since/event-6",
+                Some("event-7")
+            ),
+            "/runtime/events/namespace/stream/since/event-7"
+        );
+        assert_eq!(
+            feed_poll_path("/runtime/events/namespace/stream", None),
+            "/runtime/events/namespace/stream"
+        );
     }
 }

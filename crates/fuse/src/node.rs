@@ -334,40 +334,19 @@ impl NodeTable {
             .find_map(|(nodeid, node)| (node.path == path).then_some(*nodeid))
     }
 
-    pub fn rebind_all(&mut self, client: &mut Client, timeout: Duration) -> Result<Vec<Fid>> {
-        let root_fid = client.root_fid();
-        let root_stat = client.stat_timeout(root_fid, timeout)?;
-        let paths = self
-            .nodes
+    pub fn rebind_paths(&self) -> Vec<(u64, Vec<Vec<u8>>)> {
+        self.nodes
             .iter()
             .map(|(nodeid, node)| (*nodeid, node.path.clone()))
-            .collect::<Vec<_>>();
-        let mut rebound = Vec::new();
-        let mut stale = Vec::new();
+            .collect()
+    }
+
+    pub fn apply_rebind_results(
+        &mut self,
+        rebound: Vec<(u64, Fid, Stat)>,
+        stale: Vec<u64>,
+    ) -> Vec<Fid> {
         let mut replaced = Vec::new();
-
-        for (nodeid, path) in paths {
-            if nodeid == ROOT_NODEID {
-                rebound.push((nodeid, root_fid, root_stat.clone()));
-                continue;
-            }
-
-            let fid = match client.walk_timeout(root_fid, &path, timeout) {
-                Ok(fid) => fid,
-                Err(_) => {
-                    stale.push(nodeid);
-                    continue;
-                }
-            };
-            match client.stat_timeout(fid, timeout) {
-                Ok(stat) => rebound.push((nodeid, fid, stat)),
-                Err(_) => {
-                    let _ = client.clunk_timeout(fid, timeout);
-                    stale.push(nodeid);
-                }
-            }
-        }
-
         for nodeid in stale {
             if let Some(node) = self.nodes.remove(&nodeid) {
                 if let Some(fid) = node.fid {
@@ -377,12 +356,8 @@ impl NodeTable {
         }
         for (nodeid, fid, stat) in rebound {
             if let Some(node) = self.nodes.get_mut(&nodeid) {
-                if nodeid != ROOT_NODEID {
-                    if let Some(old_fid) = node.fid {
-                        if old_fid != fid {
-                            replaced.push(old_fid);
-                        }
-                    }
+                if let Some(old_fid) = node.fid {
+                    replaced.push(old_fid);
                 }
                 node.fid = Some(fid);
                 node.qid = stat.qid;
@@ -391,7 +366,7 @@ impl NodeTable {
                 node.needs_rebind = false;
             }
         }
-        Ok(replaced)
+        replaced
     }
 
     pub fn mark_path_bindings_stale(&mut self) -> Vec<StaleBinding> {
@@ -760,6 +735,78 @@ mod tests {
             nodes.node(alpha).expect("alpha").path,
             vec![b"notes".to_vec(), b"alpha.md".to_vec()]
         );
+    }
+
+    #[test]
+    fn rebind_paths_snapshots_paths_without_network_work() {
+        let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
+        let docs = nodes
+            .insert_lookup(
+                ROOT_NODEID,
+                2,
+                Stat::new("docs", Qid::dir(2), 0o555),
+                b"docs",
+            )
+            .map(|inserted| inserted.nodeid)
+            .expect("docs node should insert");
+        let alpha = nodes
+            .insert_lookup(
+                docs,
+                3,
+                Stat::new("alpha.md", Qid::file(3), 0o444),
+                b"alpha.md",
+            )
+            .map(|inserted| inserted.nodeid)
+            .expect("alpha node should insert");
+
+        let paths = nodes.rebind_paths();
+
+        assert_eq!(
+            paths,
+            vec![
+                (ROOT_NODEID, vec![]),
+                (docs, vec![b"docs".to_vec()]),
+                (alpha, vec![b"docs".to_vec(), b"alpha.md".to_vec()]),
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_rebind_results_updates_fresh_nodes_and_drops_stale_nodes() {
+        let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
+        let docs = nodes
+            .insert_lookup(
+                ROOT_NODEID,
+                2,
+                Stat::new("docs", Qid::dir(2), 0o555),
+                b"docs",
+            )
+            .map(|inserted| inserted.nodeid)
+            .expect("docs node should insert");
+        let stale = nodes
+            .insert_lookup(
+                docs,
+                3,
+                Stat::new("stale.md", Qid::file(3), 0o444),
+                b"stale.md",
+            )
+            .map(|inserted| inserted.nodeid)
+            .expect("stale node should insert");
+
+        let replaced = nodes.apply_rebind_results(
+            vec![
+                (ROOT_NODEID, 10, Stat::new("", Qid::dir(10), 0o555)),
+                (docs, 11, Stat::new("docs", Qid::dir(11), 0o555)),
+            ],
+            vec![stale],
+        );
+
+        assert_eq!(replaced, vec![3, 1, 2]);
+        assert_eq!(nodes.node(ROOT_NODEID).expect("root").fid, Some(10));
+        assert_eq!(nodes.node(ROOT_NODEID).expect("root").qid, Qid::dir(10));
+        assert_eq!(nodes.node(docs).expect("docs").fid, Some(11));
+        assert_eq!(nodes.node(docs).expect("docs").qid, Qid::dir(11));
+        assert!(nodes.node(stale).is_err());
     }
 
     #[test]

@@ -221,17 +221,51 @@ impl R9pFuse {
             eprintln!("r9p mount: reconnecting to {}", self.config.address);
         }
         let tracker = self.client.snapshot()?.tracker();
-        let mut client = Client::connect_with_tracker(
+        let client = Client::connect_with_tracker(
             &self.config.address,
             &self.config.uname,
             &self.config.aname,
             self.config.msize,
             tracker,
         )?;
-        {
+        let root_fid = client.root_fid();
+        let root_stat = client.stat_timeout(root_fid, self.config.lookup_timeout)?;
+        let paths = {
+            let nodes = self.nodes()?;
+            nodes.rebind_paths()
+        };
+        let mut rebound = Vec::new();
+        let mut stale = Vec::new();
+        for (nodeid, path) in paths {
+            if nodeid == ROOT_NODEID {
+                rebound.push((nodeid, root_fid, root_stat.clone()));
+                continue;
+            }
+            let fid = match client.walk_timeout(root_fid, &path, self.config.lookup_timeout) {
+                Ok(fid) => fid,
+                Err(_) => {
+                    stale.push(nodeid);
+                    continue;
+                }
+            };
+            match client.stat_timeout(fid, self.config.lookup_timeout) {
+                Ok(stat) => rebound.push((nodeid, fid, stat)),
+                Err(_) => {
+                    let _ = client.clunk_timeout(fid, self.config.control_timeout);
+                    stale.push(nodeid);
+                }
+            }
+        }
+        let old_fids = {
             let mut nodes = self.nodes()?;
-            let _ = nodes.rebind_all(&mut client, self.config.lookup_timeout)?;
-            self.client.replace(client)?;
+            nodes.apply_rebind_results(rebound, stale)
+        };
+        self.client.replace(client)?;
+        if self.config.debug && !old_fids.is_empty() {
+            eprintln!(
+                "r9p mount: reconnect replaced {} stale node fids",
+                old_fids.len()
+            );
         }
         if self.config.debug {
             eprintln!("r9p mount: reconnect complete");

@@ -94,9 +94,12 @@ const PLAN9_ERRNO_PATTERNS: &[(&str, i32)] = &[
     ("is directory", libc::EISDIR),
     ("directory", libc::ENOTDIR),
     ("not empty", libc::ENOTEMPTY),
-    ("not implemented", libc::ENOSYS),
-    ("not_implemented", libc::ENOSYS),
-    ("unimplemented", libc::ENOSYS),
+    // Never pass remote "not implemented" through as FUSE ENOSYS. Linux
+    // caches ENOSYS per opcode for the mount lifetime; a backend rejection for
+    // one read/write/lookup must not brick that FUSE opcode until remount.
+    ("not implemented", libc::ENOTSUP),
+    ("not_implemented", libc::ENOTSUP),
+    ("unimplemented", libc::ENOTSUP),
     ("unsupported", libc::ENOTSUP),
     ("not_supported", libc::ENOTSUP),
     ("not supported", libc::ENOTSUP),
@@ -172,7 +175,7 @@ mod tests {
     #[test]
     fn maps_common_plan9port_and_network_errors() {
         assert_eq!(errno_for_9p_error("operation not permitted"), libc::EPERM);
-        assert_eq!(errno_for_9p_error("not implemented"), libc::ENOSYS);
+        assert_eq!(errno_for_9p_error("not implemented"), libc::ENOTSUP);
         assert_eq!(errno_for_9p_error("read only file system"), libc::EROFS);
         assert_eq!(errno_for_9p_error("timed out"), libc::ETIMEDOUT);
         assert_eq!(errno_for_9p_error("connection lost"), libc::ECONNABORTED);
@@ -203,7 +206,7 @@ mod tests {
         );
         assert_eq!(
             errno_for_9p_error("remote_worktree_import_not_implemented"),
-            libc::ENOSYS
+            libc::ENOTSUP
         );
         assert_eq!(
             errno_for_9p_error("namespace_generation_conflict"),

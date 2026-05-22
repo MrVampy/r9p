@@ -242,6 +242,30 @@ pub(super) struct FuseReleaseIn {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub(super) struct FuseFlushIn {
+    pub(super) fh: u64,
+    pub(super) unused: u32,
+    pub(super) padding: u32,
+    pub(super) lock_owner: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(super) struct FuseFsyncIn {
+    pub(super) fh: u64,
+    pub(super) fsync_flags: u32,
+    pub(super) padding: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(super) struct FuseAccessIn {
+    pub(super) mask: u32,
+    pub(super) padding: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub(super) struct FuseReadIn {
     pub(super) fh: u64,
     pub(super) offset: u64,
@@ -300,13 +324,6 @@ pub(super) struct FusePollIn {
     pub(super) kh: u64,
     pub(super) flags: u32,
     pub(super) events: u32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub(super) struct FusePollOut {
-    pub(super) revents: u32,
-    pub(super) padding: u32,
 }
 
 #[repr(C)]

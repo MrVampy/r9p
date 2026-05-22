@@ -63,6 +63,14 @@ impl Client {
         self.inner.root_fid()
     }
 
+    pub fn msize(&self) -> u32 {
+        self.inner.msize()
+    }
+
+    pub fn max_write_payload(&self) -> u32 {
+        self.inner.max_write_payload()
+    }
+
     pub fn clone_fid_timeout(&self, fid: Fid, timeout: Duration) -> Result<Fid> {
         self.walk_timeout(fid, &[], timeout)
     }

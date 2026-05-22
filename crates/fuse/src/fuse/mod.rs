@@ -16,7 +16,7 @@ mod util;
 mod wire;
 
 use crate::{
-    diagnostics::{Diagnostics, DEFAULT_DIAGNOSTICS_CAPACITY},
+    diagnostics::{DiagnosticContext, DiagnosticRecord, Diagnostics, DEFAULT_DIAGNOSTICS_CAPACITY},
     error::{Error, Result},
     node::{mode_kind, qid_to_inode, NodeTable},
     p9::Client,
@@ -106,11 +106,24 @@ impl ClientSlot {
 impl R9pFuse {
     pub fn mount(mut config: Config) -> Result<()> {
         normalize_config(&mut config);
-        let client = Client::connect(&config.address, &config.uname, &config.aname, config.msize)?;
-        let root_stat = client.stat_timeout(client.root_fid(), config.lookup_timeout)?;
-        let nodes = Arc::new(Mutex::new(NodeTable::new(client.root_fid(), root_stat)));
         let diagnostics =
             Diagnostics::new(config.diagnostics_capacity, config.diagnostics_path.clone());
+        let client = Client::connect(&config.address, &config.uname, &config.aname, config.msize)?;
+        let _ = diagnostics.record(
+            "mount_attached",
+            0,
+            0,
+            0,
+            0,
+            format!(
+                "msize={} max_write_payload={} fuse_max_write={}",
+                client.msize(),
+                client.max_write_payload(),
+                wire::DEFAULT_MAX_WRITE
+            ),
+        );
+        let root_stat = client.stat_timeout(client.root_fid(), config.lookup_timeout)?;
+        let nodes = Arc::new(Mutex::new(NodeTable::new(client.root_fid(), root_stat)));
         let uid = unsafe { libc::getuid() };
         let gid = unsafe { libc::getgid() };
         let fd = mount_fuse(Path::new(&config.mountpoint))?;
@@ -237,17 +250,89 @@ impl R9pFuse {
         errno: i32,
         message: impl Into<String>,
     ) {
-        let _ = self.diagnostics.record(
-            event,
-            header.opcode,
-            header.unique,
-            header.nodeid,
-            errno,
-            message,
-        );
+        let context = self.diagnostic_context(header, &[]);
+        self.record_diagnostic_with_context(event, header, errno, message, context);
     }
 
-    fn attr(&self, stat: &Stat) -> FuseAttr {
+    pub(in crate::fuse) fn record_diagnostic_with_context(
+        &self,
+        event: &'static str,
+        header: wire::FuseInHeader,
+        errno: i32,
+        message: impl Into<String>,
+        context: DiagnosticContext,
+    ) {
+        let _ = self.diagnostics.record_entry(DiagnosticRecord {
+            event,
+            opcode: header.opcode,
+            unique: header.unique,
+            nodeid: header.nodeid,
+            errno,
+            message: message.into(),
+            context,
+        });
+    }
+
+    pub(in crate::fuse) fn diagnostic_context(
+        &self,
+        header: wire::FuseInHeader,
+        payload: &[u8],
+    ) -> DiagnosticContext {
+        let mut context = DiagnosticContext {
+            path: self.path_for_nodeid(header.nodeid),
+            ..DiagnosticContext::default()
+        };
+        match header.opcode {
+            wire::FUSE_READ | wire::FUSE_READDIR | wire::FUSE_READDIRPLUS => {
+                if let Ok(input) = reply::read_struct::<wire::FuseReadIn>(payload) {
+                    context.fh = Some(input.fh);
+                    context.offset = Some(input.offset);
+                    context.size = Some(u64::from(input.size));
+                }
+            }
+            wire::FUSE_WRITE => {
+                if let Ok(input) = reply::read_struct::<wire::FuseWriteIn>(payload) {
+                    context.fh = Some(input.fh);
+                    context.offset = Some(input.offset);
+                    context.size = Some(u64::from(input.size));
+                }
+            }
+            wire::FUSE_RELEASE | wire::FUSE_RELEASEDIR => {
+                if let Ok(input) = reply::read_struct::<wire::FuseReleaseIn>(payload) {
+                    context.fh = Some(input.fh);
+                }
+            }
+            wire::FUSE_FLUSH => {
+                if let Ok(input) = reply::read_struct::<wire::FuseFlushIn>(payload) {
+                    context.fh = Some(input.fh);
+                }
+            }
+            wire::FUSE_FSYNC | wire::FUSE_FSYNCDIR => {
+                if let Ok(input) = reply::read_struct::<wire::FuseFsyncIn>(payload) {
+                    context.fh = Some(input.fh);
+                }
+            }
+            wire::FUSE_SETATTR => {
+                if let Ok(input) = reply::read_struct::<wire::FuseSetattrIn>(payload) {
+                    if input.valid & wire::FATTR_FH != 0 {
+                        context.fh = Some(input.fh);
+                    }
+                    if input.valid & wire::FATTR_SIZE != 0 {
+                        context.size = Some(input.size);
+                    }
+                }
+            }
+            wire::FUSE_POLL => {
+                if let Ok(input) = reply::read_struct::<wire::FusePollIn>(payload) {
+                    context.fh = Some(input.fh);
+                }
+            }
+            _ => {}
+        }
+        context
+    }
+
+    pub(in crate::fuse) fn attr(&self, stat: &Stat) -> FuseAttr {
         FuseAttr {
             ino: qid_to_inode(stat.qid),
             size: stat.length,
@@ -267,6 +352,24 @@ impl R9pFuse {
             flags: 0,
         }
     }
+
+    fn path_for_nodeid(&self, nodeid: u64) -> Option<String> {
+        let nodes = self.nodes().ok()?;
+        let node = nodes.node(nodeid).ok()?;
+        Some(format_namespace_path(&node.path))
+    }
+}
+
+fn format_namespace_path(path: &[Vec<u8>]) -> String {
+    if path.is_empty() {
+        return "/".to_string();
+    }
+    let mut out = String::new();
+    for segment in path {
+        out.push('/');
+        out.push_str(&String::from_utf8_lossy(segment));
+    }
+    out
 }
 
 fn normalize_config(config: &mut Config) {

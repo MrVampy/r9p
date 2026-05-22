@@ -30,6 +30,26 @@ pub(crate) struct Diagnostic {
     pub nodeid: u64,
     pub errno: i32,
     pub message: String,
+    pub context: DiagnosticContext,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DiagnosticContext {
+    pub path: Option<String>,
+    pub fh: Option<u64>,
+    pub offset: Option<u64>,
+    pub size: Option<u64>,
+    pub tag: Option<u16>,
+}
+
+pub(crate) struct DiagnosticRecord {
+    pub event: &'static str,
+    pub opcode: u32,
+    pub unique: u64,
+    pub nodeid: u64,
+    pub errno: i32,
+    pub message: String,
+    pub context: DiagnosticContext,
 }
 
 impl Diagnostics {
@@ -53,31 +73,46 @@ impl Diagnostics {
         errno: i32,
         message: impl Into<String>,
     ) -> Result<()> {
-        let diagnostic = {
+        self.record_entry(DiagnosticRecord {
+            event,
+            opcode,
+            unique,
+            nodeid,
+            errno,
+            message: message.into(),
+            context: DiagnosticContext::default(),
+        })
+    }
+
+    pub(crate) fn record_entry(&self, record: DiagnosticRecord) -> Result<()> {
+        let (path, entries) = {
             let mut state = self
                 .state
                 .lock()
                 .map_err(|_| Error::new(libc::EIO, "diagnostics lock poisoned"))?;
             let diagnostic = Diagnostic {
                 seq: state.next_seq,
-                event,
-                opcode,
-                unique,
-                nodeid,
-                errno,
-                message: message.into(),
+                event: record.event,
+                opcode: record.opcode,
+                unique: record.unique,
+                nodeid: record.nodeid,
+                errno: record.errno,
+                message: record.message,
+                context: record.context,
             };
             state.next_seq = state.next_seq.saturating_add(1);
             while state.entries.len() >= state.capacity {
                 state.entries.pop_front();
             }
             state.entries.push_back(diagnostic.clone());
-            if let Some(path) = state.path.clone() {
-                append_json_line(path, &diagnostic)?;
-            }
-            diagnostic
+            (
+                state.path.clone(),
+                state.entries.iter().cloned().collect::<Vec<_>>(),
+            )
         };
-        let _ = diagnostic;
+        if let Some(path) = path {
+            write_json_lines(path, &entries)?;
+        }
         Ok(())
     }
 }
@@ -88,18 +123,22 @@ impl Default for Diagnostics {
     }
 }
 
-fn append_json_line(path: PathBuf, diagnostic: &Diagnostic) -> Result<()> {
+fn write_json_lines(path: PathBuf, diagnostics: &[Diagnostic]) -> Result<()> {
     let mut file = OpenOptions::new()
         .create(true)
-        .append(true)
+        .write(true)
+        .truncate(true)
         .open(&path)
         .map_err(|error| Error::io(format!("open diagnostics {}", path.display()), error))?;
-    writeln!(file, "{}", diagnostic_json(diagnostic))
-        .map_err(|error| Error::io(format!("write diagnostics {}", path.display()), error))
+    for diagnostic in diagnostics {
+        writeln!(file, "{}", diagnostic_json(diagnostic))
+            .map_err(|error| Error::io(format!("write diagnostics {}", path.display()), error))?;
+    }
+    Ok(())
 }
 
 fn diagnostic_json(diagnostic: &Diagnostic) -> String {
-    format!(
+    let mut fields = format!(
         "{{\"event\":\"{}\",\"seq\":{},\"opcode\":{},\"unique\":{},\"nodeid\":{},\"errno\":{},\"message\":\"{}\"}}",
         escape_json(diagnostic.event),
         diagnostic.seq,
@@ -108,7 +147,25 @@ fn diagnostic_json(diagnostic: &Diagnostic) -> String {
         diagnostic.nodeid,
         diagnostic.errno,
         escape_json(&diagnostic.message)
-    )
+    );
+    fields.pop();
+    if let Some(path) = &diagnostic.context.path {
+        fields.push_str(&format!(",\"path\":\"{}\"", escape_json(path)));
+    }
+    if let Some(fh) = diagnostic.context.fh {
+        fields.push_str(&format!(",\"fh\":{fh}"));
+    }
+    if let Some(offset) = diagnostic.context.offset {
+        fields.push_str(&format!(",\"offset\":{offset}"));
+    }
+    if let Some(size) = diagnostic.context.size {
+        fields.push_str(&format!(",\"size\":{size}"));
+    }
+    if let Some(tag) = diagnostic.context.tag {
+        fields.push_str(&format!(",\"tag\":{tag}"));
+    }
+    fields.push('}');
+    fields
 }
 
 fn escape_json(value: &str) -> String {
@@ -131,7 +188,8 @@ fn escape_json(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{diagnostic_json, Diagnostic};
+    use super::{diagnostic_json, Diagnostic, DiagnosticContext, Diagnostics};
+    use std::{fs, time::SystemTime};
 
     #[test]
     fn diagnostics_are_json_lines() {
@@ -143,9 +201,47 @@ mod tests {
             nodeid: 1,
             errno: libc::ETIMEDOUT,
             message: "timed out\nwhile reading \"x\"".to_string(),
+            context: DiagnosticContext {
+                path: Some("/runtime/status".to_string()),
+                fh: Some(4),
+                offset: Some(12),
+                size: Some(64),
+                tag: Some(2),
+            },
         });
         assert!(line.contains("\"event\":\"operation_error\""));
         assert!(line.contains("\"seq\":7"));
+        assert!(line.contains("\"path\":\"/runtime/status\""));
+        assert!(line.contains("\"fh\":4"));
+        assert!(line.contains("\"offset\":12"));
+        assert!(line.contains("\"size\":64"));
+        assert!(line.contains("\"tag\":2"));
         assert!(line.contains("timed out\\nwhile reading \\\"x\\\""));
+    }
+
+    #[test]
+    fn diagnostics_file_is_bounded_to_capacity() {
+        let path = std::env::temp_dir().join(format!(
+            "r9p-fuse-diagnostics-{:?}.jsonl",
+            SystemTime::now()
+        ));
+        let diagnostics = Diagnostics::new(2, Some(path.clone()));
+
+        diagnostics
+            .record("one", 1, 1, 1, 0, "first")
+            .expect("first diagnostic should record");
+        diagnostics
+            .record("two", 1, 2, 1, 0, "second")
+            .expect("second diagnostic should record");
+        diagnostics
+            .record("three", 1, 3, 1, 0, "third")
+            .expect("third diagnostic should record");
+
+        let content = fs::read_to_string(&path).expect("diagnostics file should exist");
+        let _ = fs::remove_file(path);
+        assert_eq!(content.lines().count(), 2);
+        assert!(!content.contains("\"event\":\"one\""));
+        assert!(content.contains("\"event\":\"two\""));
+        assert!(content.contains("\"event\":\"three\""));
     }
 }

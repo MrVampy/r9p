@@ -1,7 +1,7 @@
 //! High-level FUSE event loop and opcode dispatch.
 
 use super::{
-    reply::{read_struct, reply_bytes, reply_empty, reply_error},
+    reply::{read_struct, reply_bytes, reply_error},
     wire::{
         FuseInHeader, FuseInitIn, FuseInitOut, FuseInterruptIn, DEFAULT_MAX_WRITE, FUSE_ACCESS,
         FUSE_ASYNC_READ, FUSE_ATOMIC_O_TRUNC, FUSE_AUTO_INVAL_DATA, FUSE_BATCH_FORGET,
@@ -110,9 +110,10 @@ impl R9pFuse {
             | FUSE_REMOVEXATTR => reply_error(file, header.unique, libc::ENOTSUP),
             FUSE_GETLK => self.getlk(file, header, payload),
             FUSE_SETLK | FUSE_SETLKW => self.setlk(file, header),
-            FUSE_FLUSH | FUSE_FSYNC | FUSE_FSYNCDIR | FUSE_ACCESS => {
-                reply_empty(file, header.unique)
-            }
+            FUSE_FLUSH => self.flush(file, header, payload),
+            FUSE_FSYNC => self.fsync(file, header, payload),
+            FUSE_FSYNCDIR => self.fsyncdir(file, header, payload),
+            FUSE_ACCESS => self.access(file, header, payload),
             FUSE_INTERRUPT => self.interrupt(header, payload),
             FUSE_STATFS => self.statfs(file, header),
             FUSE_DESTROY => Ok(()),
@@ -120,11 +121,13 @@ impl R9pFuse {
             _ => reply_error(file, header.unique, libc::ENOSYS),
         };
         if let Err(error) = result {
-            self.record_diagnostic(
+            let context = self.diagnostic_context(header, payload);
+            self.record_diagnostic_with_context(
                 "operation_error",
                 header,
                 error.errno,
                 error.message().to_string(),
+                context,
             );
             if self.config.debug || should_log_operation_error(&error) {
                 eprintln!(

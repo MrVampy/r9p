@@ -6,7 +6,9 @@ Expected local references:
 
 - `plan9port` - Plan 9 from User Space source.
 - `racme` - Racme workspace, where `r9p` was seeded.
-- `r9pfuse` - Rust FUSE-to-9P bridge and first external `r9p` consumer.
+- `r9pfuse` - optional retired Rust FUSE-to-9P bridge, used only for
+  historical comparison when present. Current mount-client source lives in
+  `crates/fuse`.
 - `vault` - Vault runtime and 9P endpoint sources.
 - `9pfuse` - patched C `9pfuse` bridge reference.
 - `plan9port-vault` - deployed Vault-local plan9port fork when available.

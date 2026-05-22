@@ -724,9 +724,9 @@ mod tests {
 
     fn root_stat() -> Stat {
         let mut stat = Stat::new(b".".to_vec(), ROOT_QID, DMDIR | 0o555);
-        stat.uid = b"r9pfuse".to_vec();
-        stat.gid = b"r9pfuse".to_vec();
-        stat.muid = b"r9pfuse".to_vec();
+        stat.uid = b"r9p".to_vec();
+        stat.gid = b"r9p".to_vec();
+        stat.muid = b"r9p".to_vec();
         stat
     }
 
@@ -771,11 +771,11 @@ mod tests {
     }
 
     fn unique_socket_path(label: &str) -> PathBuf {
-        env::temp_dir().join(format!("r9pfuse-p9-{label}-{}.sock", unique_id()))
+        env::temp_dir().join(format!("r9p-mount-{label}-{}.sock", unique_id()))
     }
 
     fn unique_namespace_dir(label: &str) -> PathBuf {
-        env::temp_dir().join(format!("r9pfuse-p9-{label}-{}", unique_id()))
+        env::temp_dir().join(format!("r9p-mount-{label}-{}", unique_id()))
     }
 
     fn unique_id() -> String {

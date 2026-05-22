@@ -78,9 +78,9 @@ Use Racme when changing extraction-boundary claims or Acme-backed server behavio
 - `refs/r9pfuse/docs/source-map.md`
   - Source map for FUSE bridge behavior.
 
-Use `crates/fuse/src/` for new mount-client work. Use `refs/r9pfuse` only as
-bounded historical comparison while any remaining FUSE-hardening references are
-being retired.
+Use `crates/fuse/src/` for all current mount-client work. Use `refs/r9pfuse`
+only as optional bounded historical comparison when the retired source checkout
+is present locally and a plan explicitly needs lineage.
 
 ## Vault
 
@@ -96,15 +96,15 @@ Use Vault when validating namespace endpoint expectations, attach policy, or mou
 
 ## FUSE References
 
-- `refs/r9pfuse/refs/linux-fuse/include/uapi/linux/fuse.h`
+- `refs/vault/refs/linux-fuse/include/uapi/linux/fuse.h`
   - Linux FUSE protocol ABI.
-- `refs/r9pfuse/refs/linux-fuse/fs/fuse/`
+- `refs/vault/refs/linux-fuse/fs/fuse/`
   - Linux kernel FUSE implementation.
-- `refs/r9pfuse/refs/libfuse/include/`
+- `refs/vault/refs/libfuse/include/`
   - libfuse userspace API headers.
-- `refs/r9pfuse/refs/libfuse/example/`
+- `refs/vault/refs/libfuse/example/`
   - Mature FUSE filesystem examples.
-- `refs/9pfuse/`
+- `refs/vault/refs/9pfuse/`
   - Current C `9pfuse` bridge behavior.
 
 Use FUSE sources only for bridge behavior. They do not define 9P semantics.

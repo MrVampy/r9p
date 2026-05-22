@@ -54,9 +54,8 @@ spawning unbounded per-request threads in the client process.
 ## Extraction Rule
 
 `r9p` was seeded inside Racme because Racme needed an Acme-compatible 9P
-server first. The extraction trigger was a second real consumer. `r9pfuse`
-became that consumer, and Plan 47 then folded the generic FUSE bridge into the
-`r9p` workspace as `crates/fuse` exposed by `r9p mount`.
+server first. The extraction trigger was a second real consumer: the FUSE
+bridge that is now `crates/fuse` and exposed by `r9p mount`.
 
 The repository exception is narrow: `r9p` is one installable communication
 suite with internal crates for protocol core, CLI, FUSE bridge, and

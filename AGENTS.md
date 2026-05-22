@@ -15,7 +15,9 @@
 - Prefer local source references over web search.
 - Prefer Plan 9 / plan9port sources for 9P2000 wire and client behavior.
 - Prefer Racme references for the original `r9p` extraction boundary.
-- Prefer `r9pfuse` references for real Rust client pressure and FUSE bridge requirements.
+- Prefer `crates/fuse/src/` for current Rust FUSE bridge requirements, and use
+  retired `r9pfuse` references only as bounded historical comparison when a
+  plan explicitly needs lineage.
 - Prefer Vault references for namespace endpoint expectations and operational interop.
 - Treat FUSE sources as bridge references; they do not define 9P semantics.
 
@@ -26,10 +28,14 @@
 - `r9p` must remain runtime-neutral at the core. No socket ownership, tokio requirement, thread policy, BEAM port loop, TLS policy, or FUSE lifecycle belongs in the reusable protocol core.
 - Runtime adapters and convenience facades are allowed only when they are clearly layered above the protocol core.
 - Acme-specific behavior belongs in Racme's Acme adapter, not in `r9p`.
-- FUSE/POSIX translation belongs in `r9pfuse`, not in `r9p`.
+- FUSE/POSIX translation belongs in `crates/fuse`, not in the reusable
+  `crates/core` protocol crate.
 - Vault namespace policy, provenance, and admission belong in Vault, not in `r9p`.
 - Do not add compatibility or legacy layers for old extraction paths. Update callers to the intended boundary instead.
 
 ## Boundary Test
 
-For any proposed feature, ask: would removing Racme, Vault, and `r9pfuse` still leave this useful to another 9P client or server? If yes, it probably belongs in `r9p`. If no, it belongs in the backend, bridge, or runtime adapter that needs it.
+For any proposed core feature, ask: would removing Racme, Vault, the FUSE
+bridge, and the local filesystem exporter still leave this useful to another 9P
+client or server? If yes, it probably belongs in `crates/core`. If no, it
+belongs in the backend, bridge, CLI, exporter, or runtime adapter that needs it.

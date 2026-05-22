@@ -2,7 +2,7 @@ set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
 # ----------------------------------------------------------------------------
 # Agent-loop layering — same four-tier shape used in the sibling projects
-# (Racme, r9pfuse) so an agent learns one workflow across the trio.
+# (Racme, Vault, and r9p) so an agent learns one workflow across the stack.
 #
 #   Tier 1 (`just check`):   cargo check. Sub-second incremental.
 #   Tier 2 (`just lint`):    clippy + fmt-check + machete. ~seconds.

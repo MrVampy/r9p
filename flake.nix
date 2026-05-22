@@ -37,7 +37,7 @@
               jq
               ripgrep
               nixpkgs-fmt
-              # Agent-loop tooling — same set used in Racme + r9pfuse.
+              # Agent-loop tooling — same set used across the sibling workspaces.
               # See justfile for tier-by-tier usage.
               mold
               sccache

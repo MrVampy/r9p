@@ -256,8 +256,9 @@ fn feed_poll_path(base_path: &str, since_event_id: Option<&str>) -> String {
     };
     let trimmed = base_path.trim_end_matches('/');
     let root = trimmed
-        .rsplit_once("/since/")
-        .map(|(root, _)| root)
+        .strip_suffix("/stream")
+        .or_else(|| trimmed.strip_suffix("/recent"))
+        .or_else(|| trimmed.rsplit_once("/since/").map(|(root, _)| root))
         .unwrap_or(trimmed);
     format!("{root}/since/{event_id}")
 }
@@ -439,14 +440,15 @@ mod tests {
     fn feed_poll_path_advances_with_since_cursor() {
         assert_eq!(
             feed_poll_path("/runtime/events/namespace/stream", Some("event-7")),
-            "/runtime/events/namespace/stream/since/event-7"
+            "/runtime/events/namespace/since/event-7"
         );
         assert_eq!(
-            feed_poll_path(
-                "/runtime/events/namespace/stream/since/event-6",
-                Some("event-7")
-            ),
-            "/runtime/events/namespace/stream/since/event-7"
+            feed_poll_path("/runtime/events/namespace/since/event-6", Some("event-7")),
+            "/runtime/events/namespace/since/event-7"
+        );
+        assert_eq!(
+            feed_poll_path("/runtime/events/namespace/recent", Some("event-7")),
+            "/runtime/events/namespace/since/event-7"
         );
         assert_eq!(
             feed_poll_path("/runtime/events/namespace/stream", None),

@@ -39,6 +39,8 @@ use wire::{FuseAttr, FuseAttrOut, FuseEntryOut};
 pub const DEFAULT_MAX_WORKERS: usize = 10;
 pub const DEFAULT_MAX_BACKGROUND: u16 = 12;
 pub const DEFAULT_CHANGE_FEED_POLL_INTERVAL: Duration = Duration::from_secs(1);
+pub const DEFAULT_ATTR_TIMEOUT: Duration = Duration::from_secs(1);
+pub const DEFAULT_ENTRY_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub fn default_congestion_threshold(max_background: u16) -> u16 {
     ((u32::from(max_background) * 3 / 4).max(1)) as u16

@@ -33,8 +33,8 @@ pub(crate) fn parse_mount_config(global: Config, args: Vec<String>) -> CliResult
         } else {
             r9p::codec::MAX_MSIZE
         },
-        attr_timeout: Duration::ZERO,
-        entry_timeout: Duration::ZERO,
+        attr_timeout: fuse::DEFAULT_ATTR_TIMEOUT,
+        entry_timeout: fuse::DEFAULT_ENTRY_TIMEOUT,
         request_timeout: Duration::from_secs(5),
         lookup_timeout: Duration::ZERO,
         read_timeout: Duration::ZERO,
@@ -397,6 +397,37 @@ mod tests {
     }
 
     #[test]
+    fn mount_defaults_use_short_positive_kernel_cache() {
+        let config = parse_mount_config(
+            global(),
+            vec!["127.0.0.1:564".to_string(), "/tmp/r9p-mount".to_string()],
+        )
+        .expect("mount options should parse");
+
+        assert_eq!(config.attr_timeout, fuse::DEFAULT_ATTR_TIMEOUT);
+        assert_eq!(config.entry_timeout, fuse::DEFAULT_ENTRY_TIMEOUT);
+    }
+
+    #[test]
+    fn mount_allows_explicit_zero_kernel_cache() {
+        let config = parse_mount_config(
+            global(),
+            vec![
+                "--attr-timeout".to_string(),
+                "0".to_string(),
+                "--entry-timeout".to_string(),
+                "0".to_string(),
+                "127.0.0.1:564".to_string(),
+                "/tmp/r9p-mount".to_string(),
+            ],
+        )
+        .expect("mount options should parse");
+
+        assert_eq!(config.attr_timeout, Duration::ZERO);
+        assert_eq!(config.entry_timeout, Duration::ZERO);
+    }
+
+    #[test]
     fn derives_congestion_threshold_from_max_background() {
         let config = parse_mount_config(
             global(),
@@ -477,7 +508,7 @@ mod tests {
         .expect("mount options should parse");
 
         assert_eq!(config.aname, "/");
-        assert_eq!(config.attr_timeout, Duration::ZERO);
+        assert_eq!(config.attr_timeout, fuse::DEFAULT_ATTR_TIMEOUT);
     }
 
     #[test]

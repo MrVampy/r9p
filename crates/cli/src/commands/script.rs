@@ -6,8 +6,10 @@ use std::{
 use r9p::{
     blocking::{BoxedClient, OREAD, OWRITE},
     fid::Fid,
+    qid::DMDIR,
 };
 
+use crate::commands::mutate::split_parent;
 use crate::errors::{cli_error, CliResult};
 use crate::format::hex_encode;
 use crate::io::{connect_path, copy_fid_to_file, copy_file_to_fid_at, parse_offset};
@@ -68,6 +70,22 @@ fn run_script_line(
             clunk?;
             println!("ok\t{line_number}\twrite\t{count}");
         }
+        ["create", path] => {
+            create_path(client, path, 0o666, OREAD)?;
+            println!("ok\t{line_number}\tcreate");
+        }
+        ["create", path, perm, mode] => {
+            create_path(client, path, parse_perm(perm)?, parse_mode(mode)?)?;
+            println!("ok\t{line_number}\tcreate");
+        }
+        ["mkdir", path] => {
+            create_path(client, path, DMDIR | 0o755, OREAD)?;
+            println!("ok\t{line_number}\tmkdir");
+        }
+        ["mkdir", path, perm, mode] => {
+            create_path(client, path, DMDIR | parse_perm(perm)?, parse_mode(mode)?)?;
+            println!("ok\t{line_number}\tmkdir");
+        }
         ["read-to", path, local_path] => {
             let fid = walk_open(client, path, OREAD)?;
             let result = copy_fid_to_file(client, fid, local_path);
@@ -101,6 +119,30 @@ fn run_script_line(
         [] => {}
     }
     Ok(())
+}
+
+fn create_path(client: &mut BoxedClient, path: &str, perm: u32, mode: u8) -> CliResult<()> {
+    let (parent, name) = split_parent(path)?;
+    let parent_fid = client.walk_path(&parent)?;
+    let created = client.create(parent_fid, name.as_bytes(), perm, mode);
+    let parent_clunk = client.clunk(parent_fid);
+    let (fid, _) = created?;
+    let created_clunk = client.clunk(fid);
+    parent_clunk?;
+    created_clunk?;
+    Ok(())
+}
+
+fn parse_perm(value: &str) -> CliResult<u32> {
+    u32::from_str_radix(value.trim_start_matches("0o"), 8)
+        .or_else(|_| value.parse::<u32>())
+        .map_err(|_| cli_error(format!("invalid perm {value}")))
+}
+
+fn parse_mode(value: &str) -> CliResult<u8> {
+    u8::from_str_radix(value.trim_start_matches("0o"), 8)
+        .or_else(|_| value.parse::<u8>())
+        .map_err(|_| cli_error(format!("invalid mode {value}")))
 }
 
 fn fresh_stat_error(target: &Target, path: &str, line_number: usize) -> CliResult<()> {

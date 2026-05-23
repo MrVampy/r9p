@@ -63,6 +63,8 @@ struct MachineTree {
     root: Qid,
     data_qid: Qid,
     private_qid: Qid,
+    created_qid: Option<Qid>,
+    created_dir_qid: Option<Qid>,
     private_visible: bool,
     file: SharedFile,
 }
@@ -73,6 +75,8 @@ impl MachineTree {
             root: Qid::dir(1),
             data_qid: Qid::file(2),
             private_qid: Qid::file(3),
+            created_qid: None,
+            created_dir_qid: None,
             private_visible: false,
             file,
         }
@@ -97,6 +101,12 @@ impl FileTree for MachineTree {
             [name] if start == self.root && name == b"private" && self.private_visible => {
                 Ok(vec![self.private_qid])
             }
+            [name] if start == self.root && name == b"created" => {
+                Ok(self.created_qid.into_iter().collect())
+            }
+            [name] if start == self.root && name == b"made" => {
+                Ok(self.created_dir_qid.into_iter().collect())
+            }
             _ => Ok(Vec::new()),
         }
     }
@@ -114,6 +124,12 @@ impl FileTree for MachineTree {
     }
 
     fn read(&mut self, _fid: Fid, qid: Qid, offset: u64, count: u32) -> R9pResult<ReadData> {
+        if Some(qid) == self.created_dir_qid {
+            return Ok(ReadData::Directory(Vec::new()));
+        }
+        if Some(qid) == self.created_qid {
+            return Ok(ReadData::Bytes(Vec::new()));
+        }
         if qid == self.private_qid {
             let data = b"priv";
             let start = usize::try_from(offset)
@@ -166,8 +182,33 @@ impl FileTree for MachineTree {
         u32::try_from(data.len()).map_err(|_| R9pError::from("write too large"))
     }
 
+    fn create(
+        &mut self,
+        _fid: Fid,
+        qid: Qid,
+        name: &[u8],
+        perm: u32,
+        _mode: u8,
+    ) -> R9pResult<OpenFile> {
+        match name {
+            b"created" if perm & DMDIR == 0 => {
+                self.created_qid = Some(qid);
+                Ok(OpenFile { qid, iounit: 0 })
+            }
+            b"made" if perm & DMDIR != 0 => {
+                self.created_dir_qid = Some(qid);
+                Ok(OpenFile { qid, iounit: 0 })
+            }
+            _ => Err(R9pError::from("unexpected create")),
+        }
+    }
+
     fn stat(&mut self, qid: Qid) -> R9pResult<Stat> {
-        if qid == self.private_qid {
+        if Some(qid) == self.created_qid {
+            Ok(Stat::new("created", qid, 0o666))
+        } else if Some(qid) == self.created_dir_qid {
+            Ok(Stat::new("made", qid, DMDIR | 0o755))
+        } else if qid == self.private_qid {
             let mut stat = Stat::new("private", qid, 0o600);
             stat.length = 4;
             Ok(stat)
@@ -292,7 +333,7 @@ fn machine_script_runs_multiple_operations_on_one_session() -> TestResult<()> {
     fs::write(
         &script_path,
         format!(
-            "# comment lines are ignored\nwrite-hex\t/data\t2\t5859\nread-hex\t/private\t0\t4\nfresh-stat-error\t/private\nread-hex\t/data\t0\t8\nwrite-from\t/data\t3\t{input_arg}\nread-to\t/data\t{output_arg}\n"
+            "# comment lines are ignored\nwrite-hex\t/data\t2\t5859\nread-hex\t/private\t0\t4\nfresh-stat-error\t/private\ncreate\t/created\nmkdir\t/made\nread-hex\t/data\t0\t8\nwrite-from\t/data\t3\t{input_arg}\nread-to\t/data\t{output_arg}\n"
         ),
     )?;
     let script_arg = script_path.to_string_lossy().into_owned();
@@ -305,7 +346,7 @@ fn machine_script_runs_multiple_operations_on_one_session() -> TestResult<()> {
     assert_success(&output)?;
     assert_stdout(
         &output,
-        "ok\t2\twrite\t2\nok\t3\tread-hex\t4\t70726976\nok\t4\tfresh-stat-error\nok\t5\tread-hex\t6\t616258596566\nok\t6\twrite\t5\nok\t7\tread\t8\n",
+        "ok\t2\twrite\t2\nok\t3\tread-hex\t4\t70726976\nok\t4\tfresh-stat-error\nok\t5\tcreate\nok\t6\tmkdir\nok\t7\tread-hex\t6\t616258596566\nok\t8\twrite\t5\nok\t9\tread\t8\n",
     )?;
     if shared.attach_count() != 2 {
         return Err(test_error(

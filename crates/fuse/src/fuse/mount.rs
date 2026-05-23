@@ -65,24 +65,21 @@ unsafe fn child_exec_fusermount(comm_fd: RawFd, mountpoint: &str) -> ! {
     libc::setenv(env_name.as_ptr(), env_value.as_ptr(), 1);
 
     let dashdash = CString::new("--").expect("static arg contains no NUL");
-    let fusermount = CString::new("fusermount").expect("static command contains no NUL");
-    libc::execlp(
-        fusermount.as_ptr(),
-        fusermount.as_ptr(),
-        dashdash.as_ptr(),
-        mountpoint.as_ptr(),
-        ptr::null::<libc::c_char>(),
-    );
-
-    let fusermount3 = CString::new("fusermount3").expect("static command contains no NUL");
-    libc::execlp(
-        fusermount3.as_ptr(),
-        fusermount3.as_ptr(),
-        dashdash.as_ptr(),
-        mountpoint.as_ptr(),
-        ptr::null::<libc::c_char>(),
-    );
+    for binary in fusermount_candidates() {
+        let fusermount = CString::new(binary).expect("static command contains no NUL");
+        libc::execlp(
+            fusermount.as_ptr(),
+            fusermount.as_ptr(),
+            dashdash.as_ptr(),
+            mountpoint.as_ptr(),
+            ptr::null::<libc::c_char>(),
+        );
+    }
     libc::_exit(1);
+}
+
+const fn fusermount_candidates() -> [&'static str; 2] {
+    ["fusermount3", "fusermount"]
 }
 
 pub(super) fn recv_fd(socket: RawFd) -> Result<RawFd> {
@@ -163,7 +160,7 @@ fn wait_for_termination_signal() -> libc::c_int {
 }
 
 fn run_fusermount_unmount(mountpoint: &Path) {
-    for binary in ["fusermount3", "fusermount"] {
+    for binary in fusermount_candidates() {
         if Command::new(binary)
             .arg("-u")
             .arg(mountpoint)
@@ -173,5 +170,15 @@ fn run_fusermount_unmount(mountpoint: &Path) {
         {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fusermount_candidates;
+
+    #[test]
+    fn prefers_fusermount3_before_fuse2_helper() {
+        assert_eq!(["fusermount3", "fusermount"], fusermount_candidates());
     }
 }

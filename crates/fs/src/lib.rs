@@ -2,7 +2,7 @@ use r9p::{
     blocking::{OEXEC, OREAD},
     error::{Error, Result, EEXIST, ENOTDIR, EPERM},
     fid::Fid,
-    qid::{Qid, DMDIR, QTFILE},
+    qid::{Qid, DMDIR, DMSYMLINK, QTFILE, QTSYMLINK},
     server::{FileTree, OpenFile, ReadData, ServerCompletion, ServerRequestKind},
     stat::Stat,
 };
@@ -207,7 +207,7 @@ impl FileTree for LocalTree {
         if node.stat.qid != qid {
             return Err(Error::from_static(r9p::error::EBADFID));
         }
-        if !qid.is_dir() {
+        if !qid.is_dir() && !is_symlink(&node.stat) {
             let file = open_read_fd(node.fd.as_raw_fd(), false)?;
             inner.open_files.insert(fid, file);
         }
@@ -226,6 +226,9 @@ impl FileTree for LocalTree {
 
         if qid.is_dir() {
             return read_dir(node.fd.as_raw_fd()).map(ReadData::Directory);
+        }
+        if is_symlink(&node.stat) {
+            return read_link(node.fd.as_raw_fd()).map(ReadData::Bytes);
         }
 
         let file = match inner.open_files.get(&fid) {
@@ -303,7 +306,7 @@ fn open_child(parent: RawFd, name: &[u8]) -> Result<Node> {
 fn node_from_fd(fd: OwnedFd, name: Vec<u8>) -> Result<Node> {
     let st = fstat(fd.as_raw_fd())?;
     let kind = st.st_mode & libc::S_IFMT;
-    if kind != libc::S_IFREG && kind != libc::S_IFDIR {
+    if kind != libc::S_IFREG && kind != libc::S_IFDIR && kind != libc::S_IFLNK {
         return Err(Error::from_static(ENOENT_PROTOCOL));
     }
     let stat = stat_from_libc(&st, name);
@@ -311,12 +314,22 @@ fn node_from_fd(fd: OwnedFd, name: Vec<u8>) -> Result<Node> {
 }
 
 fn stat_from_libc(st: &libc::stat, name: Vec<u8>) -> Stat {
-    let is_dir = (st.st_mode & libc::S_IFMT) == libc::S_IFDIR;
-    let qtype = if is_dir { r9p::qid::QTDIR } else { QTFILE };
+    let kind = st.st_mode & libc::S_IFMT;
+    let is_dir = kind == libc::S_IFDIR;
+    let is_symlink = kind == libc::S_IFLNK;
+    let qtype = if is_dir {
+        r9p::qid::QTDIR
+    } else if is_symlink {
+        QTSYMLINK
+    } else {
+        QTFILE
+    };
     let mut stat = Stat::new(
         name,
         Qid::new(qtype, st.st_mtime as u32, qid_path(st.st_dev, st.st_ino)),
-        (st.st_mode & 0o777) | if is_dir { DMDIR } else { 0 },
+        (st.st_mode & 0o777)
+            | if is_dir { DMDIR } else { 0 }
+            | if is_symlink { DMSYMLINK } else { 0 },
     );
     stat.atime = st.st_atime as u32;
     stat.mtime = st.st_mtime as u32;
@@ -324,6 +337,10 @@ fn stat_from_libc(st: &libc::stat, name: Vec<u8>) -> Stat {
     stat.uid = st.st_uid.to_string().into_bytes();
     stat.gid = st.st_gid.to_string().into_bytes();
     stat
+}
+
+fn is_symlink(stat: &Stat) -> bool {
+    stat.qid.is_symlink() || stat.mode & DMSYMLINK != 0
 }
 
 fn qid_path(dev: u64, ino: u64) -> u64 {
@@ -387,6 +404,34 @@ fn pread_file(fd: RawFd, offset: u64, count: u32) -> Result<Vec<u8>> {
     Ok(buffer)
 }
 
+fn read_link(fd: RawFd) -> Result<Vec<u8>> {
+    let empty_path = CString::new("").map_err(|_| Error::from("empty path contains NUL"))?;
+    let mut capacity = 256_usize;
+    loop {
+        let mut buffer = vec![0_u8; capacity];
+        let read = unsafe {
+            libc::readlinkat(
+                fd,
+                empty_path.as_ptr(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+            )
+        };
+        if read < 0 {
+            return Err(map_io("readlinkat", std::io::Error::last_os_error()));
+        }
+        let read = usize::try_from(read).map_err(|_| Error::from("readlink size overflow"))?;
+        if read < buffer.len() {
+            buffer.truncate(read);
+            return Ok(buffer);
+        }
+        capacity = capacity
+            .checked_mul(2)
+            .filter(|next| *next <= 1024 * 1024)
+            .ok_or_else(|| Error::from("symlink target too large"))?;
+    }
+}
+
 fn open_read_fd(path_fd: RawFd, directory: bool) -> Result<OwnedFd> {
     let proc_path = format!("/proc/self/fd/{path_fd}");
     let c_path = CString::new(proc_path).map_err(|_| Error::from("proc fd path contains NUL"))?;
@@ -440,7 +485,7 @@ mod tests {
     };
     use std::{
         env, fs,
-        os::unix::fs::symlink,
+        os::unix::{ffi::OsStrExt, fs::symlink},
         process,
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -521,7 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn does_not_follow_symlink_to_outside_export() -> Result<()> {
+    fn serves_symlink_target_without_following_outside_export() -> Result<()> {
         let root = fixture_root("symlink")?;
         let outside = fixture_root("outside")?;
         fs::write(outside.join("secret"), b"secret")
@@ -537,7 +582,20 @@ mod tests {
             newfid: 2,
             wnames: vec![b"secret-link".to_vec()],
         });
-        assert!(matches!(reply, RMessage::Error { .. }));
+        assert!(matches!(reply, RMessage::Walk { .. }));
+        let reply = server.handle(TMessage::Read {
+            tag: 3,
+            fid: 2,
+            offset: 0,
+            count: 8192,
+        });
+        assert_eq!(
+            reply,
+            RMessage::Read {
+                tag: 3,
+                data: outside.join("secret").as_os_str().as_bytes().to_vec()
+            }
+        );
 
         remove_fixture(root);
         remove_fixture(outside);

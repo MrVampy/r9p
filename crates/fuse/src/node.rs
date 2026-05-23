@@ -4,7 +4,7 @@ use crate::{
 };
 use r9p::{
     fid::Fid,
-    qid::{Qid, DMDIR, QTDIR},
+    qid::{Qid, DMDIR, DMSYMLINK, QTDIR, QTSYMLINK},
     stat::Stat,
 };
 use std::{collections::BTreeMap, fmt, time::Duration};
@@ -438,9 +438,15 @@ pub fn is_dir(stat: &Stat) -> bool {
     stat.qid.qtype & QTDIR != 0 || stat.mode & DMDIR != 0
 }
 
+pub fn is_symlink(stat: &Stat) -> bool {
+    stat.qid.qtype & QTSYMLINK != 0 || stat.mode & DMSYMLINK != 0
+}
+
 pub fn mode_kind(stat: &Stat) -> u32 {
     if is_dir(stat) {
         libc::S_IFDIR
+    } else if is_symlink(stat) {
+        libc::S_IFLNK
     } else {
         libc::S_IFREG
     }
@@ -534,14 +540,28 @@ fn path_has_prefix(path: &[Vec<u8>], prefix: &[Vec<u8>]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{qid_to_inode, NodeTable, ROOT_NODEID};
-    use r9p::qid::Qid;
+    use super::{mode_kind, qid_to_inode, NodeTable, ROOT_NODEID};
+    use r9p::qid::{Qid, DMSYMLINK};
     use r9p::stat::Stat;
 
     #[test]
     fn inode_stays_under_signed_stat_boundary() {
         let inode = qid_to_inode(Qid::new(0x80, 0, u64::MAX));
         assert!(inode < (1_u64 << 63));
+    }
+
+    #[test]
+    fn symlink_stats_map_to_fuse_symlink_mode() {
+        let stat = Stat::new(
+            "link",
+            Qid::new(r9p::qid::QTSYMLINK, 0, 7),
+            DMSYMLINK | 0o777,
+        );
+
+        assert_eq!(
+            libc::S_IFLNK | 0o777,
+            mode_kind(&stat) | (stat.mode & 0o777)
+        );
     }
 
     #[test]

@@ -31,7 +31,6 @@ pub(crate) const CTRL_R: u8 = b'R' - b'A' + 1;
 
 pub(crate) const DMEXCL: u32 = 0x2000_0000;
 pub(crate) const DMAUTH: u32 = 0x0800_0000;
-pub(crate) const DMSYMLINK: u32 = 0x0200_0000;
 pub(crate) const DMDEVICE: u32 = 0x0080_0000;
 pub(crate) const DMNAMEDPIPE: u32 = 0x0020_0000;
 pub(crate) const DMSOCKET: u32 = 0x0010_0000;

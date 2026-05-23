@@ -1,12 +1,12 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use r9p::{
-    qid::{Qid, DMAPPEND, DMDIR},
+    qid::{Qid, DMAPPEND, DMDIR, DMSYMLINK},
     stat::Stat,
 };
 
 use crate::errors::{cli_error, CliResult};
-use crate::{DMAUTH, DMDEVICE, DMEXCL, DMNAMEDPIPE, DMSOCKET, DMSYMLINK};
+use crate::{DMAUTH, DMDEVICE, DMEXCL, DMNAMEDPIPE, DMSOCKET};
 
 pub(crate) fn format_stat(stat: &Stat) -> String {
     format!(

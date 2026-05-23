@@ -10,6 +10,7 @@ pub(super) const FUSE_LOOKUP: u32 = 1;
 pub(super) const FUSE_FORGET: u32 = 2;
 pub(super) const FUSE_GETATTR: u32 = 3;
 pub(super) const FUSE_SETATTR: u32 = 4;
+pub(super) const FUSE_READLINK: u32 = 5;
 pub(super) const FUSE_SYMLINK: u32 = 6;
 pub(super) const FUSE_MKNOD: u32 = 8;
 pub(super) const FUSE_MKDIR: u32 = 9;

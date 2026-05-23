@@ -24,8 +24,12 @@ use crate::{
     target::Config,
 };
 
+const DEFAULT_MAX_FIDS: usize = 4096;
+const FD_LIMIT_MARGIN: u64 = 256;
+
 pub(crate) fn serve_cmd(global: Config, args: Vec<String>) -> CliResult<()> {
     let config = parse_serve_config(global, args)?;
+    ensure_fd_budget(config.max_fids)?;
     let bound = BoundListener::bind(&config)?;
     eprintln!(
         "r9p: serving {} on {}",
@@ -37,6 +41,7 @@ pub(crate) fn serve_cmd(global: Config, args: Vec<String>) -> CliResult<()> {
 
 pub(crate) fn export_cmd(global: Config, args: Vec<String>) -> CliResult<()> {
     let config = parse_export_config(global, args)?;
+    ensure_fd_budget(config.serve.max_fids)?;
     let bound = BoundListener::bind(&config.serve)?;
     let descriptor = export_descriptor(&config, &bound)?;
     write_descriptor(&config, &descriptor)?;
@@ -82,7 +87,7 @@ pub(crate) fn parse_serve_config(global: Config, args: Vec<String>) -> CliResult
     }
 
     let mut bind = None;
-    let mut max_fids = 4096_usize;
+    let mut max_fids = DEFAULT_MAX_FIDS;
     let mut positional = Vec::new();
     let mut index = 0_usize;
     while index < args.len() {
@@ -136,7 +141,7 @@ fn parse_export_config(global: Config, args: Vec<String>) -> CliResult<ExportCon
     }
 
     let mut bind = None;
-    let mut max_fids = 4096_usize;
+    let mut max_fids = DEFAULT_MAX_FIDS;
     let mut descriptor_file = None;
     let mut descriptor_format = "machine".to_string();
     let mut auth = AuthBoundary::none();
@@ -285,6 +290,49 @@ where
             eprintln!("r9p: serve connection: {error}");
         }
     });
+}
+
+fn ensure_fd_budget(max_fids: usize) -> CliResult<()> {
+    let target = required_nofile_limit(max_fids)?;
+    let mut current = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    let status = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut current) };
+    if status != 0 {
+        return Err(cli_error(format!(
+            "getrlimit RLIMIT_NOFILE: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    if current.rlim_cur >= target {
+        return Ok(());
+    }
+    if current.rlim_max < target {
+        return Err(cli_error(format!(
+            "r9p serve/export requires RLIMIT_NOFILE >= {target} for --max-fids {max_fids}, hard limit is {}",
+            current.rlim_max
+        )));
+    }
+    let desired = libc::rlimit {
+        rlim_cur: target,
+        rlim_max: current.rlim_max,
+    };
+    let status = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &desired) };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(cli_error(format!(
+            "setrlimit RLIMIT_NOFILE to {target}: {}",
+            std::io::Error::last_os_error()
+        )))
+    }
+}
+
+fn required_nofile_limit(max_fids: usize) -> CliResult<libc::rlim_t> {
+    let max_fids = libc::rlim_t::try_from(max_fids)
+        .map_err(|_| cli_error(format!("max fid count too large {max_fids}")))?;
+    Ok(max_fids.saturating_add(FD_LIMIT_MARGIN))
 }
 
 fn remove_stale_socket(path: &Path) -> CliResult<()> {
@@ -492,7 +540,7 @@ fn export_usage(code: i32) -> ! {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_export_config, parse_serve_config, BindTarget};
+    use super::{parse_export_config, parse_serve_config, required_nofile_limit, BindTarget};
     use crate::{target::Config, DEFAULT_MSIZE};
     use std::{net::SocketAddr, path::PathBuf};
 
@@ -523,6 +571,11 @@ mod tests {
             BindTarget::Tcp("127.0.0.1:0".parse::<SocketAddr>().expect("socket address"))
         );
         assert_eq!(config.root, PathBuf::from("/tmp/export"));
+    }
+
+    #[test]
+    fn nofile_budget_includes_fid_margin() {
+        assert_eq!(4352, required_nofile_limit(4096).expect("limit"));
     }
 
     #[test]

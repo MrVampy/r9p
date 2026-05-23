@@ -14,12 +14,47 @@ use crate::{
         },
         R9pFuse,
     },
-    node::{is_dir, read_directory_entries},
+    node::{is_dir, is_symlink, read_directory_entries},
     p9::{OREAD, OTRUNC},
 };
 use std::{fs::File, mem::size_of, thread};
 
 impl R9pFuse {
+    pub(in crate::fuse) fn readlink(
+        &mut self,
+        file: &mut File,
+        header: FuseInHeader,
+    ) -> Result<()> {
+        let stat = {
+            let nodes = self.nodes()?;
+            nodes.node(header.nodeid)?.stat.clone()
+        };
+        if !is_symlink(&stat) {
+            return reply_error(file, header.unique, libc::EINVAL);
+        }
+        let (client, fid) = self.bound_node_fid(header.nodeid)?;
+        let count = symlink_read_count(&stat)?;
+        let data = match client.read_full_timeout(fid, 0, count, self.read_timeout()) {
+            Ok(data) => data,
+            Err(error) if is_transport_error(&error) => {
+                self.reconnect()?;
+                return Err(Error::new(
+                    libc::ESTALE,
+                    "symlink handle is stale after 9P reconnect",
+                ));
+            }
+            Err(error) if is_namespace_shape_error(&error) => {
+                self.refresh_node(header.nodeid)?;
+                return Err(Error::new(
+                    libc::ESTALE,
+                    "symlink handle is stale after namespace refresh",
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        reply_bytes(file, header.unique, &data)
+    }
+
     pub(in crate::fuse) fn open(
         &mut self,
         file: &mut File,
@@ -243,6 +278,11 @@ fn notify_namespace_invalidations(file: &mut File, stale_bindings: &[crate::node
             let _ = notify_inval_entry(file, parent_nodeid, &binding.name);
         }
     }
+}
+
+fn symlink_read_count(stat: &r9p::stat::Stat) -> Result<u32> {
+    let count = stat.length.clamp(1, 1024 * 1024);
+    u32::try_from(count).map_err(|_| Error::new(libc::EINVAL, "symlink target too large"))
 }
 
 fn is_runtime_control_write_path(path: &[Vec<u8>]) -> bool {

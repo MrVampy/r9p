@@ -3,7 +3,7 @@ name = "fs"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 version = "0.1.0"
-description = "Read-only local filesystem 9P server adapter for the r9p communication suite"
+description = "Local filesystem adapters for the r9p communication suite"
 repository = "https://github.com/MrVampy/r9p"
 
 [lints.clippy]

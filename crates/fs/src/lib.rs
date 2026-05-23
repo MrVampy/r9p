@@ -18,6 +18,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+pub mod mounted;
+
 const ENOENT_PROTOCOL: &str = EEXIST;
 const EMFILE_PROTOCOL: &str = "too many open files";
 

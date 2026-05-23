@@ -125,7 +125,13 @@ impl MountedNamespace {
     }
 
     pub fn delete_tree(&self, namespace_path: impl AsRef<Path>) -> io::Result<()> {
-        fs::remove_dir_all(self.path(namespace_path)?)
+        let path = self.path(namespace_path)?;
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.is_dir() {
+            fs::remove_dir_all(path)
+        } else {
+            fs::remove_file(path)
+        }
     }
 
     pub fn is_directory(&self, namespace_path: impl AsRef<Path>) -> io::Result<bool> {
@@ -244,7 +250,9 @@ mod tests {
             mounted.read_directory("/runtime")?,
             vec!["ready".to_string()]
         );
-        mounted.delete_file("/runtime/ready")?;
+        mounted.delete_tree("/runtime/ready")?;
+        mounted.write_utf8("/runtime/delete-file", "gone")?;
+        mounted.delete_file("/runtime/delete-file")?;
         mounted.delete_tree("/runtime")?;
 
         let _ = fs::remove_dir_all(root);

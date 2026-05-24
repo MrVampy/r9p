@@ -16,10 +16,12 @@ use std::{
     net::{Shutdown, TcpStream},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::Duration,
+    thread,
+    time::{Duration, Instant},
 };
 
 const TCP_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(200);
 
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
@@ -36,11 +38,54 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn connect(address: &str, uname: &str, aname: &str, msize: u32) -> Result<Self> {
-        Self::connect_with_tracker(address, uname, aname, msize, RequestTracker::default())
+    pub fn connect_with_timeout(
+        address: &str,
+        uname: &str,
+        aname: &str,
+        msize: u32,
+        timeout: Duration,
+    ) -> Result<Self> {
+        Self::connect_with_tracker_timeout(
+            address,
+            uname,
+            aname,
+            msize,
+            RequestTracker::default(),
+            timeout,
+        )
     }
 
     pub fn connect_with_tracker(
+        address: &str,
+        uname: &str,
+        aname: &str,
+        msize: u32,
+        tracker: RequestTracker,
+    ) -> Result<Self> {
+        Self::connect_with_tracker_timeout(address, uname, aname, msize, tracker, Duration::ZERO)
+    }
+
+    pub fn connect_with_tracker_timeout(
+        address: &str,
+        uname: &str,
+        aname: &str,
+        msize: u32,
+        tracker: RequestTracker,
+        timeout: Duration,
+    ) -> Result<Self> {
+        let started = Instant::now();
+        loop {
+            match Self::connect_with_tracker_once(address, uname, aname, msize, tracker.clone()) {
+                Ok(client) => return Ok(client),
+                Err(error) if connect_should_retry(&error, timeout, started) => {
+                    thread::sleep(connect_retry_sleep(timeout, started));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn connect_with_tracker_once(
         address: &str,
         uname: &str,
         aname: &str,
@@ -524,6 +569,27 @@ pub fn parse_tcp_address(address: &str) -> Result<String> {
         .map_err(|error| Error::new(libc::EINVAL, error.display_lossy().to_string()))
 }
 
+fn connect_should_retry(error: &Error, timeout: Duration, started: Instant) -> bool {
+    !timeout.is_zero() && started.elapsed() < timeout && connect_error_is_transient(error)
+}
+
+fn connect_error_is_transient(error: &Error) -> bool {
+    matches!(
+        error.errno,
+        libc::ENOENT
+            | libc::ECONNREFUSED
+            | libc::ECONNRESET
+            | libc::ECONNABORTED
+            | libc::EAGAIN
+            | libc::ETIMEDOUT
+    )
+}
+
+fn connect_retry_sleep(timeout: Duration, started: Instant) -> Duration {
+    let remaining = timeout.saturating_sub(started.elapsed());
+    CONNECT_RETRY_INTERVAL.min(remaining)
+}
+
 fn unexpected(expected: &str, got: Completion) -> Error {
     Error::new(libc::EPROTO, format!("expected {expected}, got {got:?}"))
 }
@@ -647,14 +713,44 @@ mod tests {
     fn connects_explicit_unix_socket() {
         let socket_path = unique_socket_path("explicit");
         let server = spawn_unix_root_server(&socket_path);
-        let client = Client::connect(
+        let client = Client::connect_with_timeout(
             &format!("unix!{}", socket_path.display()),
             "codex",
             "/",
             8192,
+            Duration::ZERO,
         )
         .expect("client should connect");
 
+        let stat = client
+            .stat_timeout(client.root_fid(), Duration::from_secs(1))
+            .expect("root stat should succeed");
+        assert_eq!(stat.name, b".".to_vec());
+
+        drop(client);
+        server.join().expect("server should not panic");
+        let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
+    fn connect_waits_for_unix_socket_to_appear() {
+        let socket_path = unique_socket_path("delayed");
+        let server_path = socket_path.clone();
+        let server = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            let listener = UnixListener::bind(server_path).expect("unix listener should bind");
+            let (stream, _) = listener.accept().expect("server should accept");
+            handle_connection(stream).expect("server connection should complete");
+        });
+
+        let client = Client::connect_with_timeout(
+            &format!("unix!{}", socket_path.display()),
+            "codex",
+            "/",
+            8192,
+            Duration::from_secs(2),
+        )
+        .expect("client should wait for socket and connect");
         let stat = client
             .stat_timeout(client.root_fid(), Duration::from_secs(1))
             .expect("root stat should succeed");
@@ -675,8 +771,14 @@ mod tests {
         env::set_var("NAMESPACE", &namespace);
         let server = spawn_unix_root_server(&socket_path);
 
-        let client = Client::connect("namespace!runtime-recovery", "codex", "/", 8192)
-            .expect("client should connect");
+        let client = Client::connect_with_timeout(
+            "namespace!runtime-recovery",
+            "codex",
+            "/",
+            8192,
+            Duration::ZERO,
+        )
+        .expect("client should connect");
         let stat = client
             .stat_timeout(client.root_fid(), Duration::from_secs(1))
             .expect("root stat should succeed");

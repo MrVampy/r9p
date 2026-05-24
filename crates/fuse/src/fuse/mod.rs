@@ -51,6 +51,7 @@ pub struct Config {
     pub uname: String,
     pub aname: String,
     pub msize: u32,
+    pub connect_timeout: Duration,
     pub attr_timeout: Duration,
     pub entry_timeout: Duration,
     pub request_timeout: Duration,
@@ -120,7 +121,13 @@ impl R9pFuse {
         let diagnostics =
             Diagnostics::new(config.diagnostics_capacity, config.diagnostics_path.clone());
         let status = MountStatus::new(config.status_path.clone());
-        let client = Client::connect(&config.address, &config.uname, &config.aname, config.msize)?;
+        let client = Client::connect_with_timeout(
+            &config.address,
+            &config.uname,
+            &config.aname,
+            config.msize,
+            config.connect_timeout,
+        )?;
         let _ = diagnostics.record(
             "mount_attached",
             0,
@@ -532,6 +539,7 @@ mod tests {
             uname: "codex".to_string(),
             aname: "/".to_string(),
             msize: 8192,
+            connect_timeout: Duration::from_secs(30),
             attr_timeout: Duration::ZERO,
             entry_timeout: Duration::ZERO,
             request_timeout: Duration::from_secs(5),

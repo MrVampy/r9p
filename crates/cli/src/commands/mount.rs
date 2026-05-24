@@ -33,6 +33,7 @@ pub(crate) fn parse_mount_config(global: Config, args: Vec<String>) -> CliResult
         } else {
             r9p::codec::MAX_MSIZE
         },
+        connect_timeout: Duration::from_secs(30),
         attr_timeout: fuse::DEFAULT_ATTR_TIMEOUT,
         entry_timeout: fuse::DEFAULT_ENTRY_TIMEOUT,
         request_timeout: Duration::from_secs(5),
@@ -73,6 +74,11 @@ pub(crate) fn parse_mount_config(global: Config, args: Vec<String>) -> CliResult
                 index += 1;
                 config.request_timeout =
                     parse_duration(args.get(index), "missing request timeout")?;
+            }
+            "--connect-timeout" => {
+                index += 1;
+                config.connect_timeout =
+                    parse_duration(args.get(index), "missing connect timeout")?;
             }
             "--lookup-timeout" => {
                 index += 1;
@@ -283,7 +289,7 @@ fn parse_u16_limit(
 
 fn mount_usage(code: i32) -> ! {
     eprintln!(
-        "usage: r9p mount [--aname aname] [--uname uname] [--msize msize] [--attr-timeout seconds] [--entry-timeout seconds] [--request-timeout seconds] [--lookup-timeout seconds] [--read-timeout seconds] [--write-timeout seconds] [--mutation-timeout seconds] [--control-timeout seconds] [--interrupt-timeout seconds] [--max-workers count] [--max-background count] [--congestion-threshold count] [--diagnostics-file path] [--diagnostics-capacity count] [--status-file path] [--change-feed namespace-path] [--change-feed-scope scope] [--change-feed-poll-interval seconds] [--change-feed-backpressure count] endpoint mountpoint"
+        "usage: r9p mount [--aname aname] [--uname uname] [--msize msize] [--attr-timeout seconds] [--entry-timeout seconds] [--request-timeout seconds] [--connect-timeout seconds] [--lookup-timeout seconds] [--read-timeout seconds] [--write-timeout seconds] [--mutation-timeout seconds] [--control-timeout seconds] [--interrupt-timeout seconds] [--max-workers count] [--max-background count] [--congestion-threshold count] [--diagnostics-file path] [--diagnostics-capacity count] [--status-file path] [--change-feed namespace-path] [--change-feed-scope scope] [--change-feed-poll-interval seconds] [--change-feed-backpressure count] endpoint mountpoint"
     );
     std::process::exit(code);
 }
@@ -317,6 +323,8 @@ mod tests {
                 "/".to_string(),
                 "--request-timeout".to_string(),
                 "0.25".to_string(),
+                "--connect-timeout".to_string(),
+                "12".to_string(),
                 "--lookup-timeout".to_string(),
                 "0.5".to_string(),
                 "--read-timeout".to_string(),
@@ -394,6 +402,7 @@ mod tests {
         assert_eq!(config.max_background, 24);
         assert_eq!(config.congestion_threshold, 18);
         assert_eq!(config.msize, 8192);
+        assert_eq!(config.connect_timeout, Duration::from_secs(12));
     }
 
     #[test]
@@ -406,6 +415,7 @@ mod tests {
 
         assert_eq!(config.attr_timeout, fuse::DEFAULT_ATTR_TIMEOUT);
         assert_eq!(config.entry_timeout, fuse::DEFAULT_ENTRY_TIMEOUT);
+        assert_eq!(config.connect_timeout, Duration::from_secs(30));
     }
 
     #[test]

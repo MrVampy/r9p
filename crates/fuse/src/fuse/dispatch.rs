@@ -38,11 +38,19 @@ impl R9pFuse {
         let mut workers = WorkerPool::start(self)?;
         let mut change_feed = self.start_change_feed(file)?;
         let mut buf = vec![0_u8; FUSE_BUFFER_SIZE];
+        let mut initialized = false;
         loop {
             let n = match file.read(&mut buf) {
                 Ok(0) => {
                     if let Some(feed) = change_feed.take() {
                         feed.stop_and_join();
+                    }
+                    if !initialized {
+                        workers.shutdown();
+                        return Err(Error::new(
+                            libc::ENODEV,
+                            "FUSE session ended before initialization",
+                        ));
                     }
                     return Ok(());
                 }
@@ -50,6 +58,13 @@ impl R9pFuse {
                 Err(error) if error.raw_os_error() == Some(libc::ENODEV) => {
                     if let Some(feed) = change_feed.take() {
                         feed.stop_and_join();
+                    }
+                    if !initialized {
+                        workers.shutdown();
+                        return Err(Error::new(
+                            libc::ENODEV,
+                            "FUSE session ended before initialization",
+                        ));
                     }
                     return Ok(());
                 }
@@ -69,6 +84,9 @@ impl R9pFuse {
                     header.opcode, header.unique, header.nodeid
                 );
             }
+            if header.opcode == FUSE_INIT {
+                initialized = true;
+            }
             if header.opcode == FUSE_DESTROY {
                 let mut writer = file
                     .try_clone()
@@ -79,6 +97,12 @@ impl R9pFuse {
                     feed.stop_and_join();
                 }
                 workers.shutdown();
+                if !initialized {
+                    return Err(Error::new(
+                        libc::ENODEV,
+                        "FUSE session destroyed before initialization",
+                    ));
+                }
                 return Ok(());
             }
             let writer = file

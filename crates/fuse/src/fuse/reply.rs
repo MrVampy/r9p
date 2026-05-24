@@ -104,7 +104,6 @@ fn notify_bytes(file: &mut File, code: i32, payloads: &[IoSlice<'_>]) -> Result<
     let mut slices = Vec::with_capacity(payloads.len() + 1);
     slices.push(IoSlice::new(as_bytes(&header)));
     slices.extend_from_slice(payloads);
-    let _guard = reply_write_guard()?;
     let written = file
         .write_vectored(&slices)
         .map_err(|error| Error::io("write FUSE notification", error))?;

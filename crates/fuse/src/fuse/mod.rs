@@ -23,12 +23,10 @@ use crate::{
     node::{mode_kind, qid_to_inode, NodeTable},
     p9::Client,
 };
-use mount::mount_fuse;
+use mount::{block_termination_signals, mount_fuse};
 use r9p::stat::Stat;
 use status::MountStatus;
 use std::{
-    fs::File,
-    os::fd::FromRawFd,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
     time::Duration,
@@ -117,6 +115,7 @@ impl ClientSlot {
 
 impl R9pFuse {
     pub fn mount(mut config: Config) -> Result<()> {
+        block_termination_signals();
         normalize_config(&mut config);
         let diagnostics =
             Diagnostics::new(config.diagnostics_capacity, config.diagnostics_path.clone());
@@ -139,7 +138,7 @@ impl R9pFuse {
         let nodes = Arc::new(Mutex::new(NodeTable::new(client.root_fid(), root_stat)));
         let uid = unsafe { libc::getuid() };
         let gid = unsafe { libc::getgid() };
-        let fd = mount_fuse(Path::new(&config.mountpoint))?;
+        let mut mount = mount_fuse(Path::new(&config.mountpoint))?;
         let fs = Self {
             client: ClientSlot::new(client),
             nodes,
@@ -149,8 +148,7 @@ impl R9pFuse {
             uid,
             gid,
         };
-        let mut file = unsafe { File::from_raw_fd(fd) };
-        fs.run(&mut file)
+        fs.run(mount.file_mut())
     }
 
     pub(in crate::fuse) fn entry_out(

@@ -12,17 +12,109 @@
 use crate::error::{Error, Result};
 use std::{
     ffi::CString,
+    fs::{self, File},
+    io,
     mem::zeroed,
-    os::fd::RawFd,
+    os::fd::{FromRawFd, RawFd},
     path::{Path, PathBuf},
-    process::Command,
-    ptr, thread,
+    process::{Child, Command, Stdio},
+    ptr,
+    sync::{
+        atomic::{AtomicI32, Ordering},
+        Arc,
+    },
+    thread,
+    time::{Duration, Instant},
 };
 
-pub(super) fn mount_fuse(mountpoint: &Path) -> Result<RawFd> {
-    let mountpoint_str = mountpoint
+const UNMOUNT_TIMEOUT: Duration = Duration::from_secs(2);
+
+pub(super) struct FuseMount {
+    file: Option<File>,
+    cleanup: MountCleanup,
+}
+
+pub(super) fn block_termination_signals() {
+    set_termination_signal_mask(libc::SIG_BLOCK);
+}
+
+fn unblock_termination_signals() {
+    set_termination_signal_mask(libc::SIG_UNBLOCK);
+}
+
+fn set_termination_signal_mask(how: libc::c_int) {
+    unsafe {
+        let mut set: libc::sigset_t = zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGINT);
+        libc::sigaddset(&mut set, libc::SIGTERM);
+        libc::sigaddset(&mut set, libc::SIGHUP);
+        libc::pthread_sigmask(how, &set, ptr::null_mut());
+    }
+}
+
+impl FuseMount {
+    pub(super) fn file_mut(&mut self) -> &mut File {
+        self.file.as_mut().expect("FUSE mount file missing")
+    }
+}
+
+impl Drop for FuseMount {
+    fn drop(&mut self) {
+        if let Some(file) = self.file.take() {
+            if self.cleanup.fuse_fd_is_open() {
+                drop(file);
+                self.cleanup.mark_fuse_fd_closed();
+            } else {
+                std::mem::forget(file);
+            }
+        }
+        self.cleanup.detach_and_abort();
+    }
+}
+
+#[derive(Clone)]
+struct MountCleanup {
+    mountpoint: PathBuf,
+    connection_id: Option<u64>,
+    fuse_fd: Arc<AtomicI32>,
+}
+
+impl MountCleanup {
+    fn cleanup(&self) {
+        self.close_fuse_fd();
+        self.detach_and_abort();
+    }
+
+    fn detach_and_abort(&self) {
+        lazy_unmount(&self.mountpoint);
+        abort_fuse_connection(self.connection_id);
+    }
+
+    fn close_fuse_fd(&self) {
+        let fd = self.fuse_fd.swap(-1, Ordering::SeqCst);
+        if fd >= 0 {
+            unsafe {
+                libc::close(fd);
+            }
+        }
+    }
+
+    fn mark_fuse_fd_closed(&self) {
+        self.fuse_fd.store(-1, Ordering::SeqCst);
+    }
+
+    fn fuse_fd_is_open(&self) -> bool {
+        self.fuse_fd.load(Ordering::SeqCst) >= 0
+    }
+}
+
+pub(super) fn mount_fuse(mountpoint: &Path) -> Result<FuseMount> {
+    let absolute_mountpoint = absolute_mountpoint(mountpoint)?;
+    let mountpoint_str = absolute_mountpoint
         .to_str()
-        .ok_or_else(|| Error::new(libc::EINVAL, "mountpoint is not valid UTF-8"))?;
+        .ok_or_else(|| Error::new(libc::EINVAL, "mountpoint is not valid UTF-8"))?
+        .to_string();
     let mut sockets = [0_i32; 2];
     let rc = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, sockets.as_mut_ptr()) };
     if rc < 0 {
@@ -39,7 +131,7 @@ pub(super) fn mount_fuse(mountpoint: &Path) -> Result<RawFd> {
     if pid == 0 {
         unsafe {
             libc::close(sockets[1]);
-            child_exec_fusermount(sockets[0], mountpoint_str);
+            child_exec_fusermount(sockets[0], &mountpoint_str);
         }
     }
     unsafe {
@@ -54,11 +146,31 @@ pub(super) fn mount_fuse(mountpoint: &Path) -> Result<RawFd> {
         libc::waitpid(pid, &mut status, 0);
     }
     let fd = fd?;
-    install_unmount_on_signal(mountpoint.to_path_buf());
-    Ok(fd)
+    let connection_id = connection_id_for_mountpoint(&mountpoint_str);
+    let fuse_fd = Arc::new(AtomicI32::new(fd));
+    let cleanup = MountCleanup {
+        mountpoint: absolute_mountpoint,
+        connection_id,
+        fuse_fd: Arc::clone(&fuse_fd),
+    };
+    install_unmount_on_signal(cleanup.clone());
+    Ok(FuseMount {
+        file: Some(unsafe { File::from_raw_fd(fd) }),
+        cleanup,
+    })
+}
+
+fn absolute_mountpoint(mountpoint: &Path) -> Result<PathBuf> {
+    if mountpoint.is_absolute() {
+        return Ok(mountpoint.to_path_buf());
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(mountpoint))
+        .map_err(|error| Error::io("resolve mountpoint path", error))
 }
 
 unsafe fn child_exec_fusermount(comm_fd: RawFd, mountpoint: &str) -> ! {
+    unblock_termination_signals();
     let env_name = CString::new("_FUSE_COMMFD").expect("static env name contains no NUL");
     let env_value = CString::new(comm_fd.to_string()).expect("fd string contains no NUL");
     let mountpoint = CString::new(mountpoint).expect("mountpoint contains no NUL");
@@ -117,29 +229,17 @@ pub(super) fn recv_fd(socket: RawFd) -> Result<RawFd> {
     }
 }
 
-fn install_unmount_on_signal(mountpoint: PathBuf) {
+fn install_unmount_on_signal(cleanup: MountCleanup) {
     // Block SIGINT/SIGTERM/SIGHUP on every thread except the dedicated
     // watcher. Setting the mask on the calling (main) thread before any
     // worker threads spawn means the watcher's sibling threads inherit the
     // block, which is what `sigwait` requires.
-    unsafe {
-        let mut set: libc::sigset_t = zeroed();
-        libc::sigemptyset(&mut set);
-        libc::sigaddset(&mut set, libc::SIGINT);
-        libc::sigaddset(&mut set, libc::SIGTERM);
-        libc::sigaddset(&mut set, libc::SIGHUP);
-        libc::pthread_sigmask(libc::SIG_BLOCK, &set, ptr::null_mut());
-    }
+    block_termination_signals();
     thread::spawn(move || {
         let signo = wait_for_termination_signal();
-        run_fusermount_unmount(&mountpoint);
-        // Re-raise so the process exit code reflects the originating signal.
+        cleanup.cleanup();
         unsafe {
-            let mut set: libc::sigset_t = zeroed();
-            libc::sigemptyset(&mut set);
-            libc::sigaddset(&mut set, signo);
-            libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, ptr::null_mut());
-            libc::raise(signo);
+            libc::_exit(128 + signo);
         }
     });
 }
@@ -159,26 +259,161 @@ fn wait_for_termination_signal() -> libc::c_int {
     }
 }
 
-fn run_fusermount_unmount(mountpoint: &Path) {
-    for binary in fusermount_candidates() {
-        if Command::new(binary)
-            .arg("-u")
-            .arg(mountpoint)
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
-        {
+fn lazy_unmount(mountpoint: &Path) {
+    if umount2_lazy(mountpoint) {
+        return;
+    }
+    for (binary, args) in [
+        ("fusermount3", &["-u", "-z"][..]),
+        ("fusermount", &["-u", "-z"][..]),
+        ("umount", &["-l"][..]),
+    ] {
+        if run_unmount_command(binary, args, mountpoint) {
             return;
         }
     }
 }
 
+fn umount2_lazy(mountpoint: &Path) -> bool {
+    let Some(mountpoint) = mountpoint.to_str() else {
+        return false;
+    };
+    let Ok(mountpoint) = CString::new(mountpoint) else {
+        return false;
+    };
+    unsafe { libc::umount2(mountpoint.as_ptr(), libc::MNT_DETACH) == 0 }
+}
+
+fn run_unmount_command(binary: &str, args: &[&str], mountpoint: &Path) -> bool {
+    let mut command = Command::new(binary);
+    command
+        .args(args)
+        .arg(mountpoint)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let Ok(mut child) = command.spawn() else {
+        return false;
+    };
+    wait_with_timeout(&mut child, UNMOUNT_TIMEOUT).unwrap_or(false)
+}
+
+fn wait_with_timeout(child: &mut Child, timeout: Duration) -> io::Result<bool> {
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status.success());
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(false);
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn abort_fuse_connection(connection_id: Option<u64>) {
+    let Some(connection_id) = connection_id else {
+        return;
+    };
+    let path = PathBuf::from(format!("/sys/fs/fuse/connections/{connection_id}/abort"));
+    let _ = fs::write(path, b"1\n");
+}
+
+fn connection_id_for_mountpoint(mountpoint: &str) -> Option<u64> {
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo").ok()?;
+    parse_connection_id_from_mountinfo(&mountinfo, mountpoint)
+}
+
+fn parse_connection_id_from_mountinfo(mountinfo: &str, mountpoint: &str) -> Option<u64> {
+    for line in mountinfo.lines() {
+        let fields = line
+            .split(" - ")
+            .next()?
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        if fields.len() < 5 {
+            continue;
+        }
+        if decode_mountinfo_path(fields[4]) != mountpoint {
+            continue;
+        }
+        let (_major, minor) = fields[2].split_once(':')?;
+        return minor.parse().ok();
+    }
+    None
+}
+
+fn decode_mountinfo_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    let mut bytes = path.as_bytes().iter().copied().peekable();
+    while let Some(byte) = bytes.next() {
+        if byte != b'\\' {
+            out.push(byte as char);
+            continue;
+        }
+        let mut octal = [0_u8; 3];
+        let mut complete = true;
+        for digit in &mut octal {
+            match bytes.next() {
+                Some(value @ b'0'..=b'7') => *digit = value,
+                Some(value) => {
+                    out.push('\\');
+                    out.push(value as char);
+                    complete = false;
+                    break;
+                }
+                None => {
+                    out.push('\\');
+                    complete = false;
+                    break;
+                }
+            }
+        }
+        if complete {
+            let value = (octal[0] - b'0') * 64 + (octal[1] - b'0') * 8 + (octal[2] - b'0');
+            out.push(value as char);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::fusermount_candidates;
+    use super::{decode_mountinfo_path, fusermount_candidates, parse_connection_id_from_mountinfo};
 
     #[test]
     fn prefers_fusermount3_before_fuse2_helper() {
         assert_eq!(["fusermount3", "fusermount"], fusermount_candidates());
+    }
+
+    #[test]
+    fn parses_fuse_connection_id_from_mountinfo() {
+        let mountinfo = concat!(
+            "42 28 0:37 / /sys/fs/fuse/connections rw - fusectl fusectl rw\n",
+            "68 30 0:57 / /home/mrvamp/Vault/.vault/live rw - fuse /dev/fuse rw,user_id=1000\n",
+        );
+        assert_eq!(
+            Some(57),
+            parse_connection_id_from_mountinfo(mountinfo, "/home/mrvamp/Vault/.vault/live")
+        );
+    }
+
+    #[test]
+    fn decodes_mountinfo_octal_escapes() {
+        assert_eq!(
+            "/tmp/r9p mount/live",
+            decode_mountinfo_path("/tmp/r9p\\040mount/live")
+        );
+    }
+
+    #[test]
+    fn relative_mountpoint_resolution_is_lexical() {
+        let cwd = std::env::current_dir().expect("current dir");
+        assert_eq!(
+            cwd.join(".vault/live"),
+            super::absolute_mountpoint(std::path::Path::new(".vault/live")).expect("absolute path")
+        );
     }
 }

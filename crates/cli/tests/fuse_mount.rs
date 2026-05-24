@@ -1,10 +1,25 @@
 use std::{
     fs,
-    io::{self, Read},
+    io::{self, Read, Write},
+    net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    thread,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    },
+    thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+
+use r9p::{
+    codec,
+    fid::Fid,
+    message::TMessage,
+    qid::{Qid, DMDIR},
+    server::{FileTree, OpenFile, ReadData, Server},
+    stat::Stat,
+    Result as R9pResult,
 };
 
 #[test]
@@ -145,6 +160,53 @@ fn fuse_mount_lazy_unmount_drains_open_handles() -> io::Result<()> {
     Ok(())
 }
 
+#[test]
+#[ignore = "host-gated: requires /dev/fuse, fusermount, and user mount permission"]
+fn fuse_mount_sigterm_releases_waiting_readers() -> io::Result<()> {
+    if !host_can_run_fuse() {
+        return Ok(());
+    }
+
+    let mountpoint = unique_temp_dir("r9p-fuse-sigterm-mount")?;
+    let server = SlowServer::start()?;
+
+    let mut mount = ChildGuard::spawn(
+        Command::new(r9p_bin())
+            .arg("mount")
+            .arg("--request-timeout")
+            .arg("30")
+            .arg("--read-timeout")
+            .arg("30")
+            .arg("--control-timeout")
+            .arg("1")
+            .arg(&server.endpoint)
+            .arg(&mountpoint)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )?;
+    wait_for_metadata(&mountpoint.join("slow"))?;
+
+    let mut reader = ChildGuard::spawn(
+        Command::new("head")
+            .arg("-c")
+            .arg("1")
+            .arg(mountpoint.join("slow"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )?;
+    server.wait_until_read_started()?;
+
+    mount.signal(libc::SIGTERM);
+    reader.wait_until_exit(Duration::from_secs(5))?;
+    mount.wait_until_exit(Duration::from_secs(5))?;
+    wait_for_mount_detached(&mountpoint)?;
+
+    server.release();
+    let _ = server.join();
+    let _ = fs::remove_dir_all(&mountpoint);
+    Ok(())
+}
+
 fn host_can_run_fuse() -> bool {
     Path::new("/dev/fuse").exists()
         && (Command::new("fusermount3")
@@ -232,6 +294,18 @@ fn wait_for_mounted_file(path: &Path) -> io::Result<()> {
     }
 }
 
+fn wait_for_metadata(path: &Path) -> io::Result<()> {
+    let started = Instant::now();
+    loop {
+        match fs::metadata(path) {
+            Ok(_) => return Ok(()),
+            Err(error) if started.elapsed() > Duration::from_secs(5) => return Err(error),
+            Err(_) => {}
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn read_tree(root: &Path) -> io::Result<()> {
     for dir in fs::read_dir(root)? {
         let dir = dir?;
@@ -307,9 +381,11 @@ fn wait_for_mount_detached(path: &Path) -> io::Result<()> {
 }
 
 fn is_mountpoint(path: &Path) -> bool {
-    Command::new("mountpoint")
-        .arg("-q")
+    Command::new("findmnt")
+        .arg("--mountpoint")
         .arg(path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
@@ -327,6 +403,17 @@ impl ChildGuard {
     fn kill(&mut self) {
         if let Some(child) = &mut self.child {
             let _ = child.kill();
+        }
+    }
+
+    fn signal(&mut self, signal: libc::c_int) {
+        if let Some(child) = &mut self.child {
+            unsafe {
+                libc::kill(
+                    libc::pid_t::try_from(child.id()).unwrap_or(libc::pid_t::MAX),
+                    signal,
+                );
+            }
         }
     }
 
@@ -361,6 +448,179 @@ impl ChildGuard {
         }
         Ok(())
     }
+}
+
+struct SlowServer {
+    endpoint: String,
+    read_calls: Arc<AtomicUsize>,
+    release: Arc<AtomicBool>,
+    handle: JoinHandle<io::Result<()>>,
+}
+
+impl SlowServer {
+    fn start() -> io::Result<Self> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let endpoint = listener.local_addr()?.to_string();
+        let read_calls = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(AtomicBool::new(false));
+        let thread_read_calls = Arc::clone(&read_calls);
+        let thread_release = Arc::clone(&release);
+        let handle = thread::spawn(move || -> io::Result<()> {
+            let (stream, _) = listener.accept()?;
+            serve_slow_connection(stream, thread_read_calls, thread_release)
+        });
+        Ok(Self {
+            endpoint,
+            read_calls,
+            release,
+            handle,
+        })
+    }
+
+    fn wait_until_read_started(&self) -> io::Result<()> {
+        let started = Instant::now();
+        while started.elapsed() <= Duration::from_secs(5) {
+            if self.read_calls.load(Ordering::SeqCst) > 0 {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "slow read did not start",
+        ))
+    }
+
+    fn release(&self) {
+        self.release.store(true, Ordering::SeqCst);
+    }
+
+    fn join(self) -> io::Result<()> {
+        self.handle
+            .join()
+            .map_err(|_| io::Error::other("slow server thread panicked"))?
+    }
+}
+
+struct SlowTree {
+    root: Qid,
+    slow: Qid,
+    read_calls: Arc<AtomicUsize>,
+    release: Arc<AtomicBool>,
+}
+
+impl SlowTree {
+    fn new(read_calls: Arc<AtomicUsize>, release: Arc<AtomicBool>) -> Self {
+        Self {
+            root: Qid::dir(1),
+            slow: Qid::file(2),
+            read_calls,
+            release,
+        }
+    }
+}
+
+impl FileTree for SlowTree {
+    fn attach(&mut self, _fid: Fid, _uname: &[u8], _aname: &[u8]) -> R9pResult<Qid> {
+        Ok(self.root)
+    }
+
+    fn walk(
+        &mut self,
+        _fid: Fid,
+        _newfid: Fid,
+        start: Qid,
+        names: &[Vec<u8>],
+    ) -> R9pResult<Vec<Qid>> {
+        match names {
+            [name] if start == self.root && name == b"slow" => Ok(vec![self.slow]),
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    fn open(&mut self, _fid: Fid, qid: Qid, _mode: u8) -> R9pResult<OpenFile> {
+        Ok(OpenFile { qid, iounit: 0 })
+    }
+
+    fn read(&mut self, _fid: Fid, qid: Qid, offset: u64, _count: u32) -> R9pResult<ReadData> {
+        if qid != self.slow {
+            return Ok(ReadData::Directory(Vec::new()));
+        }
+        self.read_calls.fetch_add(1, Ordering::SeqCst);
+        while !self.release.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(20));
+        }
+        if offset > 0 {
+            Ok(ReadData::Bytes(Vec::new()))
+        } else {
+            Ok(ReadData::Bytes(b"x".to_vec()))
+        }
+    }
+
+    fn stat(&mut self, qid: Qid) -> R9pResult<Stat> {
+        if qid == self.slow {
+            let mut stat = Stat::new("slow", qid, 0o444);
+            stat.length = 1;
+            Ok(stat)
+        } else {
+            Ok(Stat::new(".", qid, DMDIR | 0o555))
+        }
+    }
+}
+
+fn serve_slow_connection(
+    mut stream: TcpStream,
+    read_calls: Arc<AtomicUsize>,
+    release: Arc<AtomicBool>,
+) -> io::Result<()> {
+    let mut server = Server::new(SlowTree::new(read_calls, release));
+    while let Some(message) = read_tmessage(&mut stream)? {
+        let reply = server.handle(message);
+        let frame = codec::encode_rmessage_checked(&reply, server.session().msize())
+            .map_err(|error| io::Error::other(format!("encode reply: {error}")))?;
+        if let Err(error) = stream.write_all(&frame) {
+            if matches!(
+                error.kind(),
+                io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+            ) {
+                return Ok(());
+            }
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+fn read_tmessage(stream: &mut TcpStream) -> io::Result<Option<TMessage>> {
+    let mut prefix = [0_u8; 4];
+    match stream.read_exact(&mut prefix) {
+        Ok(()) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    }
+    let size = u32::from_le_bytes(prefix);
+    if size < codec::FRAME_HEADER_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("short frame: {size}"),
+        ));
+    }
+    let rest_len = usize::try_from(size - 4)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "frame too large"))?;
+    let mut frame = Vec::with_capacity(rest_len + 4);
+    frame.extend(prefix);
+    frame.resize(rest_len + 4, 0);
+    stream.read_exact(&mut frame[4..])?;
+    codec::decode_tmessage(&frame)
+        .map(Some)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
 }
 
 impl Drop for ChildGuard {

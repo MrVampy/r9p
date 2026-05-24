@@ -6,13 +6,13 @@ use super::{
         FuseInHeader, FuseInitIn, FuseInitOut, FuseInterruptIn, DEFAULT_MAX_WRITE, FUSE_ACCESS,
         FUSE_ASYNC_READ, FUSE_ATOMIC_O_TRUNC, FUSE_AUTO_INVAL_DATA, FUSE_BATCH_FORGET,
         FUSE_BIG_WRITES, FUSE_BUFFER_SIZE, FUSE_COMPAT_22_INIT_OUT_SIZE, FUSE_COMPAT_INIT_OUT_SIZE,
-        FUSE_CREATE, FUSE_DESTROY, FUSE_DONT_MASK, FUSE_DO_READDIRPLUS, FUSE_EXPORT_SUPPORT,
-        FUSE_FLUSH, FUSE_FORGET, FUSE_FSYNC, FUSE_FSYNCDIR, FUSE_GETATTR, FUSE_GETLK,
-        FUSE_GETXATTR, FUSE_INIT, FUSE_INTERRUPT, FUSE_KERNEL_MINOR_VERSION, FUSE_KERNEL_VERSION,
-        FUSE_LINK, FUSE_LISTXATTR, FUSE_LOOKUP, FUSE_MKDIR, FUSE_MKNOD, FUSE_OPEN, FUSE_OPENDIR,
-        FUSE_PARALLEL_DIROPS, FUSE_POLL, FUSE_READ, FUSE_READDIR, FUSE_READDIRPLUS, FUSE_READLINK,
-        FUSE_RELEASE, FUSE_RELEASEDIR, FUSE_REMOVEXATTR, FUSE_RENAME, FUSE_RMDIR, FUSE_SETATTR,
-        FUSE_SETLK, FUSE_SETLKW, FUSE_SETXATTR, FUSE_STATFS, FUSE_SYMLINK, FUSE_UNLINK, FUSE_WRITE,
+        FUSE_CREATE, FUSE_DESTROY, FUSE_DONT_MASK, FUSE_EXPORT_SUPPORT, FUSE_FLUSH, FUSE_FORGET,
+        FUSE_FSYNC, FUSE_FSYNCDIR, FUSE_GETATTR, FUSE_GETLK, FUSE_GETXATTR, FUSE_INIT,
+        FUSE_INTERRUPT, FUSE_KERNEL_MINOR_VERSION, FUSE_KERNEL_VERSION, FUSE_LINK, FUSE_LISTXATTR,
+        FUSE_LOOKUP, FUSE_MKDIR, FUSE_MKNOD, FUSE_OPEN, FUSE_OPENDIR, FUSE_PARALLEL_DIROPS,
+        FUSE_POLL, FUSE_READ, FUSE_READDIR, FUSE_READDIRPLUS, FUSE_READLINK, FUSE_RELEASE,
+        FUSE_RELEASEDIR, FUSE_REMOVEXATTR, FUSE_RENAME, FUSE_RMDIR, FUSE_SETATTR, FUSE_SETLK,
+        FUSE_SETLKW, FUSE_SETXATTR, FUSE_STATFS, FUSE_SYMLINK, FUSE_UNLINK, FUSE_WRITE,
     },
     R9pFuse,
 };
@@ -186,18 +186,16 @@ impl R9pFuse {
         // umask to mode bits we already pass through verbatim, BIG_WRITES is
         // governed by max_write, AUTO_INVAL_DATA invalidates page-cache pages
         // when mtime changes (relevant once non-zero attr_timeout returns),
-        // DO_READDIRPLUS makes Linux ask for directory stats in the same
-        // request, and PARALLEL_DIROPS unblocks concurrent lookups inside
-        // one dir. We intentionally do not request READDIRPLUS_AUTO: 9P
-        // directory reads already return stat data, so adaptive fallback only
-        // makes `ls -l` issue avoidable LOOKUP/GETATTR traffic.
+        // and PARALLEL_DIROPS unblocks concurrent lookups inside one dir.
+        // READDIRPLUS stays implemented but unadvertised until its Linux
+        // dcache behaviour has a focused conformance gate; plain READDIR plus
+        // LOOKUP/GETATTR is the stable path.
         let supported = FUSE_ASYNC_READ
             | FUSE_ATOMIC_O_TRUNC
             | FUSE_EXPORT_SUPPORT
             | FUSE_BIG_WRITES
             | FUSE_DONT_MASK
             | FUSE_AUTO_INVAL_DATA
-            | FUSE_DO_READDIRPLUS
             | FUSE_PARALLEL_DIROPS;
         let mut output = FuseInitOut {
             major: FUSE_KERNEL_VERSION,

@@ -27,6 +27,7 @@ pub struct Handle {
     pub client: Client,
     pub fid: Fid,
     pub is_dir: bool,
+    pub write_on_release: bool,
     pub dir_entries: Vec<DirEntry>,
 }
 
@@ -36,6 +37,7 @@ impl fmt::Debug for Handle {
             .debug_struct("Handle")
             .field("fid", &self.fid)
             .field("is_dir", &self.is_dir)
+            .field("write_on_release", &self.write_on_release)
             .field("dir_entries", &self.dir_entries)
             .finish()
     }
@@ -225,6 +227,7 @@ impl NodeTable {
         client: Client,
         fid: Fid,
         is_dir: bool,
+        write_on_release: bool,
         dir_entries: Vec<DirEntry>,
     ) -> u64 {
         let handle = self.next_handle;
@@ -235,6 +238,7 @@ impl NodeTable {
                 client,
                 fid,
                 is_dir,
+                write_on_release,
                 dir_entries,
             },
         );

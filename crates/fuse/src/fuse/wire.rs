@@ -4,7 +4,7 @@
 //! version 7.31 (Linux 5.4). That version is widely available, predates the
 //! `FUSE_INIT_EXT`/`flags2` extension envelope, and unlocks the capabilities
 //! r9p mount cares about: `ATOMIC_O_TRUNC`, `EXPORT_SUPPORT`, `DONT_MASK`,
-//! `AUTO_INVAL_DATA`, `PARALLEL_DIROPS`, and `READDIRPLUS`.
+//! `AUTO_INVAL_DATA`, and `PARALLEL_DIROPS`.
 
 pub(super) const FUSE_LOOKUP: u32 = 1;
 pub(super) const FUSE_FORGET: u32 = 2;
@@ -59,7 +59,6 @@ pub(super) const FUSE_EXPORT_SUPPORT: u32 = 1 << 4;
 pub(super) const FUSE_BIG_WRITES: u32 = 1 << 5;
 pub(super) const FUSE_DONT_MASK: u32 = 1 << 6;
 pub(super) const FUSE_AUTO_INVAL_DATA: u32 = 1 << 12;
-pub(super) const FUSE_DO_READDIRPLUS: u32 = 1 << 13;
 pub(super) const FUSE_PARALLEL_DIROPS: u32 = 1 << 18;
 
 pub(super) const FUSE_NOTIFY_INVAL_INODE: i32 = 2;

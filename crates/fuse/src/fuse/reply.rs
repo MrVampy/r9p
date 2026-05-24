@@ -11,6 +11,7 @@ use std::{
     io::{IoSlice, Write},
     mem::size_of,
     ptr,
+    sync::{Mutex, OnceLock},
 };
 
 pub(super) fn reply_empty(file: &mut File, unique: u64) -> Result<()> {
@@ -23,6 +24,7 @@ pub(super) fn reply_error(file: &mut File, unique: u64, errno: i32) -> Result<()
         error: -errno.abs(),
         unique,
     };
+    let _guard = reply_write_guard()?;
     file.write_all(as_bytes(&header))
         .map_err(|error| Error::io("write FUSE error reply", error))
 }
@@ -41,9 +43,11 @@ pub(super) fn reply_bytes(file: &mut File, unique: u64, payload: &[u8]) -> Resul
         unique,
     };
     // /dev/fuse consumes each reply as one message; a partial write would be
-    // rejected. writev hands header and body to the kernel atomically, so no
-    // intermediate buffer is needed.
+    // rejected. writev hands header and body to the kernel in one syscall, and
+    // the process-wide guard keeps concurrent worker replies from interleaving
+    // on cloned /dev/fuse descriptors.
     let slices = [IoSlice::new(as_bytes(&header)), IoSlice::new(payload)];
+    let _guard = reply_write_guard()?;
     let written = file
         .write_vectored(&slices)
         .map_err(|error| Error::io("write FUSE reply", error))?;
@@ -100,6 +104,7 @@ fn notify_bytes(file: &mut File, code: i32, payloads: &[IoSlice<'_>]) -> Result<
     let mut slices = Vec::with_capacity(payloads.len() + 1);
     slices.push(IoSlice::new(as_bytes(&header)));
     slices.extend_from_slice(payloads);
+    let _guard = reply_write_guard()?;
     let written = file
         .write_vectored(&slices)
         .map_err(|error| Error::io("write FUSE notification", error))?;
@@ -107,6 +112,14 @@ fn notify_bytes(file: &mut File, code: i32, payloads: &[IoSlice<'_>]) -> Result<
         return Err(Error::new(libc::EIO, "short FUSE notification write"));
     }
     Ok(())
+}
+
+fn reply_write_guard() -> Result<std::sync::MutexGuard<'static, ()>> {
+    static REPLY_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    REPLY_WRITE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| Error::new(libc::EIO, "FUSE reply write lock poisoned"))
 }
 
 pub(super) fn as_bytes<T>(value: &T) -> &[u8] {

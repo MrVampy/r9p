@@ -138,9 +138,14 @@ impl R9pFuse {
         } else {
             Vec::new()
         };
-        let handle = self
-            .nodes()?
-            .open_handle(client.clone(), fid, is_dir_open, dir_entries);
+        let write_on_release = !is_dir_open && mode != OREAD;
+        let handle = self.nodes()?.open_handle(
+            client.clone(),
+            fid,
+            is_dir_open,
+            write_on_release,
+            dir_entries,
+        );
         let out = FuseOpenOut {
             fh: handle,
             open_flags: fuse_open_flags(is_dir_open, mode),
@@ -157,7 +162,7 @@ impl R9pFuse {
     ) -> Result<()> {
         let input = read_struct::<FuseReadIn>(payload)?;
         let handle = self.nodes()?.handle(input.fh)?.clone();
-        let data = match handle.client.read_full_timeout(
+        let data = match handle.client.read_timeout(
             handle.fid,
             input.offset,
             input.size,
@@ -262,9 +267,29 @@ impl R9pFuse {
         let input = read_struct::<FuseReleaseIn>(payload)?;
         let handle = self.nodes()?.remove_handle(input.fh);
         if let Some(handle) = handle {
-            let _ = handle
+            if let Err(error) = handle
                 .client
-                .clunk_timeout(handle.fid, self.control_timeout());
+                .clunk_timeout(handle.fid, self.control_timeout())
+            {
+                if !handle.write_on_release {
+                    return reply_empty(file, header.unique);
+                }
+                if is_transport_error(&error) {
+                    self.reconnect()?;
+                    return Err(Error::new(
+                        libc::EIO,
+                        "release failed during reconnect; close result is unknown",
+                    ));
+                }
+                if is_namespace_shape_error(&error) {
+                    self.refresh_node(header.nodeid)?;
+                    return Err(Error::new(
+                        libc::EIO,
+                        "release failed during namespace refresh; close result is unknown",
+                    ));
+                }
+                return Err(error);
+            }
         }
         reply_empty(file, header.unique)
     }

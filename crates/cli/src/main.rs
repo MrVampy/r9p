@@ -10,6 +10,7 @@ mod transport;
 
 use commands::{
     con::con_cmd,
+    git_export::git_export_cmd,
     ls::ls_cmd,
     machine::{machine_list_cmd, machine_remove_cmd},
     mount::mount_cmd,
@@ -63,6 +64,7 @@ fn run() -> CliResult<()> {
         "mount" => mount_cmd(config, args),
         "serve" => serve_cmd(config, args),
         "export" => export_cmd(config, args),
+        "export-git" => git_export_cmd(config, args),
         "stat" => stat_cmd(config, args),
         "rdwr" => rdwr_cmd(config, args),
         "ls" => ls_cmd(config, args),
@@ -188,6 +190,7 @@ pub(crate) fn usage() -> ! {
     eprintln!("  mount [--aname aname] [--uname uname] endpoint mountpoint");
     eprintln!("  serve [--bind address] root");
     eprintln!("  export [--bind address] [--descriptor machine] root");
+    eprintln!("  export-git [--repo path] [--rev rev] [--bind address] [--descriptor-file path]");
     eprintln!("  create name...");
     eprintln!("  mkdir name...");
     eprintln!("  con [-r] name");

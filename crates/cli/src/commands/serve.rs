@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs as std_fs,
     io::{Read, Write},
     net::{SocketAddr, TcpListener, ToSocketAddrs},
@@ -41,6 +42,10 @@ pub(crate) fn serve_cmd(global: Config, args: Vec<String>) -> CliResult<()> {
 
 pub(crate) fn export_cmd(global: Config, args: Vec<String>) -> CliResult<()> {
     let config = parse_export_config(global, args)?;
+    export_with_config(config)
+}
+
+pub(crate) fn export_with_config(config: ExportConfig) -> CliResult<()> {
     ensure_fd_budget(config.serve.max_fids)?;
     let bound = BoundListener::bind(&config.serve)?;
     let descriptor = export_descriptor(&config, &bound)?;
@@ -50,25 +55,26 @@ pub(crate) fn export_cmd(global: Config, args: Vec<String>) -> CliResult<()> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ServeConfig {
-    root: PathBuf,
-    bind: BindTarget,
-    uname: String,
-    aname: String,
-    msize: u32,
-    max_fids: usize,
+    pub(crate) root: PathBuf,
+    pub(crate) bind: BindTarget,
+    pub(crate) uname: String,
+    pub(crate) aname: String,
+    pub(crate) msize: u32,
+    pub(crate) max_fids: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum BindTarget {
+pub(crate) enum BindTarget {
     Tcp(SocketAddr),
     Unix(PathBuf),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ExportConfig {
-    serve: ServeConfig,
-    descriptor_file: Option<PathBuf>,
-    auth: AuthBoundary,
+pub(crate) struct ExportConfig {
+    pub(crate) serve: ServeConfig,
+    pub(crate) descriptor_file: Option<PathBuf>,
+    pub(crate) auth: AuthBoundary,
+    pub(crate) extra_fields: BTreeMap<String, String>,
 }
 
 enum BoundListener {
@@ -133,7 +139,7 @@ pub(crate) fn parse_serve_config(global: Config, args: Vec<String>) -> CliResult
     })
 }
 
-fn parse_export_config(global: Config, args: Vec<String>) -> CliResult<ExportConfig> {
+pub(crate) fn parse_export_config(global: Config, args: Vec<String>) -> CliResult<ExportConfig> {
     if global.address.is_some() {
         return Err(cli_error(
             "r9p export uses --bind for its listen address; do not use global -a",
@@ -145,6 +151,7 @@ fn parse_export_config(global: Config, args: Vec<String>) -> CliResult<ExportCon
     let mut descriptor_file = None;
     let mut descriptor_format = "machine".to_string();
     let mut auth = AuthBoundary::none();
+    let mut extra_fields = BTreeMap::new();
     let mut positional = Vec::new();
     let mut index = 0_usize;
     while index < args.len() {
@@ -186,6 +193,16 @@ fn parse_export_config(global: Config, args: Vec<String>) -> CliResult<ExportCon
                         .ok_or_else(|| cli_error("missing auth boundary"))?,
                 )?;
             }
+            "--descriptor-field" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| cli_error("missing descriptor field"))?;
+                let (field, field_value) = parse_descriptor_field(value)?;
+                if extra_fields.insert(field.clone(), field_value).is_some() {
+                    return Err(cli_error(format!("duplicate descriptor field {field}")));
+                }
+            }
             "-h" | "--help" => export_usage(0),
             arg if arg.starts_with('-') => {
                 return Err(cli_error(format!("unknown export option {arg}")));
@@ -218,7 +235,20 @@ fn parse_export_config(global: Config, args: Vec<String>) -> CliResult<ExportCon
         },
         descriptor_file,
         auth,
+        extra_fields,
     })
+}
+
+fn parse_descriptor_field(value: &str) -> CliResult<(String, String)> {
+    let (field, field_value) = value.split_once('=').ok_or_else(|| {
+        cli_error(format!(
+            "invalid descriptor field {value}: expected key=value"
+        ))
+    })?;
+    if field.is_empty() {
+        return Err(cli_error("descriptor field name is empty"));
+    }
+    Ok((field.to_string(), field_value.to_string()))
 }
 
 impl BoundListener {
@@ -509,6 +539,7 @@ fn export_descriptor(config: &ExportConfig, bound: &BoundListener) -> CliResult<
         msize: config.serve.msize,
         expires_at: None,
         local_root_label: Some(config.serve.root.display().to_string()),
+        extra_fields: config.extra_fields.clone(),
     })
 }
 
@@ -533,7 +564,7 @@ fn serve_usage(code: i32) -> ! {
 
 fn export_usage(code: i32) -> ! {
     eprintln!(
-        "usage: r9p export [--bind address] [--max-fids count] [--descriptor machine] [--descriptor-file path] [--auth boundary] root"
+        "usage: r9p export [--bind address] [--max-fids count] [--descriptor machine] [--descriptor-file path] [--auth boundary] [--descriptor-field key=value] root"
     );
     std::process::exit(code);
 }
@@ -679,5 +710,27 @@ mod tests {
         .expect("export config should parse");
         assert_eq!(config.descriptor_file, Some(PathBuf::from("/tmp/r9p.desc")));
         assert_eq!(config.auth.render(), "uds-peercred:1000:100");
+    }
+
+    #[test]
+    fn parses_export_descriptor_extension_fields() {
+        let config = parse_export_config(
+            global(),
+            vec![
+                "--bind".to_string(),
+                "127.0.0.1:0".to_string(),
+                "--descriptor-field".to_string(),
+                "git_bundle_path=/.vault/source-export.bundle".to_string(),
+                "/tmp/export".to_string(),
+            ],
+        )
+        .expect("export config should parse");
+        assert_eq!(
+            config
+                .extra_fields
+                .get("git_bundle_path")
+                .map(String::as_str),
+            Some("/.vault/source-export.bundle")
+        );
     }
 }

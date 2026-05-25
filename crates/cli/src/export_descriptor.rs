@@ -18,6 +18,7 @@ pub(crate) struct ExportDescriptor {
     pub(crate) msize: u32,
     pub(crate) expires_at: Option<String>,
     pub(crate) local_root_label: Option<String>,
+    pub(crate) extra_fields: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +73,15 @@ impl ExportDescriptor {
         if let Some(label) = &self.local_root_label {
             fields.push(("local_root_label", label.clone()));
         }
+        for (field, value) in &self.extra_fields {
+            validate_extension_field_name(field)?;
+            if is_reserved_field(field) {
+                return Err(cli_error(format!(
+                    "descriptor extension field {field} is reserved"
+                )));
+            }
+            fields.push((field, value.clone()));
+        }
 
         let mut out = String::new();
         for (field, value) in fields {
@@ -87,6 +97,7 @@ impl ExportDescriptor {
 
     pub(crate) fn parse(input: &str) -> CliResult<Self> {
         let mut fields = BTreeMap::new();
+        let mut extra_fields = BTreeMap::new();
         for (index, line) in input.lines().enumerate() {
             if line.is_empty() {
                 continue;
@@ -100,10 +111,15 @@ impl ExportDescriptor {
             }
             let field = parts[0];
             let value = parts[1];
-            if !is_known_field(field) {
-                return Err(cli_error(format!("unknown descriptor field {field}")));
-            }
-            if fields
+            validate_token(field, field)?;
+            validate_token(field, value)?;
+            let target = if is_reserved_field(field) {
+                &mut fields
+            } else {
+                validate_extension_field_name(field)?;
+                &mut extra_fields
+            };
+            if target
                 .insert(field.to_string(), value.to_string())
                 .is_some()
             {
@@ -129,6 +145,7 @@ impl ExportDescriptor {
             msize: parse_u32(required(&fields, "msize")?, "msize")?,
             expires_at: fields.get("expires_at").cloned(),
             local_root_label: fields.get("local_root_label").cloned(),
+            extra_fields,
         };
         descriptor.validate_authority_boundary()?;
         Ok(descriptor)
@@ -284,7 +301,28 @@ fn validate_token(field: &str, value: &str) -> CliResult<()> {
     Ok(())
 }
 
-fn is_known_field(field: &str) -> bool {
+fn validate_extension_field_name(field: &str) -> CliResult<()> {
+    if field.is_empty() {
+        return Err(cli_error("descriptor extension field is empty"));
+    }
+    let mut chars = field.chars();
+    let first = chars
+        .next()
+        .ok_or_else(|| cli_error("descriptor extension field is empty"))?;
+    if !first.is_ascii_lowercase() {
+        return Err(cli_error(format!(
+            "descriptor extension field {field} must start with lowercase ascii"
+        )));
+    }
+    if !chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_') {
+        return Err(cli_error(format!(
+            "descriptor extension field {field} must use lowercase ascii, digits, or underscore"
+        )));
+    }
+    Ok(())
+}
+
+fn is_reserved_field(field: &str) -> bool {
     matches!(
         field,
         "format"
@@ -328,6 +366,7 @@ mod tests {
             msize: 65_536,
             expires_at: None,
             local_root_label: Some("/tmp/candidate".to_string()),
+            extra_fields: BTreeMap::new(),
         }
     }
 
@@ -339,9 +378,21 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_rejects_unknown_fields() {
-        let input = "format\tr9p-export.v1\nunknown\tvalue\n";
-        assert!(ExportDescriptor::parse(input).is_err());
+    fn descriptor_round_trips_extension_fields() {
+        let mut descriptor = descriptor();
+        descriptor.extra_fields.insert(
+            "git_bundle_path".to_string(),
+            "/.vault/source.bundle".to_string(),
+        );
+        let rendered = descriptor.render().expect("descriptor should render");
+        let parsed = ExportDescriptor::parse(&rendered).expect("descriptor should parse");
+        assert_eq!(
+            parsed
+                .extra_fields
+                .get("git_bundle_path")
+                .map(String::as_str),
+            Some("/.vault/source.bundle")
+        );
     }
 
     #[test]
@@ -371,6 +422,15 @@ mod tests {
     fn descriptor_rejects_tabs_and_newlines_in_values() {
         let mut descriptor = descriptor();
         descriptor.endpoint_bind = "127.0.0.1:1234\tbad".to_string();
+        assert!(descriptor.render().is_err());
+    }
+
+    #[test]
+    fn descriptor_rejects_invalid_extension_field_names() {
+        let mut descriptor = descriptor();
+        descriptor
+            .extra_fields
+            .insert("GitBundlePath".to_string(), "/bundle".to_string());
         assert!(descriptor.render().is_err());
     }
 

@@ -2,6 +2,7 @@ use std::{
     ffi::OsStr,
     fs::{self, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
+    os::fd::IntoRawFd,
     os::unix::ffi::OsStrExt,
     path::{Component, Path, PathBuf},
 };
@@ -57,7 +58,13 @@ impl MountedNamespace {
     ) -> io::Result<()> {
         let path = self.path(namespace_path)?;
         ensure_parent_directory(&path)?;
-        fs::write(path, content)
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)?;
+        file.write_all(content.as_ref())?;
+        close_file(file)
     }
 
     pub fn write_bytes_range(
@@ -75,6 +82,7 @@ impl MountedNamespace {
             .open(path)?;
         file.seek(SeekFrom::Start(offset))?;
         file.write_all(content.as_ref())?;
+        close_file(file)?;
         u64::try_from(content.as_ref().len())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "write byte count overflow"))
     }
@@ -106,7 +114,8 @@ impl MountedNamespace {
         let file = OpenOptions::new()
             .write(true)
             .open(self.path(namespace_path)?)?;
-        file.set_len(length)
+        file.set_len(length)?;
+        close_file(file)
     }
 
     pub fn rename_path(
@@ -183,6 +192,16 @@ fn ensure_parent_directory(path: &Path) -> io::Result<()> {
 
 fn invalid_path(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
+fn close_file(file: fs::File) -> io::Result<()> {
+    let fd = file.into_raw_fd();
+    let status = unsafe { libc::close(fd) };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
 }
 
 #[cfg(test)]

@@ -63,8 +63,12 @@ fn run() -> CliResult<()> {
         "script" if config.machine => machine_script_cmd(config, args),
         "mount" => mount_cmd(config, args),
         "serve" => serve_cmd(config, args),
+        "export" if args.first().is_some_and(|arg| arg == "git") => {
+            let mut args = args;
+            args.remove(0);
+            git_export_cmd(config, args)
+        }
         "export" => export_cmd(config, args),
-        "export-git" => git_export_cmd(config, args),
         "stat" => stat_cmd(config, args),
         "rdwr" => rdwr_cmd(config, args),
         "ls" => ls_cmd(config, args),
@@ -190,7 +194,7 @@ pub(crate) fn usage() -> ! {
     eprintln!("  mount [--aname aname] [--uname uname] endpoint mountpoint");
     eprintln!("  serve [--bind address] root");
     eprintln!("  export [--bind address] [--descriptor machine] root");
-    eprintln!("  export-git [--repo path] [--rev rev] [--bind address] [--descriptor-file path]");
+    eprintln!("  export git [--repo path] [--rev rev] [--bind address] [--descriptor-file path]");
     eprintln!("  create name...");
     eprintln!("  mkdir name...");
     eprintln!("  con [-r] name");

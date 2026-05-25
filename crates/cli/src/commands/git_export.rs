@@ -51,7 +51,7 @@ struct PreparedGitSource {
 fn parse_git_export_config(global: Config, args: Vec<String>) -> CliResult<GitExportCommand> {
     if global.address.is_some() {
         return Err(cli_error(
-            "r9p export-git uses --bind for its listen address; do not use global -a",
+            "r9p export git uses --bind for its listen address; do not use global -a",
         ));
     }
 
@@ -112,11 +112,11 @@ fn parse_git_export_config(global: Config, args: Vec<String>) -> CliResult<GitEx
             }
             "-h" | "--help" => git_export_usage(0),
             arg if arg.starts_with('-') => {
-                return Err(cli_error(format!("unknown export-git option {arg}")));
+                return Err(cli_error(format!("unknown export git option {arg}")));
             }
             arg => {
                 return Err(cli_error(format!(
-                    "unexpected export-git argument {arg}: source root is derived from --repo and --rev"
+                    "unexpected export git argument {arg}: source root is derived from --repo and --rev"
                 )));
             }
         }
@@ -345,7 +345,7 @@ fn safe_token(value: &str) -> String {
 
 fn git_export_usage(code: i32) -> ! {
     eprintln!(
-        "usage: r9p export-git [--repo path] [--rev rev] [--worktree path] [--bundle-path path] [--bundle-namespace-path path] [--bind address] [--max-fids count] [--descriptor-file path] [--auth boundary]"
+        "usage: r9p export git [--repo path] [--rev rev] [--worktree path] [--bundle-path path] [--bundle-namespace-path path] [--bind address] [--max-fids count] [--descriptor-file path] [--auth boundary]"
     );
     std::process::exit(code);
 }

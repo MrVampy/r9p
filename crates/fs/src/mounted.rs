@@ -57,7 +57,6 @@ impl MountedNamespace {
         content: impl AsRef<[u8]>,
     ) -> io::Result<()> {
         let path = self.path(namespace_path)?;
-        ensure_parent_directory(&path)?;
         let mut file = OpenOptions::new()
             .write(true)
             .create(true)
@@ -74,7 +73,6 @@ impl MountedNamespace {
         content: impl AsRef<[u8]>,
     ) -> io::Result<u64> {
         let path = self.path(namespace_path)?;
-        ensure_parent_directory(&path)?;
         let mut file = OpenOptions::new()
             .write(true)
             .create(true)
@@ -125,7 +123,6 @@ impl MountedNamespace {
     ) -> io::Result<()> {
         let source = self.path(source)?;
         let target = self.path(target)?;
-        ensure_parent_directory(&target)?;
         fs::rename(source, target)
     }
 
@@ -180,13 +177,6 @@ fn push_component(path: &mut PathBuf, segment: &OsStr) -> io::Result<()> {
         return Err(invalid_path("namespace path segment contains NUL"));
     }
     path.push(segment);
-    Ok(())
-}
-
-fn ensure_parent_directory(path: &Path) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
     Ok(())
 }
 
@@ -253,6 +243,7 @@ mod tests {
         let root = fixture_root("mounted")?;
         let mounted = MountedNamespace::new(&root);
 
+        mounted.create_directory_all("/runtime")?;
         mounted.write_utf8("/runtime/status", "abcdef")?;
         assert_eq!(mounted.read_utf8("runtime/status")?, "abcdef");
         assert_eq!(mounted.read_bytes_range("/runtime/status", 2, 3)?, b"cde");
@@ -273,6 +264,21 @@ mod tests {
         mounted.write_utf8("/runtime/delete-file", "gone")?;
         mounted.delete_file("/runtime/delete-file")?;
         mounted.delete_tree("/runtime")?;
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn write_does_not_create_missing_parent_directories() -> io::Result<()> {
+        let root = fixture_root("mounted-missing-parent")?;
+        let mounted = MountedNamespace::new(&root);
+
+        let error = mounted
+            .write_utf8("/runtime/status", "abcdef")
+            .expect_err("write should require an existing parent directory");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(!root.join("runtime").exists());
 
         let _ = fs::remove_dir_all(root);
         Ok(())

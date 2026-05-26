@@ -193,7 +193,7 @@ fn consume_feed_until_error(
     path: &str,
     stop: &AtomicBool,
 ) -> Result<()> {
-    fs.status.set_change_feed("connected", None, None);
+    fs.status.set_change_feed("connecting", None, None);
     let mut since_event_id = None;
     while !stop.load(Ordering::SeqCst) {
         let poll_path = feed_poll_path(path, since_event_id.as_deref());
@@ -202,15 +202,18 @@ fn consume_feed_until_error(
         match client.read_full_timeout(fid, 0, 64 * 1024, fs.control_timeout()) {
             Ok(data) if data.is_empty() => {
                 let _ = client.clunk_timeout(fid, fs.control_timeout());
+                fs.status.set_change_feed("connected", None, None);
             }
             Ok(data) => {
                 let _ = client.clunk_timeout(fid, fs.control_timeout());
                 if let Some(event_id) = apply_feed_chunk(fs, file, &data)? {
                     since_event_id = Some(event_id);
                 }
+                fs.status.set_change_feed("connected", None, None);
             }
             Err(error) if error.errno == libc::ETIMEDOUT => {
                 let _ = client.clunk_timeout(fid, fs.control_timeout());
+                fs.status.set_change_feed("connected", None, None);
             }
             Err(error) => {
                 let _ = client.clunk_timeout(fid, fs.control_timeout());

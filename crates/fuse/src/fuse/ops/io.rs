@@ -128,7 +128,7 @@ impl R9pFuse {
         }
         let dir_entries = if is_dir_open {
             let mut dir_client = client.clone();
-            match read_directory_entries(&mut dir_client, node_fid, self.read_timeout()) {
+            match read_directory_entries(&mut dir_client, node_fid, self.control_timeout()) {
                 Ok(entries) => entries,
                 Err(error) => {
                     let _ = client.clunk_timeout(fid, self.control_timeout());

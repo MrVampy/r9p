@@ -14,7 +14,7 @@ use crate::{
         },
         R9pFuse,
     },
-    node::{is_dir, is_symlink, read_directory_entries},
+    node::{is_dir, is_symlink, read_directory_entries, CLOSE_COMMIT_MODE_FLAG},
     p9::{OREAD, OTRUNC},
 };
 use std::{fs::File, mem::size_of, thread};
@@ -139,11 +139,13 @@ impl R9pFuse {
             Vec::new()
         };
         let write_on_release = !is_dir_open && mode != OREAD;
+        let close_commit = write_on_release && node_stat.mode & CLOSE_COMMIT_MODE_FLAG != 0;
         let handle = self.nodes()?.open_handle(
             client.clone(),
             fid,
             is_dir_open,
             write_on_release,
+            close_commit,
             dir_entries,
         );
         let out = FuseOpenOut {
@@ -267,6 +269,9 @@ impl R9pFuse {
         let input = read_struct::<FuseReleaseIn>(payload)?;
         let handle = self.nodes()?.remove_handle(input.fh);
         if let Some(handle) = handle {
+            if handle.close_commit_flushed {
+                return reply_empty(file, header.unique);
+            }
             if let Err(error) = handle
                 .client
                 .clunk_timeout(handle.fid, self.control_timeout())

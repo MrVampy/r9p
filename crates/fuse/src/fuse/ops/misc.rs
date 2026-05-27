@@ -1,9 +1,10 @@
 //! `statfs` / `poll` / advisory lifecycle op handlers.
 
 use crate::{
-    error::Result,
+    error::{Error, Result},
     fuse::{
         reply::{read_struct, reply_empty, reply_error, reply_struct},
+        util::{is_namespace_shape_error, is_transport_error},
         wire::{
             FuseAccessIn, FuseFlushIn, FuseFsyncIn, FuseInHeader, FuseKstatfs, FusePollIn,
             FuseStatfsOut,
@@ -59,11 +60,34 @@ impl R9pFuse {
         payload: &[u8],
     ) -> Result<()> {
         let input = read_struct::<FuseFlushIn>(payload)?;
-        self.ensure_handle_known(input.fh)?;
-        // 9P2000 has no close-time flush primitive. r9p mount keeps
-        // writeback-cache disabled, so a successful Twrite reply is already
-        // the server-visible boundary; FUSE FLUSH is therefore an advisory
-        // compatibility acknowledgement.
+        let handle = self.nodes()?.handle(input.fh)?.clone();
+        if handle.write_on_release && handle.close_commit && !handle.close_commit_flushed {
+            if let Err(error) = handle
+                .client
+                .clunk_timeout(handle.fid, self.control_timeout())
+            {
+                if is_transport_error(&error) {
+                    self.reconnect()?;
+                    return Err(Error::new(
+                        libc::EIO,
+                        "flush failed during reconnect; close result is unknown",
+                    ));
+                }
+                if is_namespace_shape_error(&error) {
+                    self.refresh_node(header.nodeid)?;
+                    return Err(Error::new(
+                        libc::EIO,
+                        "flush failed during namespace refresh; close result is unknown",
+                    ));
+                }
+                return Err(error);
+            }
+            self.nodes()?.mark_close_commit_flushed(input.fh)?;
+        }
+        // Plain 9P2000 has no close-time flush primitive. For Vault's
+        // close-commit command files, the listener deliberately commits on
+        // Tclunk so Linux close(2) can receive command failures via FUSE
+        // FLUSH; FUSE RELEASE errors are ignored by VFS.
         reply_empty(file, header.unique)
     }
 

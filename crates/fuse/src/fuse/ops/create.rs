@@ -56,8 +56,14 @@ impl R9pFuse {
                 let mut nodes = self.nodes()?;
                 let inserted = nodes.insert_lookup(header.nodeid, node_fid, stat.clone(), name)?;
                 let nodeid = inserted.nodeid;
-                let handle =
-                    nodes.open_handle(client.clone(), open_fid, false, mode != OREAD, Vec::new());
+                let handle = nodes.open_handle(
+                    client.clone(),
+                    open_fid,
+                    false,
+                    mode != OREAD,
+                    false,
+                    Vec::new(),
+                );
                 let generation = nodes.node(nodeid)?.generation;
                 (nodeid, generation, handle, stat, inserted.clunk_fid)
             }
@@ -65,8 +71,14 @@ impl R9pFuse {
                 let stat = synthetic_created_stat(name, created_qid, perm);
                 let mut nodes = self.nodes()?;
                 let nodeid = nodes.insert_lookup_lazy(header.nodeid, stat.clone(), name)?;
-                let handle =
-                    nodes.open_handle(client.clone(), open_fid, false, mode != OREAD, Vec::new());
+                let handle = nodes.open_handle(
+                    client.clone(),
+                    open_fid,
+                    false,
+                    mode != OREAD,
+                    false,
+                    Vec::new(),
+                );
                 let generation = nodes.node(nodeid)?.generation;
                 (nodeid, generation, handle, stat, None)
             }

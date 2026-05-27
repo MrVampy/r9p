@@ -10,6 +10,7 @@ use r9p::{
 use std::{collections::BTreeMap, fmt, time::Duration};
 
 pub const ROOT_NODEID: u64 = 1;
+pub const CLOSE_COMMIT_MODE_FLAG: u32 = 0x0100_0000;
 
 #[derive(Debug, Clone)]
 pub struct Node {
@@ -28,6 +29,8 @@ pub struct Handle {
     pub fid: Fid,
     pub is_dir: bool,
     pub write_on_release: bool,
+    pub close_commit: bool,
+    pub close_commit_flushed: bool,
     pub dir_entries: Vec<DirEntry>,
 }
 
@@ -38,6 +41,8 @@ impl fmt::Debug for Handle {
             .field("fid", &self.fid)
             .field("is_dir", &self.is_dir)
             .field("write_on_release", &self.write_on_release)
+            .field("close_commit", &self.close_commit)
+            .field("close_commit_flushed", &self.close_commit_flushed)
             .field("dir_entries", &self.dir_entries)
             .finish()
     }
@@ -228,6 +233,7 @@ impl NodeTable {
         fid: Fid,
         is_dir: bool,
         write_on_release: bool,
+        close_commit: bool,
         dir_entries: Vec<DirEntry>,
     ) -> u64 {
         let handle = self.next_handle;
@@ -239,6 +245,8 @@ impl NodeTable {
                 fid,
                 is_dir,
                 write_on_release,
+                close_commit,
+                close_commit_flushed: false,
                 dir_entries,
             },
         );
@@ -249,6 +257,15 @@ impl NodeTable {
         self.handles
             .get(&handle)
             .ok_or_else(|| Error::new(libc::ESTALE, format!("unknown file handle {handle}")))
+    }
+
+    pub fn mark_close_commit_flushed(&mut self, handle: u64) -> Result<()> {
+        let handle = self
+            .handles
+            .get_mut(&handle)
+            .ok_or_else(|| Error::new(libc::ESTALE, format!("unknown file handle {handle}")))?;
+        handle.close_commit_flushed = true;
+        Ok(())
     }
 
     pub fn remove_handle(&mut self, handle: u64) -> Option<Handle> {

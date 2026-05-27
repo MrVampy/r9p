@@ -1,9 +1,11 @@
 //! `open` / `read` / `write` / `release` op handlers.
 
+use super::namespace_change::{
+    is_runtime_control_write_path, refreshes_namespace_bindings, write_refreshes_namespace_bindings,
+};
 use crate::{
     error::{Error, Result},
     fuse::{
-        invalidation::{notify_kernel_invalidations, KernelInvalidation},
         reply::{read_struct, reply_bytes, reply_empty, reply_error, reply_struct},
         util::{flags_to_9p_mode, fuse_open_flags, is_namespace_shape_error, is_transport_error},
         wire::{
@@ -15,7 +17,7 @@ use crate::{
     node::{is_dir, is_symlink, read_directory_entries, CLOSE_COMMIT_MODE_FLAG},
     p9::{OREAD, OTRUNC},
 };
-use std::{fs::File, mem::size_of, thread};
+use std::{fs::File, mem::size_of};
 
 impl R9pFuse {
     pub(in crate::fuse) fn readlink(
@@ -232,33 +234,15 @@ impl R9pFuse {
             }
             Err(error) => return Err(error),
         };
-        let invalidation = if refreshes_namespace_bindings(&node_path) {
-            Some(KernelInvalidation::coarse(
-                self.refresh_path_bindings_after_namespace_change()?,
-            ))
-        } else {
-            None
-        };
-        if let Some(invalidation) = &invalidation {
-            notify_kernel_invalidations(file, invalidation);
-        }
+        let invalidate_after_reply =
+            write_refreshes_namespace_bindings(&node_path, handle.close_commit);
         let out = FuseWriteOut {
             size: count,
             padding: 0,
         };
         reply_struct(file, header.unique, &out)?;
-        if let Some(invalidation) = invalidation {
-            let stale_bindings = invalidation.stale_bindings;
-            if let Ok(client) = self.client_snapshot() {
-                let timeout = self.control_timeout();
-                thread::spawn(move || {
-                    for binding in stale_bindings {
-                        if let Some(fid) = binding.fid {
-                            let _ = client.clunk_timeout(fid, timeout);
-                        }
-                    }
-                });
-            }
+        if invalidate_after_reply {
+            self.invalidate_namespace_bindings_after_reply(file, "namespace-changing write");
         }
         Ok(())
     }
@@ -270,11 +254,22 @@ impl R9pFuse {
         payload: &[u8],
     ) -> Result<()> {
         let input = read_struct::<FuseReleaseIn>(payload)?;
+        let node_path = {
+            let nodes = self.nodes()?;
+            nodes
+                .node(header.nodeid)
+                .map(|node| node.path.clone())
+                .unwrap_or_default()
+        };
         let handle = self.nodes()?.remove_handle(input.fh);
+        let mut invalidate_after_reply = false;
         if let Some(handle) = handle {
             if handle.close_commit_flushed {
                 return reply_empty(file, header.unique);
             }
+            invalidate_after_reply = handle.write_on_release
+                && handle.close_commit
+                && refreshes_namespace_bindings(&node_path);
             if let Err(error) = handle
                 .client
                 .clunk_timeout(handle.fid, self.control_timeout())
@@ -299,118 +294,15 @@ impl R9pFuse {
                 return Err(error);
             }
         }
-        reply_empty(file, header.unique)
+        reply_empty(file, header.unique)?;
+        if invalidate_after_reply {
+            self.invalidate_namespace_bindings_after_reply(file, "close-commit release");
+        }
+        Ok(())
     }
 }
 
 fn symlink_read_count(stat: &r9p::stat::Stat) -> Result<u32> {
     let count = stat.length.clamp(1, 1024 * 1024);
     u32::try_from(count).map_err(|_| Error::new(libc::EINVAL, "symlink target too large"))
-}
-
-fn is_runtime_control_write_path(path: &[Vec<u8>]) -> bool {
-    path_matches(path, &[b"runtime", b"worktrees", b"import"])
-        || (path.len() >= 2
-            && path[0].as_slice() == b"runtime"
-            && path
-                .last()
-                .map(|segment| segment.as_slice() == b"ctl")
-                .unwrap_or(false))
-}
-
-fn refreshes_namespace_bindings(path: &[Vec<u8>]) -> bool {
-    path_matches(path, &[b"runtime", b"namespaces", b"current", b"mount"])
-        || path_matches(path, &[b"runtime", b"namespaces", b"current", b"unmount"])
-        || path_matches(path, &[b"runtime", b"worktrees", b"import"])
-        || is_worktree_control_write_path(path)
-}
-
-fn is_worktree_control_write_path(path: &[Vec<u8>]) -> bool {
-    path.len() == 4
-        && path[0].as_slice() == b"runtime"
-        && path[1].as_slice() == b"worktrees"
-        && !path[2].is_empty()
-        && path[3].as_slice() == b"ctl"
-}
-
-fn path_matches(path: &[Vec<u8>], expected: &[&[u8]]) -> bool {
-    path.len() == expected.len()
-        && path
-            .iter()
-            .zip(expected.iter())
-            .all(|(left, right)| left.as_slice() == *right)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{is_runtime_control_write_path, refreshes_namespace_bindings};
-
-    fn path(segments: &[&[u8]]) -> Vec<Vec<u8>> {
-        segments.iter().map(|segment| segment.to_vec()).collect()
-    }
-
-    #[test]
-    fn worktree_ctl_writes_refresh_namespace_bindings() {
-        assert!(refreshes_namespace_bindings(&path(&[
-            b"runtime",
-            b"worktrees",
-            b"wt-plan45",
-            b"ctl",
-        ])));
-    }
-
-    #[test]
-    fn worktree_import_writes_refresh_namespace_bindings() {
-        assert!(refreshes_namespace_bindings(&path(&[
-            b"runtime",
-            b"worktrees",
-            b"import",
-        ])));
-    }
-
-    #[test]
-    fn worktree_children_do_not_all_refresh_namespace_bindings() {
-        assert!(!refreshes_namespace_bindings(&path(&[
-            b"runtime",
-            b"worktrees",
-            b"wt-plan45",
-            b"status",
-        ])));
-    }
-
-    #[test]
-    fn runtime_ctl_writes_use_control_timeout() {
-        assert!(is_runtime_control_write_path(&path(&[
-            b"runtime",
-            b"framework",
-            b"reload",
-            b"ctl",
-        ])));
-        assert!(is_runtime_control_write_path(&path(&[
-            b"runtime",
-            b"framework",
-            b"staging",
-            b"providers",
-            b"current",
-            b"ctl",
-        ])));
-        assert!(is_runtime_control_write_path(&path(&[
-            b"runtime",
-            b"services",
-            b"r9p-listener",
-            b"ctl",
-        ])));
-        assert!(is_runtime_control_write_path(&path(&[
-            b"runtime",
-            b"worktrees",
-            b"import",
-        ])));
-    }
-
-    #[test]
-    fn non_runtime_ctl_writes_use_regular_timeout() {
-        assert!(!is_runtime_control_write_path(&path(&[
-            b"entries", b"note", b"ctl",
-        ])));
-    }
 }

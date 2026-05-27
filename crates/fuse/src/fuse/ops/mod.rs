@@ -11,6 +11,7 @@ mod locks;
 mod lookup;
 mod misc;
 mod mutate;
+mod namespace_change;
 
 #[cfg(test)]
 pub(super) use dir::encode_dirents;

@@ -1,5 +1,6 @@
 //! `statfs` / `poll` / advisory lifecycle op handlers.
 
+use super::namespace_change::refreshes_namespace_bindings;
 use crate::{
     error::{Error, Result},
     fuse::{
@@ -60,7 +61,15 @@ impl R9pFuse {
         payload: &[u8],
     ) -> Result<()> {
         let input = read_struct::<FuseFlushIn>(payload)?;
+        let node_path = {
+            let nodes = self.nodes()?;
+            nodes
+                .node(header.nodeid)
+                .map(|node| node.path.clone())
+                .unwrap_or_default()
+        };
         let handle = self.nodes()?.handle(input.fh)?.clone();
+        let mut invalidate_after_reply = false;
         if handle.write_on_release && handle.close_commit && !handle.close_commit_flushed {
             if let Err(error) = handle
                 .client
@@ -83,12 +92,17 @@ impl R9pFuse {
                 return Err(error);
             }
             self.nodes()?.mark_close_commit_flushed(input.fh)?;
+            invalidate_after_reply = refreshes_namespace_bindings(&node_path);
         }
         // Plain 9P2000 has no close-time flush primitive. For Vault's
         // close-commit command files, the listener deliberately commits on
         // Tclunk so Linux close(2) can receive command failures via FUSE
         // FLUSH; FUSE RELEASE errors are ignored by VFS.
-        reply_empty(file, header.unique)
+        reply_empty(file, header.unique)?;
+        if invalidate_after_reply {
+            self.invalidate_namespace_bindings_after_reply(file, "close-commit flush");
+        }
+        Ok(())
     }
 
     pub(in crate::fuse) fn fsync(

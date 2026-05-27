@@ -21,15 +21,18 @@ mod wire;
 use crate::{
     diagnostics::{DiagnosticContext, DiagnosticRecord, Diagnostics, DEFAULT_DIAGNOSTICS_CAPACITY},
     error::{Error, Result},
-    node::{mode_kind, qid_to_inode, NodeTable},
+    node::{mode_kind, qid_to_inode, NodeTable, StaleBinding},
     p9::Client,
 };
+use invalidation::{notify_kernel_invalidations, KernelInvalidation};
 use mount::{block_termination_signals, mount_fuse};
 use r9p::stat::Stat;
 use status::MountStatus;
 use std::{
+    fs::File,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
+    thread,
     time::Duration,
 };
 use util::duration_parts;
@@ -229,10 +232,42 @@ impl R9pFuse {
         }
     }
 
-    pub(in crate::fuse) fn refresh_path_bindings_after_namespace_change(
-        &mut self,
-    ) -> Result<Vec<crate::node::StaleBinding>> {
-        Ok(self.nodes()?.mark_path_bindings_stale())
+    pub(in crate::fuse) fn invalidate_namespace_bindings_after_reply(
+        &self,
+        file: &mut File,
+        reason: &'static str,
+    ) {
+        let stale_bindings = match self.nodes() {
+            Ok(mut nodes) => nodes.mark_path_bindings_stale(),
+            Err(error) => {
+                self.record_mount_diagnostic(
+                    "namespace_binding_invalidation_failed",
+                    error.errno,
+                    error.message(),
+                );
+                return;
+            }
+        };
+        let invalidation = KernelInvalidation::coarse(stale_bindings);
+        notify_kernel_invalidations(file, &invalidation);
+        self.clunk_stale_bindings(invalidation.stale_bindings);
+        self.record_mount_diagnostic("namespace_bindings_invalidated", 0, reason);
+    }
+
+    pub(in crate::fuse) fn clunk_stale_bindings(&self, stale: Vec<StaleBinding>) {
+        if stale.is_empty() {
+            return;
+        }
+        if let Ok(client) = self.client_snapshot() {
+            let timeout = self.control_timeout();
+            thread::spawn(move || {
+                for binding in stale {
+                    if let Some(fid) = binding.fid {
+                        let _ = client.clunk_timeout(fid, timeout);
+                    }
+                }
+            });
+        }
     }
 
     pub(in crate::fuse) fn client_snapshot(&self) -> Result<Client> {

@@ -11,7 +11,6 @@ use super::{
 };
 use crate::{
     error::{Error, Result},
-    node::StaleBinding,
     p9::{Client, OREAD},
 };
 use r9p::fid::Fid;
@@ -134,22 +133,6 @@ impl R9pFuse {
         notify_kernel_invalidations(file, &invalidation);
         self.clunk_stale_bindings(invalidation.stale_bindings);
         self.record_mount_diagnostic("change_feed_coarse_invalidation", 0, reason);
-    }
-
-    fn clunk_stale_bindings(&self, stale: Vec<StaleBinding>) {
-        if stale.is_empty() {
-            return;
-        }
-        if let Ok(client) = self.client_snapshot() {
-            let timeout = self.control_timeout();
-            thread::spawn(move || {
-                for binding in stale {
-                    if let Some(fid) = binding.fid {
-                        let _ = client.clunk_timeout(fid, timeout);
-                    }
-                }
-            });
-        }
     }
 }
 

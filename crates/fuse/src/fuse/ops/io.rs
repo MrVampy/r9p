@@ -316,17 +316,19 @@ fn symlink_read_count(stat: &r9p::stat::Stat) -> Result<u32> {
 }
 
 fn is_runtime_control_write_path(path: &[Vec<u8>]) -> bool {
-    path.len() >= 2
-        && path[0].as_slice() == b"runtime"
-        && path
-            .last()
-            .map(|segment| segment.as_slice() == b"ctl")
-            .unwrap_or(false)
+    path_matches(path, &[b"runtime", b"worktrees", b"import"])
+        || (path.len() >= 2
+            && path[0].as_slice() == b"runtime"
+            && path
+                .last()
+                .map(|segment| segment.as_slice() == b"ctl")
+                .unwrap_or(false))
 }
 
 fn refreshes_namespace_bindings(path: &[Vec<u8>]) -> bool {
     path_matches(path, &[b"runtime", b"namespaces", b"current", b"mount"])
         || path_matches(path, &[b"runtime", b"namespaces", b"current", b"unmount"])
+        || path_matches(path, &[b"runtime", b"worktrees", b"import"])
         || is_worktree_control_write_path(path)
 }
 
@@ -365,6 +367,15 @@ mod tests {
     }
 
     #[test]
+    fn worktree_import_writes_refresh_namespace_bindings() {
+        assert!(refreshes_namespace_bindings(&path(&[
+            b"runtime",
+            b"worktrees",
+            b"import",
+        ])));
+    }
+
+    #[test]
     fn worktree_children_do_not_all_refresh_namespace_bindings() {
         assert!(!refreshes_namespace_bindings(&path(&[
             b"runtime",
@@ -395,6 +406,11 @@ mod tests {
             b"services",
             b"r9p-listener",
             b"ctl",
+        ])));
+        assert!(is_runtime_control_write_path(&path(&[
+            b"runtime",
+            b"worktrees",
+            b"import",
         ])));
     }
 

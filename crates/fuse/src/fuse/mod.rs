@@ -10,6 +10,7 @@
 
 mod change_feed;
 mod dispatch;
+mod invalidation;
 mod mount;
 mod ops;
 mod reply;

@@ -5,7 +5,7 @@
 //! Rust mechanism.
 
 use super::{
-    reply::{notify_inval_entry, notify_inval_inode},
+    invalidation::{notify_kernel_invalidations, KernelInvalidation},
     util::is_transport_error,
     R9pFuse,
 };
@@ -85,16 +85,14 @@ impl R9pFuse {
         let invalidation = {
             let mut nodes = self.nodes()?;
             match change.change_kind.as_str() {
-                "created" => PathInvalidation {
-                    stale: nodes.mark_path_stale(&path),
-                    parent_entries: nodes.parent_entry(&path).into_iter().collect(),
-                    coarse: false,
-                },
-                "removed" => PathInvalidation {
-                    stale: nodes.mark_path_prefix_stale(&path),
-                    parent_entries: nodes.parent_entry(&path).into_iter().collect(),
-                    coarse: false,
-                },
+                "created" => KernelInvalidation::path(
+                    nodes.mark_path_stale(&path),
+                    nodes.parent_entry(&path).into_iter().collect(),
+                ),
+                "removed" => KernelInvalidation::path(
+                    nodes.mark_path_prefix_stale(&path),
+                    nodes.parent_entry(&path).into_iter().collect(),
+                ),
                 "renamed" => {
                     let mut stale = old_path
                         .as_deref()
@@ -106,17 +104,12 @@ impl R9pFuse {
                         parent_entries.extend(nodes.parent_entry(old));
                     }
                     parent_entries.extend(nodes.parent_entry(&path));
-                    PathInvalidation {
-                        stale,
-                        parent_entries,
-                        coarse: false,
-                    }
+                    KernelInvalidation::path(stale, parent_entries)
                 }
-                "modified" => PathInvalidation {
-                    stale: nodes.mark_path_stale(&path),
-                    parent_entries: nodes.parent_entry(&path).into_iter().collect(),
-                    coarse: false,
-                },
+                "modified" => KernelInvalidation::path(
+                    nodes.mark_path_stale(&path),
+                    nodes.parent_entry(&path).into_iter().collect(),
+                ),
                 _ => {
                     return Err(Error::new(
                         libc::EINVAL,
@@ -125,8 +118,8 @@ impl R9pFuse {
                 }
             }
         };
-        notify_invalidations(file, &invalidation);
-        self.clunk_stale_bindings(invalidation.stale);
+        notify_kernel_invalidations(file, &invalidation);
+        self.clunk_stale_bindings(invalidation.stale_bindings);
         self.status
             .set_change_feed("connected", Some(change.event_id), None);
         Ok(())
@@ -137,13 +130,9 @@ impl R9pFuse {
             .nodes()
             .map(|mut nodes| nodes.mark_path_bindings_stale())
             .unwrap_or_default();
-        let invalidation = PathInvalidation {
-            stale,
-            parent_entries: Vec::new(),
-            coarse: true,
-        };
-        notify_invalidations(file, &invalidation);
-        self.clunk_stale_bindings(invalidation.stale);
+        let invalidation = KernelInvalidation::coarse(stale);
+        notify_kernel_invalidations(file, &invalidation);
+        self.clunk_stale_bindings(invalidation.stale_bindings);
         self.record_mount_diagnostic("change_feed_coarse_invalidation", 0, reason);
     }
 
@@ -266,21 +255,6 @@ fn feed_poll_path(base_path: &str, since_event_id: Option<&str>) -> String {
     format!("{root}/since/{event_id}")
 }
 
-fn notify_invalidations(file: &mut File, invalidation: &PathInvalidation) {
-    if invalidation.coarse {
-        let _ = notify_inval_inode(file, crate::node::ROOT_NODEID);
-    }
-    for binding in &invalidation.stale {
-        let _ = notify_inval_inode(file, binding.nodeid);
-        if let Some(parent_nodeid) = binding.parent_nodeid {
-            let _ = notify_inval_entry(file, parent_nodeid, &binding.name);
-        }
-    }
-    for (parent, name) in &invalidation.parent_entries {
-        let _ = notify_inval_entry(file, *parent, name);
-    }
-}
-
 fn sleep_interruptible(duration: Duration, stop: &AtomicBool) {
     let step = Duration::from_millis(50);
     let mut slept = Duration::ZERO;
@@ -300,12 +274,6 @@ struct NamespaceChange {
     generation: u64,
     event_id: String,
     old_path: Option<String>,
-}
-
-struct PathInvalidation {
-    stale: Vec<StaleBinding>,
-    parent_entries: Vec<(u64, Vec<u8>)>,
-    coarse: bool,
 }
 
 fn parse_namespace_change_record(line: &str) -> Option<NamespaceChange> {

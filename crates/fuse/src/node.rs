@@ -369,10 +369,11 @@ impl NodeTable {
     ) -> Vec<Fid> {
         let mut replaced = Vec::new();
         for nodeid in stale {
-            if let Some(node) = self.nodes.remove(&nodeid) {
-                if let Some(fid) = node.fid {
+            if let Some(node) = self.nodes.get_mut(&nodeid) {
+                if let Some(fid) = node.fid.take() {
                     replaced.push(fid);
                 }
+                node.needs_rebind = true;
             }
         }
         for (nodeid, fid, stat) in rebound {
@@ -813,7 +814,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_rebind_results_updates_fresh_nodes_and_drops_stale_nodes() {
+    fn apply_rebind_results_updates_fresh_nodes_and_marks_stale_nodes_for_lazy_rebind() {
         let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
         let docs = nodes
             .insert_lookup(
@@ -847,7 +848,9 @@ mod tests {
         assert_eq!(nodes.node(ROOT_NODEID).expect("root").qid, Qid::dir(10));
         assert_eq!(nodes.node(docs).expect("docs").fid, Some(11));
         assert_eq!(nodes.node(docs).expect("docs").qid, Qid::dir(11));
-        assert!(nodes.node(stale).is_err());
+        let stale_node = nodes.node(stale).expect("stale node");
+        assert_eq!(stale_node.fid, None);
+        assert!(stale_node.needs_rebind);
     }
 
     #[test]

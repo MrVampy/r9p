@@ -163,6 +163,13 @@ impl R9pFuse {
         payload: &[u8],
     ) -> Result<()> {
         let input = read_struct::<FuseReadIn>(payload)?;
+        let known_length = {
+            let nodes = self.nodes()?;
+            nodes.node(header.nodeid)?.stat.length
+        };
+        if read_is_known_eof(known_length, input.offset) {
+            return reply_bytes(file, header.unique, &[]);
+        }
         let handle = self.nodes()?.handle(input.fh)?.clone();
         let data = match handle.client.read_timeout(
             handle.fid,
@@ -305,4 +312,30 @@ impl R9pFuse {
 fn symlink_read_count(stat: &r9p::stat::Stat) -> Result<u32> {
     let count = stat.length.clamp(1, 1024 * 1024);
     u32::try_from(count).map_err(|_| Error::new(libc::EINVAL, "symlink target too large"))
+}
+
+fn read_is_known_eof(known_length: u64, offset: u64) -> bool {
+    known_length > 0 && offset >= known_length
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_is_known_eof;
+
+    #[test]
+    fn read_at_known_positive_length_is_eof() {
+        assert!(read_is_known_eof(26_698, 26_698));
+        assert!(read_is_known_eof(26_698, 30_000));
+    }
+
+    #[test]
+    fn unknown_zero_length_does_not_short_circuit_dynamic_reads() {
+        assert!(!read_is_known_eof(0, 0));
+        assert!(!read_is_known_eof(0, 32));
+    }
+
+    #[test]
+    fn read_before_known_length_reaches_9p() {
+        assert!(!read_is_known_eof(26_698, 26_697));
+    }
 }

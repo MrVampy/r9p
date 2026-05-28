@@ -21,6 +21,10 @@ pub(super) fn refreshes_namespace_bindings(path: &[Vec<u8>]) -> bool {
         || is_worktree_control_write_path(path)
 }
 
+pub(super) fn close_commit_refreshes_namespace_bindings(path: &[Vec<u8>]) -> bool {
+    refreshes_namespace_bindings(path) || is_runtime_control_write_path(path)
+}
+
 pub(super) fn write_refreshes_namespace_bindings(path: &[Vec<u8>], close_commit: bool) -> bool {
     refreshes_namespace_bindings(path) && !close_commit
 }
@@ -44,8 +48,8 @@ fn path_matches(path: &[Vec<u8>], expected: &[&[u8]]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_runtime_control_write_path, refreshes_namespace_bindings,
-        write_refreshes_namespace_bindings,
+        close_commit_refreshes_namespace_bindings, is_runtime_control_write_path,
+        refreshes_namespace_bindings, write_refreshes_namespace_bindings,
     };
 
     fn path(segments: &[&[u8]]) -> Vec<Vec<u8>> {
@@ -88,6 +92,28 @@ mod tests {
         assert!(write_refreshes_namespace_bindings(&import, false));
         assert!(!write_refreshes_namespace_bindings(&import, true));
         assert!(refreshes_namespace_bindings(&import));
+    }
+
+    #[test]
+    fn close_commit_runtime_control_writes_refresh_namespace_bindings() {
+        assert!(close_commit_refreshes_namespace_bindings(&path(&[
+            b"runtime",
+            b"framework",
+            b"candidates",
+            b"bootstrap-lanes",
+            b"requests",
+            b"m7-live-reload-bootstrap-abc123",
+            b"ctl",
+        ])));
+        assert!(close_commit_refreshes_namespace_bindings(&path(&[
+            b"runtime",
+            b"framework",
+            b"reload",
+            b"ctl",
+        ])));
+        assert!(!close_commit_refreshes_namespace_bindings(&path(&[
+            b"entries", b"note", b"ctl",
+        ])));
     }
 
     #[test]

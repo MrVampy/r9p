@@ -1,7 +1,8 @@
 //! `open` / `read` / `write` / `release` op handlers.
 
 use super::namespace_change::{
-    is_runtime_control_write_path, refreshes_namespace_bindings, write_refreshes_namespace_bindings,
+    close_commit_refreshes_namespace_bindings, is_runtime_control_write_path,
+    write_refreshes_namespace_bindings,
 };
 use crate::{
     error::{Error, Result},
@@ -276,29 +277,43 @@ impl R9pFuse {
             }
             invalidate_after_reply = handle.write_on_release
                 && handle.close_commit
-                && refreshes_namespace_bindings(&node_path);
-            if let Err(error) = handle
+                && close_commit_refreshes_namespace_bindings(&node_path);
+            match handle
                 .client
                 .clunk_timeout(handle.fid, self.control_timeout())
             {
-                if !handle.write_on_release {
+                Ok(()) => {}
+                Err(_) if !handle.write_on_release => {
                     return reply_empty(file, header.unique);
                 }
-                if is_transport_error(&error) {
+                Err(error) if is_transport_error(&error) => {
                     self.reconnect()?;
                     return Err(Error::new(
                         libc::EIO,
                         "release failed during reconnect; close result is unknown",
                     ));
                 }
-                if is_namespace_shape_error(&error) {
-                    self.refresh_node(header.nodeid)?;
-                    return Err(Error::new(
-                        libc::EIO,
-                        "release failed during namespace refresh; close result is unknown",
-                    ));
+                Err(error) if is_namespace_shape_error(&error) => {
+                    if invalidate_after_reply {
+                        self.record_diagnostic_with_context(
+                            "close_commit_namespace_shape_acknowledged",
+                            header,
+                            0,
+                            "release saw namespace refresh after close-commit; acknowledging close and invalidating bindings",
+                            crate::diagnostics::DiagnosticContext {
+                                fh: Some(input.fh),
+                                ..self.diagnostic_context(header, payload)
+                            },
+                        );
+                    } else {
+                        self.refresh_node(header.nodeid)?;
+                        return Err(Error::new(
+                            libc::EIO,
+                            "release failed during namespace refresh; close result is unknown",
+                        ));
+                    }
                 }
-                return Err(error);
+                Err(error) => return Err(error),
             }
         }
         reply_empty(file, header.unique)?;

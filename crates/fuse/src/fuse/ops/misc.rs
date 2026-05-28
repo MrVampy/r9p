@@ -1,6 +1,6 @@
 //! `statfs` / `poll` / advisory lifecycle op handlers.
 
-use super::namespace_change::refreshes_namespace_bindings;
+use super::namespace_change::close_commit_refreshes_namespace_bindings;
 use crate::{
     error::{Error, Result},
     fuse::{
@@ -71,28 +71,42 @@ impl R9pFuse {
         let handle = self.nodes()?.handle(input.fh)?.clone();
         let mut invalidate_after_reply = false;
         if handle.write_on_release && handle.close_commit && !handle.close_commit_flushed {
-            if let Err(error) = handle
+            match handle
                 .client
                 .clunk_timeout(handle.fid, self.control_timeout())
             {
-                if is_transport_error(&error) {
+                Ok(()) => {}
+                Err(error) if is_transport_error(&error) => {
                     self.reconnect()?;
                     return Err(Error::new(
                         libc::EIO,
                         "flush failed during reconnect; close result is unknown",
                     ));
                 }
-                if is_namespace_shape_error(&error) {
-                    self.refresh_node(header.nodeid)?;
-                    return Err(Error::new(
-                        libc::EIO,
-                        "flush failed during namespace refresh; close result is unknown",
-                    ));
+                Err(error) if is_namespace_shape_error(&error) => {
+                    if close_commit_refreshes_namespace_bindings(&node_path) {
+                        self.record_diagnostic_with_context(
+                            "close_commit_namespace_shape_acknowledged",
+                            header,
+                            0,
+                            "flush saw namespace refresh after close-commit; acknowledging close and invalidating bindings",
+                            crate::diagnostics::DiagnosticContext {
+                                fh: Some(input.fh),
+                                ..self.diagnostic_context(header, payload)
+                            },
+                        );
+                    } else {
+                        self.refresh_node(header.nodeid)?;
+                        return Err(Error::new(
+                            libc::EIO,
+                            "flush failed during namespace refresh; close result is unknown",
+                        ));
+                    }
                 }
-                return Err(error);
+                Err(error) => return Err(error),
             }
             self.nodes()?.mark_close_commit_flushed(input.fh)?;
-            invalidate_after_reply = refreshes_namespace_bindings(&node_path);
+            invalidate_after_reply = close_commit_refreshes_namespace_bindings(&node_path);
         }
         // Plain 9P2000 has no close-time flush primitive. For Vault's
         // close-commit command files, the listener deliberately commits on

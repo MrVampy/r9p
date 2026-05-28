@@ -131,15 +131,33 @@ impl R9pFuse {
             .unwrap_or_default();
         let invalidation = KernelInvalidation::coarse(stale);
         notify_kernel_invalidations(file, &invalidation);
-        self.clunk_stale_bindings(invalidation.stale_bindings);
+        // Feed degradation only means cache precision is lost. Mark future
+        // path-backed operations for rebind, but do not clunk the old fids out
+        // from under concurrent kernel requests on the data client.
         self.record_mount_diagnostic("change_feed_coarse_invalidation", 0, reason);
     }
 }
 
 fn change_feed_loop(fs: &mut R9pFuse, file: &mut File, path: String, stop: Arc<AtomicBool>) {
     fs.status.set_change_feed("connecting", None, None);
+    let mut feed_client = None;
     while !stop.load(Ordering::SeqCst) {
-        match consume_feed_until_error(fs, file, &path, &stop) {
+        let client = match change_feed_client(fs, &mut feed_client) {
+            Ok(client) => client,
+            Err(error) => {
+                fs.status
+                    .set_change_feed("degraded", None, Some(error.message().to_string()));
+                fs.record_mount_diagnostic(
+                    "change_feed_disconnected",
+                    error.errno,
+                    error.message(),
+                );
+                fs.apply_coarse_invalidation(file, "change feed degraded");
+                sleep_interruptible(fs.config.change_feed_poll_interval, &stop);
+                continue;
+            }
+        };
+        match consume_feed_until_error(fs, file, &path, &stop, &client) {
             Ok(()) => {}
             Err(error) => {
                 fs.status
@@ -151,7 +169,7 @@ fn change_feed_loop(fs: &mut R9pFuse, file: &mut File, path: String, stop: Arc<A
                 );
                 fs.apply_coarse_invalidation(file, "change feed degraded");
                 if is_transport_error(&error) {
-                    let _ = fs.reconnect();
+                    feed_client = None;
                 }
                 sleep_interruptible(fs.config.change_feed_poll_interval, &stop);
             }
@@ -159,18 +177,33 @@ fn change_feed_loop(fs: &mut R9pFuse, file: &mut File, path: String, stop: Arc<A
     }
 }
 
+fn change_feed_client(fs: &R9pFuse, slot: &mut Option<Client>) -> Result<Client> {
+    if let Some(client) = slot {
+        return Ok(client.clone());
+    }
+    let client = Client::connect_with_timeout(
+        &fs.config.address,
+        &fs.config.uname,
+        &fs.config.aname,
+        fs.config.msize,
+        fs.config.connect_timeout,
+    )?;
+    *slot = Some(client.clone());
+    Ok(client)
+}
+
 fn consume_feed_until_error(
     fs: &mut R9pFuse,
     file: &mut File,
     path: &str,
     stop: &AtomicBool,
+    client: &Client,
 ) -> Result<()> {
     fs.status.set_change_feed("connecting", None, None);
     let mut since_event_id = None;
     while !stop.load(Ordering::SeqCst) {
         let poll_path = feed_poll_path(path, since_event_id.as_deref());
-        let client = fs.client_snapshot()?;
-        let fid = open_feed(&client, &poll_path, fs.lookup_timeout())?;
+        let fid = open_feed(client, &poll_path, fs.lookup_timeout())?;
         match client.read_full_timeout(fid, 0, 64 * 1024, fs.control_timeout()) {
             Ok(data) if data.is_empty() => {
                 let _ = client.clunk_timeout(fid, fs.control_timeout());

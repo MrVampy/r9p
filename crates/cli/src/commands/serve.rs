@@ -583,6 +583,7 @@ mod tests {
             msize: DEFAULT_MSIZE,
             msize_set: false,
             machine: false,
+            request_timeout: Some(std::time::Duration::from_secs(30)),
         }
     }
 

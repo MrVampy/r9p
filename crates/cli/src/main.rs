@@ -1,4 +1,4 @@
-use std::env;
+use std::{env, time::Duration};
 
 mod commands;
 mod errors;
@@ -92,6 +92,7 @@ pub(crate) fn parse_global_options(args: &mut Vec<String>) -> CliResult<Config> 
         msize: DEFAULT_MSIZE,
         msize_set: false,
         machine: false,
+        request_timeout: Some(Duration::from_secs(30)),
     };
     let mut rest = Vec::new();
     let mut i = 0;
@@ -118,7 +119,7 @@ pub(crate) fn parse_global_options(args: &mut Vec<String>) -> CliResult<Config> 
             i += 1;
             continue;
         }
-        if arg == "-a" || arg == "-A" || arg == "-u" || arg == "-m" {
+        if arg == "-a" || arg == "-A" || arg == "-u" || arg == "-m" || arg == "--request-timeout" {
             let value = args
                 .get(i + 1)
                 .ok_or_else(|| cli_error(format!("missing value for {arg}")))?
@@ -164,14 +165,31 @@ fn set_global_option(config: &mut Config, option: &str, value: String) -> CliRes
                 .map_err(|_| cli_error(format!("invalid msize {value}")))?;
             config.msize_set = true;
         }
+        "--request-timeout" => {
+            config.request_timeout = parse_request_timeout(&value)?;
+        }
         _ => return Err(cli_error(format!("unknown option {option}"))),
     }
     Ok(())
 }
 
+fn parse_request_timeout(value: &str) -> CliResult<Option<Duration>> {
+    let seconds = value
+        .parse::<f64>()
+        .map_err(|_| cli_error(format!("invalid request timeout {value}")))?;
+    if !seconds.is_finite() || seconds < 0.0 {
+        return Err(cli_error(format!("invalid request timeout {value}")));
+    }
+    if seconds == 0.0 {
+        Ok(None)
+    } else {
+        Ok(Some(Duration::from_secs_f64(seconds)))
+    }
+}
+
 pub(crate) fn usage() -> ! {
     eprintln!(
-        "usage: r9p [-n] [--machine] [-a address] [-A aname] [-u uname] [-m msize] cmd args..."
+        "usage: r9p [-n] [--machine] [-a address] [-A aname] [-u uname] [-m msize] [--request-timeout seconds] cmd args..."
     );
     eprintln!("possible cmds:");
     eprintln!("  version [service]");
@@ -213,6 +231,7 @@ mod tests {
     use crate::target::split_namespace_path;
     use r9p::qid::DMDIR;
     use r9p::{qid::Qid, stat::Stat};
+    use std::time::Duration;
 
     #[test]
     fn global_options_accept_plan9port_flags_and_extensions() {
@@ -224,6 +243,8 @@ mod tests {
             "-A/".to_string(),
             "-ucodex".to_string(),
             "-m65536".to_string(),
+            "--request-timeout".to_string(),
+            "0.25".to_string(),
             "ls".to_string(),
             "/".to_string(),
         ];
@@ -233,7 +254,24 @@ mod tests {
         assert_eq!(config.uname, "codex");
         assert_eq!(config.msize, 65_536);
         assert!(config.machine);
+        assert_eq!(config.request_timeout, Some(Duration::from_millis(250)));
         assert_eq!(args, ["ls".to_string(), "/".to_string()]);
+    }
+
+    #[test]
+    fn request_timeout_zero_disables_socket_timeouts() {
+        let mut args = vec![
+            "--request-timeout".to_string(),
+            "0".to_string(),
+            "read".to_string(),
+            "/runtime/events/stream".to_string(),
+        ];
+        let config = parse_global_options(&mut args).expect("options should parse");
+        assert_eq!(config.request_timeout, None);
+        assert_eq!(
+            args,
+            ["read".to_string(), "/runtime/events/stream".to_string()]
+        );
     }
 
     #[test]

@@ -309,6 +309,7 @@ mod tests {
             msize: DEFAULT_MSIZE,
             msize_set: false,
             machine: false,
+            request_timeout: Some(Duration::from_secs(30)),
         }
     }
 

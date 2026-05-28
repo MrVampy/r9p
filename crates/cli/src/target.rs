@@ -1,4 +1,4 @@
-use std::{env, path::PathBuf};
+use std::{env, path::PathBuf, time::Duration};
 
 use crate::errors::{cli_error, CliResult};
 use crate::usage;
@@ -11,6 +11,7 @@ pub(crate) struct Config {
     pub(crate) msize: u32,
     pub(crate) msize_set: bool,
     pub(crate) machine: bool,
+    pub(crate) request_timeout: Option<Duration>,
 }
 
 #[derive(Clone, Debug)]

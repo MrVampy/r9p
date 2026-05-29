@@ -333,6 +333,28 @@ fn machine_write_from_streams_local_file_and_reports_count() -> TestResult<()> {
 }
 
 #[test]
+fn machine_write_from_trunc_replaces_existing_file() -> TestResult<()> {
+    let payload = b"short\n".to_vec();
+    let input_path = temp_path("write-from-trunc");
+    fs::write(&input_path, &payload)?;
+    let input_arg = input_path.to_string_lossy().into_owned();
+    let shared = SharedFile::new(b"old descriptor with trailing bytes\n".to_vec());
+    let (address, handle) = start_server(shared.clone())?;
+
+    let output = run_machine(&address, &["write-from-trunc", "/data", &input_arg], None)?;
+    let _ = fs::remove_file(&input_path);
+    assert_success(&output)?;
+    assert_stdout(&output, &format!("write\t{}\n", payload.len()))?;
+
+    if shared.bytes()? != payload {
+        return Err(test_error(
+            "write-from-trunc did not truncate before writing",
+        ));
+    }
+    join_server(handle)
+}
+
+#[test]
 fn machine_create_write_from_writes_before_clunk() -> TestResult<()> {
     let payload = b"service descriptor\n".to_vec();
     let input_path = temp_path("create-write-from");
@@ -378,7 +400,7 @@ fn machine_script_runs_multiple_operations_on_one_session() -> TestResult<()> {
     fs::write(
         &script_path,
         format!(
-            "# comment lines are ignored\nwrite-hex\t/data\t2\t5859\nread-hex\t/private\t0\t4\nfresh-stat-error\t/private\ncreate\t/created\nmkdir\t/made\nread-hex\t/data\t0\t8\nwrite-from\t/data\t3\t{input_arg}\nread-to\t/data\t{output_arg}\n"
+            "# comment lines are ignored\nwrite-hex\t/data\t2\t5859\nread-hex\t/private\t0\t4\nfresh-stat-error\t/private\ncreate\t/created\nmkdir\t/made\nread-hex\t/data\t0\t8\nwrite-from\t/data\t3\t{input_arg}\nwrite-from-trunc\t/data\t{input_arg}\nread-to\t/data\t{output_arg}\n"
         ),
     )?;
     let script_arg = script_path.to_string_lossy().into_owned();
@@ -391,19 +413,19 @@ fn machine_script_runs_multiple_operations_on_one_session() -> TestResult<()> {
     assert_success(&output)?;
     assert_stdout(
         &output,
-        "ok\t2\twrite\t2\nok\t3\tread-hex\t4\t70726976\nok\t4\tfresh-stat-error\nok\t5\tcreate\nok\t6\tmkdir\nok\t7\tread-hex\t6\t616258596566\nok\t8\twrite\t5\nok\t9\tread\t8\n",
+        "ok\t2\twrite\t2\nok\t3\tread-hex\t4\t70726976\nok\t4\tfresh-stat-error\nok\t5\tcreate\nok\t6\tmkdir\nok\t7\tread-hex\t6\t616258596566\nok\t8\twrite\t5\nok\t9\twrite\t5\nok\t10\tread\t5\n",
     )?;
     if shared.attach_count() != 2 {
         return Err(test_error(
             "script did not keep exactly one primary attach plus one fresh check",
         ));
     }
-    if shared.bytes()? != b"abX12345" {
+    if shared.bytes()? != b"12345" {
         return Err(test_error("script write operations did not update file"));
     }
     let written = fs::read(&output_path)?;
     let _ = fs::remove_file(&output_path);
-    if written != b"abX12345" {
+    if written != b"12345" {
         return Err(test_error("script read-to file did not match server file"));
     }
     join_server(handle)

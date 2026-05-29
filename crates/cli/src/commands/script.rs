@@ -4,7 +4,7 @@ use std::{
 };
 
 use r9p::{
-    blocking::{BoxedClient, OREAD, OWRITE},
+    blocking::{BoxedClient, OREAD, OTRUNC, OWRITE},
     fid::Fid,
     qid::DMDIR,
 };
@@ -65,6 +65,14 @@ fn run_script_line(
             let offset = parse_offset(offset)?;
             let fid = walk_open(client, path, OWRITE)?;
             let result = copy_file_to_fid_at(client, fid, offset, local_path);
+            let clunk = client.clunk(fid);
+            let count = result?;
+            clunk?;
+            println!("ok\t{line_number}\twrite\t{count}");
+        }
+        ["write-from-trunc", path, local_path] => {
+            let fid = walk_open(client, path, OWRITE | OTRUNC)?;
+            let result = copy_file_to_fid_at(client, fid, 0, local_path);
             let clunk = client.clunk(fid);
             let count = result?;
             clunk?;

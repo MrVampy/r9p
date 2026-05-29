@@ -141,13 +141,36 @@ pub(crate) fn write_from_cmd(config: Config, args: Vec<String>) -> CliResult<()>
         config,
         path: args[0].clone(),
     };
-    let (mut client, fid) = open_path(&target, OWRITE)?;
-    let result = copy_file_to_fid_at(&mut client, fid, offset, &args[2]);
+    let count = write_local_file_to_target(&target, offset, OWRITE, &args[2])?;
+    println!("write\t{count}");
+    Ok(())
+}
+
+pub(crate) fn write_from_trunc_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
+    if !config.machine || args.len() != 2 {
+        usage();
+    }
+    let target = Target {
+        config,
+        path: args[0].clone(),
+    };
+    let count = write_local_file_to_target(&target, 0, OWRITE | OTRUNC, &args[1])?;
+    println!("write\t{count}");
+    Ok(())
+}
+
+fn write_local_file_to_target(
+    target: &Target,
+    offset: u64,
+    open_mode: u8,
+    local_path: &str,
+) -> CliResult<u64> {
+    let (mut client, fid) = open_path(target, open_mode)?;
+    let result = copy_file_to_fid_at(&mut client, fid, offset, local_path);
     let clunk = client.clunk(fid);
     let count = result?;
     clunk?;
-    println!("write\t{count}");
-    Ok(())
+    Ok(count)
 }
 
 pub(crate) fn create_write_from_cmd(config: Config, args: Vec<String>) -> CliResult<()> {

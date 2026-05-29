@@ -16,7 +16,8 @@ use commands::{
     mount::mount_cmd,
     mutate::{create_cmd, mkdir_cmd, rm_cmd},
     read_write::{
-        read_cmd, read_to_cmd, write_at_cmd, write_cmd, write_from_cmd, ReadMode, WriteMode,
+        create_write_from_cmd, read_cmd, read_to_cmd, write_at_cmd, write_cmd, write_from_cmd,
+        ReadMode, WriteMode,
     },
     script::machine_script_cmd,
     serve::{export_cmd, serve_cmd},
@@ -60,6 +61,7 @@ fn run() -> CliResult<()> {
         "write-at" => write_at_cmd(config, args),
         "writefd" => write_cmd(config, args, WriteMode::WriteFd),
         "write-from" if config.machine => write_from_cmd(config, args),
+        "create-write-from" if config.machine => create_write_from_cmd(config, args),
         "script" if config.machine => machine_script_cmd(config, args),
         "mount" => mount_cmd(config, args),
         "serve" => serve_cmd(config, args),
@@ -207,6 +209,7 @@ pub(crate) fn usage() -> ! {
     eprintln!("  rm name...");
     eprintln!("  remove name              machine mode");
     eprintln!("  write-from name offset local  machine mode");
+    eprintln!("  create-write-from name perm mode offset local  machine mode");
     eprintln!("  script file              machine mode");
     eprintln!("  script service file      machine mode without -a");
     eprintln!("  mount [--aname aname] [--uname uname] endpoint mountpoint");

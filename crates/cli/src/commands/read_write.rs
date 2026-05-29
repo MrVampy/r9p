@@ -1,10 +1,11 @@
 use r9p::blocking::{OREAD, OTRUNC, OWRITE};
 
 use crate::commands::machine::machine_write_cmd;
-use crate::errors::CliResult;
+use crate::commands::mutate::split_parent;
+use crate::errors::{cli_error, CliResult};
 use crate::format::hex_encode;
 use crate::io::{
-    copy_fid_to_file, copy_fid_to_stdout, copy_file_to_fid_at, copy_stdin_to_fid,
+    connect_path, copy_fid_to_file, copy_fid_to_stdout, copy_file_to_fid_at, copy_stdin_to_fid,
     copy_stdin_to_fid_at, open_path, parse_offset, read_all,
 };
 use crate::target::{Config, Target};
@@ -142,6 +143,40 @@ pub(crate) fn write_from_cmd(config: Config, args: Vec<String>) -> CliResult<()>
     };
     let (mut client, fid) = open_path(&target, OWRITE)?;
     let result = copy_file_to_fid_at(&mut client, fid, offset, &args[2]);
+    let clunk = client.clunk(fid);
+    let count = result?;
+    clunk?;
+    println!("write\t{count}");
+    Ok(())
+}
+
+pub(crate) fn create_write_from_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
+    if !config.machine || args.len() != 5 {
+        usage();
+    }
+    let perm = args[1]
+        .parse::<u32>()
+        .map_err(|_| cli_error(format!("invalid perm {}", args[1])))?;
+    let mode = args[2]
+        .parse::<u8>()
+        .map_err(|_| cli_error(format!("invalid mode {}", args[2])))?;
+    let offset = parse_offset(&args[3])?;
+    let target = Target {
+        config,
+        path: args[0].clone(),
+    };
+    let (parent, name) = split_parent(&target.path)?;
+    let parent_target = Target {
+        config: target.config.clone(),
+        path: parent,
+    };
+    let (mut client, path) = connect_path(&parent_target)?;
+    let parent_fid = client.walk_path(&path)?;
+    let created = client.create(parent_fid, name.as_bytes(), perm, mode);
+    let parent_clunk = client.clunk(parent_fid);
+    let (fid, _) = created?;
+    parent_clunk?;
+    let result = copy_file_to_fid_at(&mut client, fid, offset, &args[4]);
     let clunk = client.clunk(fid);
     let count = result?;
     clunk?;

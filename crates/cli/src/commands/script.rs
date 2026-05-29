@@ -70,6 +70,18 @@ fn run_script_line(
             clunk?;
             println!("ok\t{line_number}\twrite\t{count}");
         }
+        ["create-write-from", path, perm, mode, offset, local_path] => {
+            let offset = parse_offset(offset)?;
+            let count = create_write_from_path(
+                client,
+                path,
+                parse_perm(perm)?,
+                parse_mode(mode)?,
+                offset,
+                local_path,
+            )?;
+            println!("ok\t{line_number}\tcreate-write\t{count}");
+        }
         ["create", path] => {
             create_path(client, path, 0o666, OREAD)?;
             println!("ok\t{line_number}\tcreate");
@@ -119,6 +131,27 @@ fn run_script_line(
         [] => {}
     }
     Ok(())
+}
+
+fn create_write_from_path(
+    client: &mut BoxedClient,
+    path: &str,
+    perm: u32,
+    mode: u8,
+    offset: u64,
+    local_path: &str,
+) -> CliResult<u64> {
+    let (parent, name) = split_parent(path)?;
+    let parent_fid = client.walk_path(&parent)?;
+    let created = client.create(parent_fid, name.as_bytes(), perm, mode);
+    let parent_clunk = client.clunk(parent_fid);
+    let (fid, _) = created?;
+    parent_clunk?;
+    let result = copy_file_to_fid_at(client, fid, offset, local_path);
+    let created_clunk = client.clunk(fid);
+    let count = result?;
+    created_clunk?;
+    Ok(count)
 }
 
 fn create_path(client: &mut BoxedClient, path: &str, perm: u32, mode: u8) -> CliResult<()> {

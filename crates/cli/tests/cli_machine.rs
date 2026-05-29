@@ -65,6 +65,7 @@ struct MachineTree {
     private_qid: Qid,
     created_qid: Option<Qid>,
     created_dir_qid: Option<Qid>,
+    created_data: Vec<u8>,
     private_visible: bool,
     file: SharedFile,
 }
@@ -77,6 +78,7 @@ impl MachineTree {
             private_qid: Qid::file(3),
             created_qid: None,
             created_dir_qid: None,
+            created_data: Vec::new(),
             private_visible: false,
             file,
         }
@@ -128,7 +130,13 @@ impl FileTree for MachineTree {
             return Ok(ReadData::Directory(Vec::new()));
         }
         if Some(qid) == self.created_qid {
-            return Ok(ReadData::Bytes(Vec::new()));
+            let start = usize::try_from(offset)
+                .map_err(|_| R9pError::from("read offset too large"))?
+                .min(self.created_data.len());
+            let end = start
+                .saturating_add(usize::try_from(count).unwrap_or(usize::MAX))
+                .min(self.created_data.len());
+            return Ok(ReadData::Bytes(self.created_data[start..end].to_vec()));
         }
         if qid == self.private_qid {
             let data = b"priv";
@@ -159,6 +167,20 @@ impl FileTree for MachineTree {
     }
 
     fn write(&mut self, _fid: Fid, qid: Qid, offset: u64, data: &[u8]) -> R9pResult<u32> {
+        if Some(qid) == self.created_qid {
+            let start = usize::try_from(offset).map_err(|_| R9pError::from("offset too large"))?;
+            let end = start
+                .checked_add(data.len())
+                .ok_or_else(|| R9pError::from("write overflow"))?;
+            if self.created_data.len() < start {
+                self.created_data.resize(start, 0);
+            }
+            if self.created_data.len() < end {
+                self.created_data.resize(end, 0);
+            }
+            self.created_data[start..end].copy_from_slice(data);
+            return u32::try_from(data.len()).map_err(|_| R9pError::from("write too large"));
+        }
         if qid != self.data_qid {
             return Err(R9pError::from("not writable"));
         }
@@ -205,7 +227,10 @@ impl FileTree for MachineTree {
 
     fn stat(&mut self, qid: Qid) -> R9pResult<Stat> {
         if Some(qid) == self.created_qid {
-            Ok(Stat::new("created", qid, 0o666))
+            let mut stat = Stat::new("created", qid, 0o666);
+            stat.length = u64::try_from(self.created_data.len())
+                .map_err(|_| R9pError::from("length too large"))?;
+            Ok(stat)
         } else if Some(qid) == self.created_dir_qid {
             Ok(Stat::new("made", qid, DMDIR | 0o755))
         } else if qid == self.private_qid {
@@ -308,6 +333,26 @@ fn machine_write_from_streams_local_file_and_reports_count() -> TestResult<()> {
 }
 
 #[test]
+fn machine_create_write_from_writes_before_clunk() -> TestResult<()> {
+    let payload = b"service descriptor\n".to_vec();
+    let input_path = temp_path("create-write-from");
+    fs::write(&input_path, &payload)?;
+    let input_arg = input_path.to_string_lossy().into_owned();
+    let shared = SharedFile::new(Vec::new());
+    let (address, handle) = start_server(shared)?;
+
+    let output = run_machine(
+        &address,
+        &["create-write-from", "/created", "438", "1", "0", &input_arg],
+        None,
+    )?;
+    let _ = fs::remove_file(&input_path);
+    assert_success(&output)?;
+    assert_stdout(&output, &format!("write\t{}\n", payload.len()))?;
+    join_server(handle)
+}
+
+#[test]
 fn machine_writefd_streams_stdin_with_truncation() -> TestResult<()> {
     let payload = b"replacement\n".to_vec();
     let shared = SharedFile::new(b"old content\n".to_vec());
@@ -361,6 +406,31 @@ fn machine_script_runs_multiple_operations_on_one_session() -> TestResult<()> {
     if written != b"abX12345" {
         return Err(test_error("script read-to file did not match server file"));
     }
+    join_server(handle)
+}
+
+#[test]
+fn machine_script_create_write_from_keeps_created_fid_open_for_initial_write() -> TestResult<()> {
+    let input_path = temp_path("script-create-write-input");
+    let script_path = temp_path("script-create-write");
+    fs::write(&input_path, b"attach")?;
+    let input_arg = input_path.to_string_lossy();
+    fs::write(
+        &script_path,
+        format!("create-write-from\t/created\t438\t1\t0\t{input_arg}\nread-hex\t/created\t0\t6\n"),
+    )?;
+    let script_arg = script_path.to_string_lossy().into_owned();
+    let shared = SharedFile::new(Vec::new());
+    let (address, handle) = start_server(shared)?;
+
+    let output = run_machine(&address, &["script", &script_arg], None)?;
+    let _ = fs::remove_file(&input_path);
+    let _ = fs::remove_file(&script_path);
+    assert_success(&output)?;
+    assert_stdout(
+        &output,
+        "ok\t1\tcreate-write\t6\nok\t2\tread-hex\t6\t617474616368\n",
+    )?;
     join_server(handle)
 }
 

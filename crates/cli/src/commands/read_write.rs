@@ -8,7 +8,7 @@ use crate::io::{
     connect_path, copy_fid_to_file, copy_fid_to_stdout, copy_file_to_fid_at, copy_stdin_to_fid,
     copy_stdin_to_fid_at, open_path, parse_offset, read_all,
 };
-use crate::target::{Config, Target};
+use crate::target::{write_config_for_path, Config, Target};
 use crate::usage;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -84,7 +84,7 @@ pub(crate) fn write_cmd(config: Config, mut args: Vec<String>, mode: WriteMode) 
         usage();
     }
     let target = Target {
-        config,
+        config: write_config_for_path(config, &args[0]),
         path: args[0].clone(),
     };
     let (mut client, fid) = open_path(&target, OWRITE | OTRUNC)?;
@@ -100,7 +100,7 @@ fn machine_write_fd_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
         usage();
     }
     let target = Target {
-        config,
+        config: write_config_for_path(config, &args[0]),
         path: args[0].clone(),
     };
     let (mut client, fid) = open_path(&target, OWRITE | OTRUNC)?;
@@ -118,7 +118,7 @@ pub(crate) fn write_at_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
     }
     let offset = parse_offset(&args[1])?;
     let target = Target {
-        config,
+        config: write_config_for_path(config, &args[0]),
         path: args[0].clone(),
     };
     let (mut client, fid) = open_path(&target, OWRITE)?;
@@ -138,7 +138,7 @@ pub(crate) fn write_from_cmd(config: Config, args: Vec<String>) -> CliResult<()>
     }
     let offset = parse_offset(&args[1])?;
     let target = Target {
-        config,
+        config: write_config_for_path(config, &args[0]),
         path: args[0].clone(),
     };
     let count = write_local_file_to_target(&target, offset, OWRITE, &args[2])?;
@@ -151,7 +151,7 @@ pub(crate) fn write_from_trunc_cmd(config: Config, args: Vec<String>) -> CliResu
         usage();
     }
     let target = Target {
-        config,
+        config: write_config_for_path(config, &args[0]),
         path: args[0].clone(),
     };
     let count = write_local_file_to_target(&target, 0, OWRITE | OTRUNC, &args[1])?;
@@ -185,7 +185,7 @@ pub(crate) fn create_write_from_cmd(config: Config, args: Vec<String>) -> CliRes
         .map_err(|_| cli_error(format!("invalid mode {}", args[2])))?;
     let offset = parse_offset(&args[3])?;
     let target = Target {
-        config,
+        config: write_config_for_path(config, &args[0]),
         path: args[0].clone(),
     };
     let (parent, name) = split_parent(&target.path)?;

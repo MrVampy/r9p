@@ -36,6 +36,15 @@ pub(super) fn protocol_error(error: Error) -> Error {
 }
 
 pub(super) fn io_error(context: impl AsRef<str>, error: io::Error) -> Error {
+    if matches!(
+        error.kind(),
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+    ) {
+        return Error::from(format!(
+            "{}: 9P transport timeout or would-block: {error}",
+            context.as_ref()
+        ));
+    }
     Error::from(format!("{}: {error}", context.as_ref()))
 }
 

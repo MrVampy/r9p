@@ -96,6 +96,7 @@ pub(crate) fn parse_global_options(args: &mut Vec<String>) -> CliResult<Config> 
         msize_set: false,
         machine: false,
         request_timeout: Some(Duration::from_secs(30)),
+        control_timeout: Some(Duration::from_secs(600)),
     };
     let mut rest = Vec::new();
     let mut i = 0;
@@ -122,7 +123,13 @@ pub(crate) fn parse_global_options(args: &mut Vec<String>) -> CliResult<Config> 
             i += 1;
             continue;
         }
-        if arg == "-a" || arg == "-A" || arg == "-u" || arg == "-m" || arg == "--request-timeout" {
+        if arg == "-a"
+            || arg == "-A"
+            || arg == "-u"
+            || arg == "-m"
+            || arg == "--request-timeout"
+            || arg == "--control-timeout"
+        {
             let value = args
                 .get(i + 1)
                 .ok_or_else(|| cli_error(format!("missing value for {arg}")))?
@@ -171,6 +178,9 @@ fn set_global_option(config: &mut Config, option: &str, value: String) -> CliRes
         "--request-timeout" => {
             config.request_timeout = parse_request_timeout(&value)?;
         }
+        "--control-timeout" => {
+            config.control_timeout = parse_request_timeout(&value)?;
+        }
         _ => return Err(cli_error(format!("unknown option {option}"))),
     }
     Ok(())
@@ -192,7 +202,7 @@ fn parse_request_timeout(value: &str) -> CliResult<Option<Duration>> {
 
 pub(crate) fn usage() -> ! {
     eprintln!(
-        "usage: r9p [-n] [--machine] [-a address] [-A aname] [-u uname] [-m msize] [--request-timeout seconds] cmd args..."
+        "usage: r9p [-n] [--machine] [-a address] [-A aname] [-u uname] [-m msize] [--request-timeout seconds] [--control-timeout seconds] cmd args..."
     );
     eprintln!("possible cmds:");
     eprintln!("  version [service]");
@@ -250,6 +260,8 @@ mod tests {
             "-m65536".to_string(),
             "--request-timeout".to_string(),
             "0.25".to_string(),
+            "--control-timeout".to_string(),
+            "12.5".to_string(),
             "ls".to_string(),
             "/".to_string(),
         ];
@@ -260,6 +272,7 @@ mod tests {
         assert_eq!(config.msize, 65_536);
         assert!(config.machine);
         assert_eq!(config.request_timeout, Some(Duration::from_millis(250)));
+        assert_eq!(config.control_timeout, Some(Duration::from_millis(12500)));
         assert_eq!(args, ["ls".to_string(), "/".to_string()]);
     }
 

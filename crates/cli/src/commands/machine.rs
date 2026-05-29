@@ -10,7 +10,7 @@ use crate::commands::mutate::{remove_one, split_parent};
 use crate::errors::{cli_error, CliResult};
 use crate::format::{hex_decode, hex_encode};
 use crate::io::{connect_path, open_path, parse_offset};
-use crate::target::{Config, Target};
+use crate::target::{write_config_for_path, Config, Target};
 use crate::usage;
 
 pub(crate) fn machine_list_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
@@ -39,13 +39,13 @@ pub(crate) fn machine_write_cmd(config: Config, args: Vec<String>) -> CliResult<
     let offset = parse_offset(&args[1])?;
     let data = hex_decode(&args[2])?;
     let target = Target {
-        config,
+        config: write_config_for_path(config, &args[0]),
         path: args[0].clone(),
     };
     let (mut client, fid) = open_path(&target, OWRITE)?;
     let count = client.write(fid, offset, &data)?;
-    println!("write\t{count}");
     client.clunk(fid)?;
+    println!("write\t{count}");
     Ok(())
 }
 

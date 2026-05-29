@@ -12,6 +12,7 @@ pub(crate) struct Config {
     pub(crate) msize_set: bool,
     pub(crate) machine: bool,
     pub(crate) request_timeout: Option<Duration>,
+    pub(crate) control_timeout: Option<Duration>,
 }
 
 #[derive(Clone, Debug)]
@@ -57,4 +58,18 @@ pub(crate) fn namespace_socket(service: &str) -> CliResult<PathBuf> {
     let namespace = env::var("NAMESPACE")
         .map_err(|_| cli_error("NAMESPACE is required when -a is not provided"))?;
     Ok(PathBuf::from(namespace).join(service))
+}
+
+pub(crate) fn write_config_for_path(mut config: Config, path: &str) -> Config {
+    if is_control_write_path(path) {
+        config.request_timeout = config.control_timeout;
+    }
+    config
+}
+
+fn is_control_write_path(path: &str) -> bool {
+    path.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .is_some_and(|name| name == "ctl")
 }

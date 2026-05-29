@@ -10,7 +10,7 @@ use std::{
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use r9p::{
@@ -29,6 +29,8 @@ type TestResult<T> = Result<T, Box<dyn Error>>;
 #[derive(Clone)]
 struct SharedFile {
     data: Arc<Mutex<Vec<u8>>>,
+    clunk_delay: Arc<Mutex<Option<Duration>>>,
+    clunk_error: Arc<Mutex<Option<String>>>,
     read_calls: Arc<AtomicUsize>,
     attach_calls: Arc<AtomicUsize>,
 }
@@ -37,9 +39,25 @@ impl SharedFile {
     fn new(data: Vec<u8>) -> Self {
         Self {
             data: Arc::new(Mutex::new(data)),
+            clunk_delay: Arc::new(Mutex::new(None)),
+            clunk_error: Arc::new(Mutex::new(None)),
             read_calls: Arc::new(AtomicUsize::new(0)),
             attach_calls: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    fn with_clunk_delay(self, delay: Duration) -> Self {
+        if let Ok(mut clunk_delay) = self.clunk_delay.lock() {
+            *clunk_delay = Some(delay);
+        }
+        self
+    }
+
+    fn with_clunk_error(self, error: impl Into<String>) -> Self {
+        if let Ok(mut clunk_error) = self.clunk_error.lock() {
+            *clunk_error = Some(error.into());
+        }
+        self
     }
 
     fn bytes(&self) -> TestResult<Vec<u8>> {
@@ -62,6 +80,7 @@ impl SharedFile {
 struct MachineTree {
     root: Qid,
     data_qid: Qid,
+    ctl_qid: Qid,
     private_qid: Qid,
     created_qid: Option<Qid>,
     created_dir_qid: Option<Qid>,
@@ -75,6 +94,7 @@ impl MachineTree {
         Self {
             root: Qid::dir(1),
             data_qid: Qid::file(2),
+            ctl_qid: Qid::file(4),
             private_qid: Qid::file(3),
             created_qid: None,
             created_dir_qid: None,
@@ -100,6 +120,7 @@ impl FileTree for MachineTree {
     ) -> R9pResult<Vec<Qid>> {
         match names {
             [name] if start == self.root && name == b"data" => Ok(vec![self.data_qid]),
+            [name] if start == self.root && name == b"ctl" => Ok(vec![self.ctl_qid]),
             [name] if start == self.root && name == b"private" && self.private_visible => {
                 Ok(vec![self.private_qid])
             }
@@ -181,7 +202,7 @@ impl FileTree for MachineTree {
             self.created_data[start..end].copy_from_slice(data);
             return u32::try_from(data.len()).map_err(|_| R9pError::from("write too large"));
         }
-        if qid != self.data_qid {
+        if qid != self.data_qid && qid != self.ctl_qid {
             return Err(R9pError::from("not writable"));
         }
         self.private_visible = true;
@@ -237,8 +258,9 @@ impl FileTree for MachineTree {
             let mut stat = Stat::new("private", qid, 0o600);
             stat.length = 4;
             Ok(stat)
-        } else if qid == self.data_qid {
-            let mut stat = Stat::new("data", qid, 0o600);
+        } else if qid == self.data_qid || qid == self.ctl_qid {
+            let name = if qid == self.ctl_qid { "ctl" } else { "data" };
+            let mut stat = Stat::new(name, qid, 0o600);
             stat.length = u64::try_from(
                 self.file
                     .data
@@ -251,6 +273,30 @@ impl FileTree for MachineTree {
         } else {
             Ok(Stat::new(".", qid, DMDIR | 0o500))
         }
+    }
+
+    fn clunk(&mut self, _fid: Fid, qid: Qid) -> R9pResult<()> {
+        if qid == self.ctl_qid {
+            let delay = self
+                .file
+                .clunk_delay
+                .lock()
+                .map_err(|_| R9pError::from("shared file lock poisoned"))?
+                .to_owned();
+            if let Some(delay) = delay {
+                thread::sleep(delay);
+            }
+            let error = self
+                .file
+                .clunk_error
+                .lock()
+                .map_err(|_| R9pError::from("shared file lock poisoned"))?
+                .to_owned();
+            if let Some(error) = error {
+                return Err(R9pError::from(error));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -350,6 +396,49 @@ fn machine_write_from_trunc_replaces_existing_file() -> TestResult<()> {
         return Err(test_error(
             "write-from-trunc did not truncate before writing",
         ));
+    }
+    join_server(handle)
+}
+
+#[test]
+fn machine_write_uses_control_timeout_for_ctl_close() -> TestResult<()> {
+    let shared = SharedFile::new(Vec::new()).with_clunk_delay(Duration::from_millis(150));
+    let (address, handle) = start_server(shared)?;
+
+    let output = run_machine_with_global_options(
+        &address,
+        &["--request-timeout", "0.05", "--control-timeout", "0.5"],
+        &["write", "/ctl", "0", "6162"],
+        None,
+    )?;
+    assert_success(&output)?;
+    assert_stdout(&output, "write\t2\n")?;
+    join_server(handle)
+}
+
+#[test]
+fn machine_write_reports_success_after_clunk() -> TestResult<()> {
+    let shared = SharedFile::new(Vec::new()).with_clunk_delay(Duration::from_millis(20));
+    let (address, handle) = start_server(shared)?;
+
+    let output = run_machine(&address, &["write", "/ctl", "0", "6162"], None)?;
+    assert_success(&output)?;
+    assert_stdout(&output, "write\t2\n")?;
+    join_server(handle)
+}
+
+#[test]
+fn machine_write_does_not_report_success_before_failed_clunk() -> TestResult<()> {
+    let shared = SharedFile::new(Vec::new()).with_clunk_error("ctl close failed");
+    let (address, handle) = start_server(shared)?;
+
+    let output = run_machine(&address, &["write", "/ctl", "0", "6162"], None)?;
+    if output.status.success() {
+        return Err(test_error("write should fail when clunk fails"));
+    }
+    assert_stdout(&output, "")?;
+    if !String::from_utf8_lossy(&output.stderr).contains("ctl close failed") {
+        return Err(test_error("stderr did not include clunk failure"));
     }
     join_server(handle)
 }
@@ -533,6 +622,15 @@ fn read_tmessage(stream: &mut TcpStream) -> Result<Option<TMessage>, String> {
 }
 
 fn run_machine(address: &str, args: &[&str], stdin: Option<&[u8]>) -> TestResult<Output> {
+    run_machine_with_global_options(address, &[], args, stdin)
+}
+
+fn run_machine_with_global_options(
+    address: &str,
+    global_options: &[&str],
+    args: &[&str],
+    stdin: Option<&[u8]>,
+) -> TestResult<Output> {
     let mut command = Command::new(env!("CARGO_BIN_EXE_r9p"));
     command.args([
         "--machine",
@@ -545,6 +643,7 @@ fn run_machine(address: &str, args: &[&str], stdin: Option<&[u8]>) -> TestResult
         "-m",
         "8192",
     ]);
+    command.args(global_options);
     command.args(args);
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());

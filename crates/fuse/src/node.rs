@@ -259,6 +259,28 @@ impl NodeTable {
             .ok_or_else(|| Error::new(libc::ESTALE, format!("unknown file handle {handle}")))
     }
 
+    pub fn replace_read_handle_binding(
+        &mut self,
+        handle: u64,
+        client: Client,
+        fid: Fid,
+    ) -> Result<Handle> {
+        let current = self
+            .handles
+            .get_mut(&handle)
+            .ok_or_else(|| Error::new(libc::ESTALE, format!("unknown file handle {handle}")))?;
+        if current.is_dir || current.write_on_release {
+            return Err(Error::new(
+                libc::ESTALE,
+                "file handle is not read-only replayable",
+            ));
+        }
+        let old = current.clone();
+        current.client = client;
+        current.fid = fid;
+        Ok(old)
+    }
+
     pub fn mark_close_commit_flushed(&mut self, handle: u64) -> Result<()> {
         let handle = self
             .handles

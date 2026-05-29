@@ -179,23 +179,61 @@ impl R9pFuse {
             self.read_timeout(),
         ) {
             Ok(data) => data,
+            Err(error)
+                if is_transport_error(&error)
+                    && read_handle_is_replayable(handle.is_dir, handle.write_on_release) =>
+            {
+                self.reconnect()?;
+                self.read_from_reopened_handle(header.nodeid, input.fh, input.offset, input.size)?
+            }
             Err(error) if is_transport_error(&error) => {
                 self.reconnect()?;
-                return Err(Error::new(
-                    libc::ESTALE,
-                    "file handle is stale after 9P reconnect",
-                ));
+                return Err(Error::new(libc::ESTALE, "file handle is not replayable"));
+            }
+            Err(error)
+                if is_namespace_shape_error(&error)
+                    && read_handle_is_replayable(handle.is_dir, handle.write_on_release) =>
+            {
+                self.refresh_node(header.nodeid)?;
+                self.read_from_reopened_handle(header.nodeid, input.fh, input.offset, input.size)?
             }
             Err(error) if is_namespace_shape_error(&error) => {
                 self.refresh_node(header.nodeid)?;
-                return Err(Error::new(
-                    libc::ESTALE,
-                    "file handle is stale after namespace refresh",
-                ));
+                return Err(Error::new(libc::ESTALE, "file handle is not replayable"));
             }
             Err(error) => return Err(error),
         };
         reply_bytes(file, header.unique, &data)
+    }
+
+    fn read_from_reopened_handle(
+        &mut self,
+        nodeid: u64,
+        handle_id: u64,
+        offset: u64,
+        size: u32,
+    ) -> Result<Vec<u8>> {
+        let (client, node_fid) = self.bound_node_fid(nodeid)?;
+        let fid = client.clone_fid_timeout(node_fid, self.lookup_timeout())?;
+        if let Err(error) = client.open_timeout(fid, OREAD, self.lookup_timeout()) {
+            let _ = client.clunk_timeout(fid, self.control_timeout());
+            return Err(error);
+        }
+        let old_handle =
+            match self
+                .nodes()?
+                .replace_read_handle_binding(handle_id, client.clone(), fid)
+            {
+                Ok(old_handle) => old_handle,
+                Err(error) => {
+                    let _ = client.clunk_timeout(fid, self.control_timeout());
+                    return Err(error);
+                }
+            };
+        let _ = old_handle
+            .client
+            .clunk_timeout(old_handle.fid, self.control_timeout());
+        client.read_timeout(fid, offset, size, self.read_timeout())
     }
 
     pub(in crate::fuse) fn write(
@@ -333,9 +371,13 @@ fn read_is_known_eof(known_length: u64, offset: u64) -> bool {
     known_length > 0 && offset >= known_length
 }
 
+fn read_handle_is_replayable(is_dir: bool, write_on_release: bool) -> bool {
+    !is_dir && !write_on_release
+}
+
 #[cfg(test)]
 mod tests {
-    use super::read_is_known_eof;
+    use super::{read_handle_is_replayable, read_is_known_eof};
 
     #[test]
     fn read_at_known_positive_length_is_eof() {
@@ -352,5 +394,12 @@ mod tests {
     #[test]
     fn read_before_known_length_reaches_9p() {
         assert!(!read_is_known_eof(26_698, 26_697));
+    }
+
+    #[test]
+    fn only_read_only_file_handles_are_replayable() {
+        assert!(read_handle_is_replayable(false, false));
+        assert!(!read_handle_is_replayable(false, true));
+        assert!(!read_handle_is_replayable(true, false));
     }
 }

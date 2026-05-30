@@ -140,6 +140,10 @@ impl MountedNamespace {
         }
     }
 
+    pub fn delete_directory(&self, namespace_path: impl AsRef<Path>) -> io::Result<()> {
+        fs::remove_dir(self.path(namespace_path)?)
+    }
+
     pub fn is_directory(&self, namespace_path: impl AsRef<Path>) -> io::Result<bool> {
         Ok(fs::metadata(self.path(namespace_path)?)?.is_dir())
     }
@@ -263,7 +267,26 @@ mod tests {
         mounted.delete_tree("/runtime/ready")?;
         mounted.write_utf8("/runtime/delete-file", "gone")?;
         mounted.delete_file("/runtime/delete-file")?;
+        mounted.create_directory_all("/runtime/empty")?;
+        mounted.delete_directory("/runtime/empty")?;
         mounted.delete_tree("/runtime")?;
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn delete_directory_is_not_recursive() -> io::Result<()> {
+        let root = fixture_root("mounted-delete-directory")?;
+        let mounted = MountedNamespace::new(&root);
+
+        mounted.create_directory_all("/runtime/non-empty")?;
+        mounted.write_utf8("/runtime/non-empty/file", "content")?;
+        let error = mounted
+            .delete_directory("/runtime/non-empty")
+            .expect_err("direct directory delete should not recurse");
+        assert_eq!(error.kind(), io::ErrorKind::DirectoryNotEmpty);
+        assert!(root.join("runtime/non-empty/file").exists());
 
         let _ = fs::remove_dir_all(root);
         Ok(())

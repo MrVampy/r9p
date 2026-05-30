@@ -29,6 +29,8 @@ pub(crate) fn git_export_cmd(global: Config, args: Vec<String>) -> CliResult<()>
     let source = prepare_git_export_source(&config.git)?;
     let mut export_args = config.export_args;
     export_args.push("--descriptor-field".to_string());
+    export_args.push(format!("git_revision={}", source.revision));
+    export_args.push("--descriptor-field".to_string());
     export_args.push(format!(
         "git_bundle_path={}",
         config.git.bundle_namespace_path
@@ -57,6 +59,7 @@ struct GitExportConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PreparedGitSource {
     worktree: PathBuf,
+    revision: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +67,8 @@ struct GitExportLifecycleConfig {
     unit: String,
     descriptor_file: Option<PathBuf>,
     expected_args: Vec<String>,
+    repo: PathBuf,
+    rev: String,
     attempts: usize,
 }
 
@@ -114,6 +119,8 @@ fn parse_git_export_lifecycle_config(
     let mut unit = None;
     let mut descriptor_file = None;
     let mut attempts = 80_usize;
+    let mut repo = PathBuf::from(".");
+    let mut rev = "HEAD".to_string();
     let mut runtime_endpoint = None;
     let mut default_port = "19572".to_string();
     let mut export_args = Vec::new();
@@ -172,6 +179,12 @@ fn parse_git_export_lifecycle_config(
                 if option == "--descriptor-file" {
                     descriptor_file = Some(PathBuf::from(&value));
                 }
+                if option == "--repo" {
+                    repo = PathBuf::from(&value);
+                }
+                if option == "--rev" {
+                    rev = value.clone();
+                }
                 export_args.push(option.to_string());
                 export_args.push(value);
             }
@@ -195,6 +208,8 @@ fn parse_git_export_lifecycle_config(
             unit,
             descriptor_file,
             expected_args: export_args.clone(),
+            repo,
+            rev,
             attempts,
         },
         export_args,
@@ -270,7 +285,21 @@ fn assert_git_export_current(config: &GitExportLifecycleConfig) -> CliResult<()>
         )));
     }
     assert_command_contains_args(&unit_command, &config.expected_args)?;
-    read_descriptor(config).map(|_| ())
+    let expected_revision = resolve_git_revision(&config.repo, &config.rev)?;
+    assert_descriptor_revision_current(&read_descriptor(config)?, &expected_revision)
+}
+
+fn assert_descriptor_revision_current(
+    descriptor: &ExportDescriptor,
+    expected_revision: &str,
+) -> CliResult<()> {
+    match descriptor.extra_fields.get("git_revision") {
+        Some(revision) if revision == &expected_revision => Ok(()),
+        Some(revision) => Err(cli_error(format!(
+            "r9p_export_git_revision_stale:expected={expected_revision}:actual={revision}"
+        ))),
+        None => Err(cli_error("r9p_export_git_revision_missing_in_descriptor")),
+    }
 }
 
 fn assert_command_contains_args(command: &str, args: &[String]) -> CliResult<()> {
@@ -502,7 +531,7 @@ fn prepare_git_export_source(config: &GitExportConfig) -> CliResult<PreparedGitS
         &worktree,
         &["bundle", "create", bundle_arg.as_str(), "--all"],
     )?;
-    Ok(PreparedGitSource { worktree })
+    Ok(PreparedGitSource { worktree, revision })
 }
 
 fn resolve_git_revision(repo: &Path, rev: &str) -> CliResult<String> {
@@ -792,6 +821,8 @@ mod tests {
 
         assert_eq!(config.unit, "vault-runtime-r9p-source-export");
         assert_eq!(config.attempts, 12);
+        assert_eq!(config.repo, PathBuf::from("."));
+        assert_eq!(config.rev, "HEAD");
         assert_eq!(
             config.descriptor_file,
             Some(PathBuf::from(".vault/source-export.desc"))
@@ -849,5 +880,46 @@ mod tests {
     fn revision_token_is_path_safe_and_bounded() {
         assert_eq!(revision_token("git:feature/foo_bar"), "git-feature-");
         assert_eq!(revision_token("f1c7932d2d30a09fd0cc"), "f1c7932d2d30");
+    }
+
+    #[test]
+    fn validates_descriptor_git_revision() {
+        let descriptor = descriptor_with_revision(Some("abc123"));
+
+        assert!(assert_descriptor_revision_current(&descriptor, "abc123").is_ok());
+        let stale = assert_descriptor_revision_current(&descriptor, "def456")
+            .expect_err("stale descriptor should fail")
+            .to_string();
+        assert!(stale.contains("r9p_export_git_revision_stale"));
+
+        let missing = descriptor_with_revision(None);
+        let missing_error = assert_descriptor_revision_current(&missing, "abc123")
+            .expect_err("missing revision should fail")
+            .to_string();
+        assert!(missing_error.contains("r9p_export_git_revision_missing_in_descriptor"));
+    }
+
+    fn descriptor_with_revision(revision: Option<&str>) -> ExportDescriptor {
+        let mut input = concat!(
+            "format\tr9p-export.v1\n",
+            "endpoint_bind\t127.0.0.1:19572\n",
+            "aname\t/\n",
+            "uname\tcodex\n",
+            "exported_root\t/tmp/source\n",
+            "transport_class\ttcp\n",
+            "mode\tro\n",
+            "auth\tnone\n",
+            "pid\t123\n",
+            "protocol\t9P2000\n",
+            "msize\t65536\n",
+            "git_bundle_path\t/.vault/source-export.bundle\n",
+        )
+        .to_string();
+        if let Some(revision) = revision {
+            input.push_str("git_revision\t");
+            input.push_str(revision);
+            input.push('\n');
+        }
+        ExportDescriptor::parse(&input).expect("descriptor should parse")
     }
 }

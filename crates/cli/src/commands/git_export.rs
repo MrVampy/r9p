@@ -114,6 +114,8 @@ fn parse_git_export_lifecycle_config(
     let mut unit = None;
     let mut descriptor_file = None;
     let mut attempts = 80_usize;
+    let mut runtime_endpoint = None;
+    let mut default_port = "19572".to_string();
     let mut export_args = Vec::new();
     let mut index = 0_usize;
     while index < args.len() {
@@ -134,6 +136,21 @@ fn parse_git_export_lifecycle_config(
                 attempts = value
                     .parse::<usize>()
                     .map_err(|_| cli_error(format!("invalid attempts {value}")))?;
+            }
+            "--runtime-endpoint" => {
+                index += 1;
+                runtime_endpoint = Some(
+                    args.get(index)
+                        .ok_or_else(|| cli_error("missing runtime endpoint"))?
+                        .clone(),
+                );
+            }
+            "--default-port" => {
+                index += 1;
+                default_port = args
+                    .get(index)
+                    .ok_or_else(|| cli_error("missing default port"))?
+                    .clone();
             }
             "-h" | "--help" => git_export_lifecycle_usage(0),
             option @ ("--repo"
@@ -166,6 +183,12 @@ fn parse_git_export_lifecycle_config(
         }
         index += 1;
     }
+    if !has_option(&export_args, "--bind") {
+        if let Some(endpoint) = runtime_endpoint {
+            export_args.push("--bind".to_string());
+            export_args.push(route_derived_bind(&endpoint, &default_port)?);
+        }
+    }
     let unit = unit.ok_or_else(|| cli_error("export git lifecycle requires --unit"))?;
     Ok((
         GitExportLifecycleConfig {
@@ -176,6 +199,59 @@ fn parse_git_export_lifecycle_config(
         },
         export_args,
     ))
+}
+
+fn has_option(args: &[String], option: &str) -> bool {
+    args.iter().any(|arg| arg == option)
+}
+
+fn route_derived_bind(runtime_endpoint: &str, default_port: &str) -> CliResult<String> {
+    let host = runtime_endpoint_host(runtime_endpoint)?;
+    let output = Command::new("ip")
+        .args(["route", "get", &host])
+        .output()
+        .map_err(|error| cli_error(format!("ip route get {host}: {error}")))?;
+    if !output.status.success() {
+        return Err(cli_error(format!(
+            "ip_route_get_failed:{host}:{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let route = String::from_utf8_lossy(&output.stdout);
+    let source_ip = route_source_ip(&route)?;
+    Ok(format!("{source_ip}:{default_port}"))
+}
+
+fn runtime_endpoint_host(endpoint: &str) -> CliResult<String> {
+    if let Some(rest) = endpoint.strip_prefix("tcp!") {
+        let parts = rest.split('!').collect::<Vec<_>>();
+        if parts.len() == 2 && !parts[0].is_empty() {
+            return Ok(parts[0].to_string());
+        }
+        return Err(cli_error(format!("invalid tcp endpoint {endpoint}")));
+    }
+    if endpoint.starts_with("unix:") || endpoint.starts_with('/') {
+        return Err(cli_error(
+            "export git bind cannot be route-derived from a unix runtime endpoint",
+        ));
+    }
+    let (host, _port) = endpoint
+        .rsplit_once(':')
+        .ok_or_else(|| cli_error(format!("invalid host:port endpoint {endpoint}")))?;
+    if host.is_empty() {
+        return Err(cli_error(format!("empty host in endpoint {endpoint}")));
+    }
+    Ok(host.to_string())
+}
+
+fn route_source_ip(route_output: &str) -> CliResult<String> {
+    let words = route_output.split_whitespace().collect::<Vec<_>>();
+    for pair in words.windows(2) {
+        if pair[0] == "src" && !pair[1].is_empty() {
+            return Ok(pair[1].to_string());
+        }
+    }
+    Err(cli_error("route output did not contain src address"))
 }
 
 fn assert_git_export_current(config: &GitExportLifecycleConfig) -> CliResult<()> {
@@ -621,7 +697,7 @@ fn git_export_usage(code: i32) -> ! {
 
 fn git_export_lifecycle_usage(code: i32) -> ! {
     eprintln!(
-        "usage: r9p export git ensure|status|stop --unit name --descriptor-file path [regular export git options...]"
+        "usage: r9p export git ensure|status|stop --unit name --descriptor-file path [--runtime-endpoint endpoint --default-port port] [regular export git options...]"
     );
     std::process::exit(code);
 }
@@ -744,6 +820,29 @@ mod tests {
                 "none".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn parses_runtime_endpoint_hosts_for_route_derived_bind() {
+        assert_eq!(
+            runtime_endpoint_host("192.168.0.30:9564").expect("host"),
+            "192.168.0.30"
+        );
+        assert_eq!(
+            runtime_endpoint_host("tcp!192.168.0.30!9564").expect("host"),
+            "192.168.0.30"
+        );
+        assert!(runtime_endpoint_host("unix:/tmp/runtime.9p").is_err());
+    }
+
+    #[test]
+    fn extracts_route_source_ip() {
+        assert_eq!(
+            route_source_ip("192.168.0.30 via 192.168.0.1 dev wlan0 src 192.168.0.42 uid 1000\n")
+                .expect("source ip"),
+            "192.168.0.42"
+        );
+        assert!(route_source_ip("192.168.0.30 via 192.168.0.1 dev wlan0\n").is_err());
     }
 
     #[test]

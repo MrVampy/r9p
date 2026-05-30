@@ -225,6 +225,7 @@ pub(crate) fn usage() -> ! {
     eprintln!("  script file              machine mode");
     eprintln!("  script service file      machine mode without -a");
     eprintln!("  mount [--aname aname] [--uname uname] endpoint mountpoint");
+    eprintln!("  mount ensure|status|stop --mountpoint path [--unit name]");
     eprintln!("  serve [--bind address] root");
     eprintln!("  export [--bind address] [--descriptor machine] root");
     eprintln!("  export git [--repo path] [--rev rev] [--bind address] [--descriptor-file path]");

@@ -229,6 +229,7 @@ pub(crate) fn usage() -> ! {
     eprintln!("  serve [--bind address] root");
     eprintln!("  export [--bind address] [--descriptor machine] root");
     eprintln!("  export git [--repo path] [--rev rev] [--bind address] [--descriptor-file path]");
+    eprintln!("  export git ensure|status|stop --unit name --descriptor-file path");
     eprintln!("  create name...");
     eprintln!("  mkdir name...");
     eprintln!("  con [-r] name");

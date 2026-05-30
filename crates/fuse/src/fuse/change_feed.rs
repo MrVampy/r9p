@@ -202,16 +202,26 @@ fn consume_feed_until_error(
     fs.status.set_change_feed("connecting", None, None);
     let mut since_event_id = None;
     while !stop.load(Ordering::SeqCst) {
-        let poll_path = feed_poll_path(path, since_event_id.as_deref());
+        let poll_path = feed_poll_path(
+            path,
+            since_event_id.as_deref(),
+            fs.config.change_feed_cursor_template.as_deref(),
+        );
         let fid = open_feed(client, &poll_path, fs.lookup_timeout())?;
-        match client.read_full_timeout(fid, 0, 64 * 1024, fs.control_timeout()) {
+        match client.read_timeout(fid, 0, 64 * 1024, fs.read_timeout()) {
             Ok(data) if data.is_empty() => {
                 let _ = client.clunk_timeout(fid, fs.control_timeout());
                 fs.status.set_change_feed("connected", None, None);
             }
             Ok(data) => {
                 let _ = client.clunk_timeout(fid, fs.control_timeout());
-                if let Some(event_id) = apply_feed_chunk(fs, file, &data)? {
+                if let Some(event_id) = apply_feed_chunk(
+                    fs,
+                    file,
+                    &data,
+                    since_event_id.as_deref(),
+                    fs.config.change_feed_cursor_template.is_some(),
+                )? {
                     since_event_id = Some(event_id);
                 }
                 fs.status.set_change_feed("connected", None, None);
@@ -240,35 +250,89 @@ fn open_feed(client: &Client, path: &str, timeout: Duration) -> Result<Fid> {
     Ok(fid)
 }
 
-fn apply_feed_chunk(fs: &mut R9pFuse, file: &mut File, data: &[u8]) -> Result<Option<String>> {
+fn apply_feed_chunk(
+    fs: &mut R9pFuse,
+    file: &mut File,
+    data: &[u8],
+    since_event_id: Option<&str>,
+    cursor_template_configured: bool,
+) -> Result<Option<String>> {
     let text = String::from_utf8_lossy(data);
-    let records = text
+    let parsed_records = text
         .lines()
         .filter_map(parse_namespace_change_record)
         .collect::<Vec<_>>();
+    let selected = select_feed_records(
+        fs,
+        file,
+        parsed_records,
+        since_event_id,
+        cursor_template_configured,
+    );
+    let records = selected.records;
     if records.len() > fs.config.change_feed_backpressure_limit {
         let last_event_id = records.last().map(|record| record.event_id.clone());
         fs.apply_coarse_invalidation(file, "change feed backpressure limit exceeded");
         return Ok(last_event_id);
     }
-    let last_event_id = records.last().map(|record| record.event_id.clone());
+    let last_event_id = selected
+        .cursor_advanced_to
+        .or_else(|| records.last().map(|record| record.event_id.clone()));
     for record in records {
         fs.apply_namespace_change(file, record)?;
     }
     Ok(last_event_id)
 }
 
-fn feed_poll_path(base_path: &str, since_event_id: Option<&str>) -> String {
-    let Some(event_id) = since_event_id else {
-        return base_path.to_string();
+fn feed_poll_path(
+    base_path: &str,
+    since_event_id: Option<&str>,
+    cursor_template: Option<&str>,
+) -> String {
+    match (since_event_id, cursor_template) {
+        (Some(event_id), Some(template)) => template.replace("{event_id}", event_id),
+        _ => base_path.to_string(),
+    }
+}
+
+struct SelectedFeedRecords {
+    records: Vec<NamespaceChange>,
+    cursor_advanced_to: Option<String>,
+}
+
+fn select_feed_records(
+    fs: &mut R9pFuse,
+    file: &mut File,
+    records: Vec<NamespaceChange>,
+    since_event_id: Option<&str>,
+    cursor_template_configured: bool,
+) -> SelectedFeedRecords {
+    if cursor_template_configured {
+        return SelectedFeedRecords {
+            records,
+            cursor_advanced_to: None,
+        };
+    }
+    let Some(cursor) = since_event_id else {
+        return SelectedFeedRecords {
+            records,
+            cursor_advanced_to: None,
+        };
     };
-    let trimmed = base_path.trim_end_matches('/');
-    let root = trimmed
-        .strip_suffix("/stream")
-        .or_else(|| trimmed.strip_suffix("/recent"))
-        .or_else(|| trimmed.rsplit_once("/since/").map(|(root, _)| root))
-        .unwrap_or(trimmed);
-    format!("{root}/since/{event_id}")
+    let Some(index) = records.iter().position(|record| record.event_id == cursor) else {
+        let cursor_advanced_to = records.last().map(|record| record.event_id.clone());
+        if !records.is_empty() {
+            fs.apply_coarse_invalidation(file, "change feed cursor fell outside recent window");
+        }
+        return SelectedFeedRecords {
+            records: Vec::new(),
+            cursor_advanced_to,
+        };
+    };
+    SelectedFeedRecords {
+        records: records.into_iter().skip(index + 1).collect(),
+        cursor_advanced_to: None,
+    }
 }
 
 fn sleep_interruptible(duration: Duration, stop: &AtomicBool) {
@@ -384,7 +448,7 @@ mod tests {
     #[test]
     fn parses_key_value_namespace_change_record() {
         let record = parse_namespace_change_record(
-            "namespace_change\tevent_id=e1\tgeneration=42\tscope=shared\tchange_kind=created\tpath=/runtime/x",
+            "namespace_change\tevent_id=e1\tgeneration=42\tscope=shared\tchange_kind=created\tpath=/tree/x",
         )
         .expect("record should parse");
 
@@ -392,27 +456,27 @@ mod tests {
         assert_eq!(record.generation, 42);
         assert_eq!(record.scope, "shared");
         assert_eq!(record.change_kind, "created");
-        assert_eq!(record.path, "/runtime/x");
+        assert_eq!(record.path, "/tree/x");
     }
 
     #[test]
     fn parses_positional_rename_record() {
         let record = parse_namespace_change_record(
-            "namespace_change\te2\t43\tsession:abc\trenamed\t/runtime/old\t/runtime/new",
+            "namespace_change\te2\t43\tsession:abc\trenamed\t/tree/old\t/tree/new",
         )
         .expect("record should parse");
 
-        assert_eq!(record.old_path.as_deref(), Some("/runtime/old"));
-        assert_eq!(record.path, "/runtime/new");
+        assert_eq!(record.old_path.as_deref(), Some("/tree/old"));
+        assert_eq!(record.path, "/tree/new");
     }
 
     #[test]
     fn namespace_paths_are_absolute() {
         assert_eq!(
-            parse_namespace_path("/runtime/status").expect("path should parse"),
-            vec![b"runtime".to_vec(), b"status".to_vec()]
+            parse_namespace_path("/tree/status").expect("path should parse"),
+            vec![b"tree".to_vec(), b"status".to_vec()]
         );
-        assert!(parse_namespace_path("runtime/status").is_err());
+        assert!(parse_namespace_path("tree/status").is_err());
     }
 
     #[test]
@@ -426,20 +490,20 @@ mod tests {
     #[test]
     fn feed_poll_path_advances_with_since_cursor() {
         assert_eq!(
-            feed_poll_path("/runtime/events/namespace/stream", Some("event-7")),
-            "/runtime/events/namespace/since/event-7"
+            feed_poll_path(
+                "/feeds/namespace",
+                Some("event-7"),
+                Some("/feeds/namespace-after/{event_id}"),
+            ),
+            "/feeds/namespace-after/event-7"
         );
         assert_eq!(
-            feed_poll_path("/runtime/events/namespace/since/event-6", Some("event-7")),
-            "/runtime/events/namespace/since/event-7"
+            feed_poll_path("/feeds/namespace", Some("event-7"), None),
+            "/feeds/namespace"
         );
         assert_eq!(
-            feed_poll_path("/runtime/events/namespace/recent", Some("event-7")),
-            "/runtime/events/namespace/since/event-7"
-        );
-        assert_eq!(
-            feed_poll_path("/runtime/events/namespace/stream", None),
-            "/runtime/events/namespace/stream"
+            feed_poll_path("/feeds/namespace", None, None),
+            "/feeds/namespace"
         );
     }
 }

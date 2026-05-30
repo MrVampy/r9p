@@ -295,6 +295,7 @@ pub(crate) fn parse_mount_config(global: Config, args: Vec<String>) -> CliResult
         diagnostics_capacity: 0,
         status_path: None,
         change_feed_path: None,
+        change_feed_cursor_template: None,
         change_feed_scope: None,
         change_feed_poll_interval: Duration::ZERO,
         change_feed_backpressure_limit: 0,
@@ -382,6 +383,18 @@ pub(crate) fn parse_mount_config(global: Config, args: Vec<String>) -> CliResult
                         .ok_or_else(|| cli_error("missing change feed path"))?
                         .clone(),
                 );
+            }
+            "--change-feed-cursor-template" => {
+                index += 1;
+                let template = args
+                    .get(index)
+                    .ok_or_else(|| cli_error("missing change feed cursor template"))?;
+                if !template.contains("{event_id}") {
+                    return Err(cli_error(
+                        "change feed cursor template must include {event_id}",
+                    ));
+                }
+                config.change_feed_cursor_template = Some(template.clone());
             }
             "--change-feed-scope" => {
                 index += 1;
@@ -730,7 +743,7 @@ fn wait_with_timeout(child: &mut std::process::Child, timeout: Duration) -> std:
 
 fn mount_usage(code: i32) -> ! {
     eprintln!(
-        "usage: r9p mount [--aname aname] [--uname uname] [--msize msize] [--attr-timeout seconds] [--entry-timeout seconds] [--request-timeout seconds] [--connect-timeout seconds] [--lookup-timeout seconds] [--read-timeout seconds] [--write-timeout seconds] [--mutation-timeout seconds] [--control-timeout seconds] [--interrupt-timeout seconds] [--max-workers count] [--max-background count] [--congestion-threshold count] [--diagnostics-file path] [--diagnostics-capacity count] [--status-file path] [--change-feed namespace-path] [--change-feed-scope scope] [--change-feed-poll-interval seconds] [--change-feed-backpressure count] endpoint mountpoint"
+        "usage: r9p mount [--aname aname] [--uname uname] [--msize msize] [--attr-timeout seconds] [--entry-timeout seconds] [--request-timeout seconds] [--connect-timeout seconds] [--lookup-timeout seconds] [--read-timeout seconds] [--write-timeout seconds] [--mutation-timeout seconds] [--control-timeout seconds] [--interrupt-timeout seconds] [--max-workers count] [--max-background count] [--congestion-threshold count] [--diagnostics-file path] [--diagnostics-capacity count] [--status-file path] [--change-feed namespace-path] [--change-feed-cursor-template path-with-{{event_id}}] [--change-feed-scope scope] [--change-feed-poll-interval seconds] [--change-feed-backpressure count] endpoint mountpoint"
     );
     std::process::exit(code);
 }
@@ -798,7 +811,9 @@ mod tests {
                 "--status-file".to_string(),
                 "/tmp/r9p-mount-status.json".to_string(),
                 "--change-feed".to_string(),
-                "/runtime/events/namespace/stream".to_string(),
+                "/feeds/namespace".to_string(),
+                "--change-feed-cursor-template".to_string(),
+                "/feeds/namespace-after/{event_id}".to_string(),
                 "--change-feed-scope".to_string(),
                 "session:mount-a".to_string(),
                 "--change-feed-poll-interval".to_string(),
@@ -843,9 +858,10 @@ mod tests {
             config.status_path.as_deref(),
             Some(std::path::Path::new("/tmp/r9p-mount-status.json"))
         );
+        assert_eq!(config.change_feed_path.as_deref(), Some("/feeds/namespace"));
         assert_eq!(
-            config.change_feed_path.as_deref(),
-            Some("/runtime/events/namespace/stream")
+            config.change_feed_cursor_template.as_deref(),
+            Some("/feeds/namespace-after/{event_id}")
         );
         assert_eq!(config.change_feed_scope.as_deref(), Some("session:mount-a"));
         assert_eq!(config.change_feed_poll_interval, Duration::from_millis(750));
@@ -857,6 +873,23 @@ mod tests {
         assert_eq!(config.congestion_threshold, 18);
         assert_eq!(config.msize, 8192);
         assert_eq!(config.connect_timeout, Duration::from_secs(12));
+    }
+
+    #[test]
+    fn rejects_cursor_template_without_event_placeholder() {
+        let result = parse_mount_config(
+            global(),
+            vec![
+                "--change-feed".to_string(),
+                "/feeds/namespace".to_string(),
+                "--change-feed-cursor-template".to_string(),
+                "/feeds/namespace-after/latest".to_string(),
+                "127.0.0.1:564".to_string(),
+                "/tmp/r9p-mount".to_string(),
+            ],
+        );
+
+        assert!(result.is_err());
     }
 
     #[test]
@@ -994,7 +1027,7 @@ mod tests {
             "--expect-endpoint".to_string(),
             "192.168.0.30:9564".to_string(),
             "--expect-change-feed".to_string(),
-            "/runtime/events/namespace/stream".to_string(),
+            "/feeds/namespace".to_string(),
             "--expect-status-file".to_string(),
             ".vault/live.status.json".to_string(),
             "--status-file".to_string(),
@@ -1013,7 +1046,7 @@ mod tests {
         );
         assert_eq!(
             config.expected_change_feed.as_deref(),
-            Some("/runtime/events/namespace/stream")
+            Some("/feeds/namespace")
         );
         assert_eq!(
             config.expected_status_file.as_deref(),

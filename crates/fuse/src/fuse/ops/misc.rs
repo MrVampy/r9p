@@ -61,13 +61,6 @@ impl R9pFuse {
         payload: &[u8],
     ) -> Result<()> {
         let input = read_struct::<FuseFlushIn>(payload)?;
-        let node_path = {
-            let nodes = self.nodes()?;
-            nodes
-                .node(header.nodeid)
-                .map(|node| node.path.clone())
-                .unwrap_or_default()
-        };
         let handle = self.nodes()?.handle(input.fh)?.clone();
         let mut invalidate_after_reply = false;
         if handle.write_on_release && handle.close_commit && !handle.close_commit_flushed {
@@ -84,7 +77,7 @@ impl R9pFuse {
                     ));
                 }
                 Err(error) if is_namespace_shape_error(&error) => {
-                    if close_commit_refreshes_namespace_bindings(&node_path) {
+                    if close_commit_refreshes_namespace_bindings(handle.close_commit) {
                         self.record_diagnostic_with_context(
                             "close_commit_namespace_shape_acknowledged",
                             header,
@@ -106,12 +99,12 @@ impl R9pFuse {
                 Err(error) => return Err(error),
             }
             self.nodes()?.mark_close_commit_flushed(input.fh)?;
-            invalidate_after_reply = close_commit_refreshes_namespace_bindings(&node_path);
+            invalidate_after_reply = close_commit_refreshes_namespace_bindings(handle.close_commit);
         }
-        // Plain 9P2000 has no close-time flush primitive. For Vault's
-        // close-commit command files, the listener deliberately commits on
-        // Tclunk so Linux close(2) can receive command failures via FUSE
-        // FLUSH; FUSE RELEASE errors are ignored by VFS.
+        // Plain 9P2000 has no close-time flush primitive. For close-commit
+        // command files, the server deliberately commits on Tclunk so Linux
+        // close(2) can receive command failures via FUSE FLUSH; FUSE RELEASE
+        // errors are ignored by VFS.
         reply_empty(file, header.unique)?;
         if invalidate_after_reply {
             self.invalidate_namespace_bindings_after_reply(file, "close-commit flush");

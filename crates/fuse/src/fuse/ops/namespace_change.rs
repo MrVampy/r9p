@@ -1,55 +1,36 @@
 //! Helpers for namespace-changing control writes.
 //!
-//! Vault command files with the close-commit mode bit only change namespace
-//! state when the handle is clunked. The FUSE bridge therefore defers kernel
-//! invalidation for those writes until FLUSH/RELEASE has committed.
+//! 9P servers can mark command files with the close-commit mode bit. Those
+//! files commit when the handle is clunked, so the FUSE bridge defers kernel
+//! invalidation until FLUSH/RELEASE has observed the close result. The bridge
+//! must not infer this from server-specific path vocabulary.
 
-pub(super) fn is_runtime_control_write_path(path: &[Vec<u8>]) -> bool {
-    path_matches(path, &[b"runtime", b"worktrees", b"import"])
-        || (path.len() >= 2
-            && path[0].as_slice() == b"runtime"
-            && path
-                .last()
-                .map(|segment| segment.as_slice() == b"ctl")
-                .unwrap_or(false))
+pub(super) fn write_uses_control_timeout(path: &[Vec<u8>], close_commit: bool) -> bool {
+    close_commit || is_control_file_name(path)
 }
 
-pub(super) fn refreshes_namespace_bindings(path: &[Vec<u8>]) -> bool {
-    path_matches(path, &[b"runtime", b"namespaces", b"current", b"mount"])
-        || path_matches(path, &[b"runtime", b"namespaces", b"current", b"unmount"])
-        || path_matches(path, &[b"runtime", b"worktrees", b"import"])
-        || is_worktree_control_write_path(path)
+pub(super) fn close_commit_refreshes_namespace_bindings(close_commit: bool) -> bool {
+    close_commit
 }
 
-pub(super) fn close_commit_refreshes_namespace_bindings(path: &[Vec<u8>]) -> bool {
-    refreshes_namespace_bindings(path) || is_runtime_control_write_path(path)
+pub(super) fn write_refreshes_namespace_bindings(
+    path: &[Vec<u8>],
+    close_commit: bool,
+) -> bool {
+    is_control_file_name(path) && !close_commit
 }
 
-pub(super) fn write_refreshes_namespace_bindings(path: &[Vec<u8>], close_commit: bool) -> bool {
-    refreshes_namespace_bindings(path) && !close_commit
-}
-
-fn is_worktree_control_write_path(path: &[Vec<u8>]) -> bool {
-    path.len() == 4
-        && path[0].as_slice() == b"runtime"
-        && path[1].as_slice() == b"worktrees"
-        && !path[2].is_empty()
-        && path[3].as_slice() == b"ctl"
-}
-
-fn path_matches(path: &[Vec<u8>], expected: &[&[u8]]) -> bool {
-    path.len() == expected.len()
-        && path
-            .iter()
-            .zip(expected.iter())
-            .all(|(left, right)| left.as_slice() == *right)
+fn is_control_file_name(path: &[Vec<u8>]) -> bool {
+    path.last()
+        .map(|segment| segment.as_slice() == b"ctl")
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        close_commit_refreshes_namespace_bindings, is_runtime_control_write_path,
-        refreshes_namespace_bindings, write_refreshes_namespace_bindings,
+        close_commit_refreshes_namespace_bindings, write_refreshes_namespace_bindings,
+        write_uses_control_timeout,
     };
 
     fn path(segments: &[&[u8]]) -> Vec<Vec<u8>> {
@@ -57,98 +38,43 @@ mod tests {
     }
 
     #[test]
-    fn worktree_ctl_writes_refresh_namespace_bindings() {
-        assert!(refreshes_namespace_bindings(&path(&[
-            b"runtime",
-            b"worktrees",
-            b"wt-plan45",
-            b"ctl",
-        ])));
+    fn close_commit_writes_use_control_timeout_without_path_policy() {
+        assert!(write_uses_control_timeout(
+            &path(&[b"any", b"command"]),
+            true
+        ));
     }
 
     #[test]
-    fn worktree_import_writes_refresh_namespace_bindings() {
-        assert!(refreshes_namespace_bindings(&path(&[
-            b"runtime",
-            b"worktrees",
-            b"import",
-        ])));
+    fn ctl_named_writes_use_control_timeout_without_namespace_policy() {
+        assert!(write_uses_control_timeout(
+            &path(&[b"entries", b"note", b"ctl"]),
+            false
+        ));
     }
 
     #[test]
-    fn worktree_children_do_not_all_refresh_namespace_bindings() {
-        assert!(!refreshes_namespace_bindings(&path(&[
-            b"runtime",
-            b"worktrees",
-            b"wt-plan45",
-            b"status",
-        ])));
+    fn non_control_writes_use_regular_timeout() {
+        assert!(!write_uses_control_timeout(
+            &path(&[b"entries", b"note"]),
+            false
+        ));
     }
 
     #[test]
     fn close_commit_writes_defer_namespace_binding_refresh_until_close() {
-        let import = path(&[b"runtime", b"worktrees", b"import"]);
+        let command = path(&[b"any", b"command"]);
 
-        assert!(write_refreshes_namespace_bindings(&import, false));
-        assert!(!write_refreshes_namespace_bindings(&import, true));
-        assert!(refreshes_namespace_bindings(&import));
+        assert!(!write_refreshes_namespace_bindings(&command, true));
+        assert!(close_commit_refreshes_namespace_bindings(true));
+        assert!(!close_commit_refreshes_namespace_bindings(false));
     }
 
     #[test]
-    fn close_commit_runtime_control_writes_refresh_namespace_bindings() {
-        assert!(close_commit_refreshes_namespace_bindings(&path(&[
-            b"runtime",
-            b"framework",
-            b"candidates",
-            b"bootstrap-lanes",
-            b"requests",
-            b"m7-live-reload-bootstrap-abc123",
-            b"ctl",
-        ])));
-        assert!(close_commit_refreshes_namespace_bindings(&path(&[
-            b"runtime",
-            b"framework",
-            b"reload",
-            b"ctl",
-        ])));
-        assert!(!close_commit_refreshes_namespace_bindings(&path(&[
-            b"entries", b"note", b"ctl",
-        ])));
-    }
+    fn immediate_ctl_writes_refresh_namespace_bindings() {
+        let ctl = path(&[b"entries", b"note", b"ctl"]);
 
-    #[test]
-    fn runtime_ctl_writes_use_control_timeout() {
-        assert!(is_runtime_control_write_path(&path(&[
-            b"runtime",
-            b"framework",
-            b"reload",
-            b"ctl",
-        ])));
-        assert!(is_runtime_control_write_path(&path(&[
-            b"runtime",
-            b"framework",
-            b"staging",
-            b"providers",
-            b"current",
-            b"ctl",
-        ])));
-        assert!(is_runtime_control_write_path(&path(&[
-            b"runtime",
-            b"services",
-            b"r9p-listener",
-            b"ctl",
-        ])));
-        assert!(is_runtime_control_write_path(&path(&[
-            b"runtime",
-            b"worktrees",
-            b"import",
-        ])));
-    }
-
-    #[test]
-    fn non_runtime_ctl_writes_use_regular_timeout() {
-        assert!(!is_runtime_control_write_path(&path(&[
-            b"entries", b"note", b"ctl",
-        ])));
+        assert!(write_refreshes_namespace_bindings(&ctl, false));
+        assert!(!write_refreshes_namespace_bindings(&ctl, true));
     }
 }

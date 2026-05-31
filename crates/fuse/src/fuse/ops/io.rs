@@ -1,8 +1,8 @@
 //! `open` / `read` / `write` / `release` op handlers.
 
 use super::namespace_change::{
-    close_commit_refreshes_namespace_bindings, is_runtime_control_write_path,
-    write_refreshes_namespace_bindings,
+    close_commit_refreshes_namespace_bindings, write_refreshes_namespace_bindings,
+    write_uses_control_timeout,
 };
 use crate::{
     error::{Error, Result},
@@ -254,7 +254,7 @@ impl R9pFuse {
             nodes.node(header.nodeid)?.path.clone()
         };
         let handle = self.nodes()?.handle(input.fh)?.clone();
-        let write_timeout = if is_runtime_control_write_path(&node_path) {
+        let write_timeout = if write_uses_control_timeout(&node_path, handle.close_commit) {
             self.control_timeout()
         } else {
             self.write_timeout()
@@ -300,13 +300,6 @@ impl R9pFuse {
         payload: &[u8],
     ) -> Result<()> {
         let input = read_struct::<FuseReleaseIn>(payload)?;
-        let node_path = {
-            let nodes = self.nodes()?;
-            nodes
-                .node(header.nodeid)
-                .map(|node| node.path.clone())
-                .unwrap_or_default()
-        };
         let handle = self.nodes()?.remove_handle(input.fh);
         let mut invalidate_after_reply = false;
         if let Some(handle) = handle {
@@ -315,7 +308,7 @@ impl R9pFuse {
             }
             invalidate_after_reply = handle.write_on_release
                 && handle.close_commit
-                && close_commit_refreshes_namespace_bindings(&node_path);
+                && close_commit_refreshes_namespace_bindings(handle.close_commit);
             match handle
                 .client
                 .clunk_timeout(handle.fid, self.control_timeout())

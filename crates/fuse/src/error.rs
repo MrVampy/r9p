@@ -94,6 +94,19 @@ const PLAN9_ERRNO_PATTERNS: &[(&str, i32)] = &[
     ("is directory", libc::EISDIR),
     ("directory", libc::ENOTDIR),
     ("not empty", libc::ENOTEMPTY),
+    ("preflight", libc::EINVAL),
+    ("missing_import_closure", libc::EINVAL),
+    ("missing import closure", libc::EINVAL),
+    ("rejected", libc::EINVAL),
+    ("decode", libc::EINVAL),
+    ("decode_failed", libc::EINVAL),
+    ("invalid", libc::EINVAL),
+    ("illegal", libc::EINVAL),
+    ("argument", libc::EINVAL),
+    ("malformed", libc::EINVAL),
+    ("parse", libc::EINVAL),
+    ("parse_failed", libc::EINVAL),
+    ("bad", libc::EINVAL),
     // Never pass remote "not implemented" through as FUSE ENOSYS. Linux
     // caches ENOSYS per opcode for the mount lifetime; a backend rejection for
     // one read/write/lookup must not brick that FUSE opcode until remount.
@@ -113,19 +126,6 @@ const PLAN9_ERRNO_PATTERNS: &[(&str, i32)] = &[
     ("interrupt", libc::EINTR),
     ("bad message", libc::EBADMSG),
     ("bad file", libc::EBADF),
-    ("preflight", libc::EINVAL),
-    ("missing_import_closure", libc::EINVAL),
-    ("missing import closure", libc::EINVAL),
-    ("rejected", libc::EINVAL),
-    ("decode", libc::EINVAL),
-    ("decode_failed", libc::EINVAL),
-    ("invalid", libc::EINVAL),
-    ("illegal", libc::EINVAL),
-    ("argument", libc::EINVAL),
-    ("malformed", libc::EINVAL),
-    ("parse", libc::EINVAL),
-    ("parse_failed", libc::EINVAL),
-    ("bad", libc::EINVAL),
     ("input/output", libc::EIO),
     ("i/o", libc::EIO),
     ("protocol", libc::EPROTO),
@@ -157,14 +157,14 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_runtime_control_is_not_remote_io() {
+    fn reload_preflight_failure_is_invalid_argument() {
         let message = concat!(
             "runtime_framework_reload_activation_preflight_failed:",
             "framework_reload_automatic_participant_activation_preflight_failed:",
             "runtime-recovery:",
             "runtime_participant_control_unsupported:runtime-recovery:restart"
         );
-        assert_eq!(errno_for_9p_error(message), libc::ENOTSUP);
+        assert_eq!(errno_for_9p_error(message), libc::EINVAL);
     }
 
     #[test]

@@ -141,10 +141,12 @@ impl R9pFuse {
 fn change_feed_loop(fs: &mut R9pFuse, file: &mut File, path: String, stop: Arc<AtomicBool>) {
     fs.status.set_change_feed("connecting", None, None);
     let mut feed_client = None;
+    let mut data_client_stale = false;
     while !stop.load(Ordering::SeqCst) {
         let client = match change_feed_client(fs, &mut feed_client) {
             Ok(client) => client,
             Err(error) => {
+                data_client_stale = true;
                 fs.status
                     .set_change_feed("degraded", None, Some(error.message().to_string()));
                 fs.record_mount_diagnostic(
@@ -157,6 +159,26 @@ fn change_feed_loop(fs: &mut R9pFuse, file: &mut File, path: String, stop: Arc<A
                 continue;
             }
         };
+        if data_client_stale {
+            match fs.reconnect() {
+                Ok(()) => {
+                    data_client_stale = false;
+                    fs.record_mount_diagnostic("change_feed_data_reconnect", 0, "reconnected");
+                }
+                Err(error) => {
+                    fs.status
+                        .set_change_feed("degraded", None, Some(error.message().to_string()));
+                    fs.record_mount_diagnostic(
+                        "change_feed_data_reconnect_failed",
+                        error.errno,
+                        error.message(),
+                    );
+                    fs.apply_coarse_invalidation(file, "change feed data reconnect failed");
+                    sleep_interruptible(fs.config.change_feed_poll_interval, &stop);
+                    continue;
+                }
+            }
+        }
         match consume_feed_until_error(fs, file, &path, &stop, &client) {
             Ok(()) => {}
             Err(error) => {
@@ -170,6 +192,7 @@ fn change_feed_loop(fs: &mut R9pFuse, file: &mut File, path: String, stop: Arc<A
                 fs.apply_coarse_invalidation(file, "change feed degraded");
                 if is_transport_error(&error) {
                     feed_client = None;
+                    data_client_stale = true;
                 }
                 sleep_interruptible(fs.config.change_feed_poll_interval, &stop);
             }

@@ -401,11 +401,35 @@ fn wait_for_descriptor(config: &GitExportLifecycleConfig) -> CliResult<()> {
     for attempt in 0..=config.attempts {
         match read_descriptor(config) {
             Ok(_) => return Ok(()),
+            Err(error) if git_export_unit_terminated(config) && attempt > 0 => {
+                return Err(git_export_unit_failure(config, error));
+            }
             Err(error) if attempt >= config.attempts => return Err(error),
             Err(_) => thread::sleep(Duration::from_millis(100)),
         }
     }
     Ok(())
+}
+
+fn git_export_unit_terminated(config: &GitExportLifecycleConfig) -> bool {
+    match systemd_unit_property(&config.unit, "ActiveState") {
+        Ok(state) => matches!(state.trim(), "failed" | "inactive"),
+        Err(_) => false,
+    }
+}
+
+fn git_export_unit_failure(
+    config: &GitExportLifecycleConfig,
+    descriptor_error: Box<dyn std::error::Error>,
+) -> Box<dyn std::error::Error> {
+    let state = systemd_unit_property(&config.unit, "ActiveState")
+        .unwrap_or_else(|_| "unknown".to_string());
+    let result = systemd_unit_property(&config.unit, "Result")
+        .unwrap_or_else(|_| "unknown".to_string());
+    cli_error(format!(
+        "r9p_export_git_unit_failed:{}:state={}:result={}:descriptor={}",
+        config.unit, state, result, descriptor_error
+    ))
 }
 
 fn read_descriptor(config: &GitExportLifecycleConfig) -> CliResult<ExportDescriptor> {

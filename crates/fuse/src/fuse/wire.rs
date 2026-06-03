@@ -396,13 +396,3 @@ pub(super) struct FuseInitOut {
     pub(super) map_alignment: u16,
     pub(super) unused: [u32; 8],
 }
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub(super) struct FuseDirent {
-    pub(super) ino: u64,
-    pub(super) off: u64,
-    pub(super) namelen: u32,
-    pub(super) type_: u32,
-    pub(super) name: [u8; 1],
-}

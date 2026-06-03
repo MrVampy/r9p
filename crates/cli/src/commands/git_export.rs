@@ -424,8 +424,8 @@ fn git_export_unit_failure(
 ) -> Box<dyn std::error::Error> {
     let state = systemd_unit_property(&config.unit, "ActiveState")
         .unwrap_or_else(|_| "unknown".to_string());
-    let result = systemd_unit_property(&config.unit, "Result")
-        .unwrap_or_else(|_| "unknown".to_string());
+    let result =
+        systemd_unit_property(&config.unit, "Result").unwrap_or_else(|_| "unknown".to_string());
     cli_error(format!(
         "r9p_export_git_unit_failed:{}:state={}:result={}:descriptor={}",
         config.unit, state, result, descriptor_error

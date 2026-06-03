@@ -210,11 +210,14 @@ impl NodeTable {
 
     pub fn replace_binding(&mut self, nodeid: u64, fid: Fid, stat: Stat) -> Result<Option<Fid>> {
         let node = self.node_mut(nodeid)?;
+        let identity_changed = !same_inode_identity(node, &stat);
         let old_fid = node.fid;
         node.fid = Some(fid);
         node.qid = stat.qid;
         node.stat = stat;
-        node.generation = node.generation.saturating_add(1).max(1);
+        if identity_changed {
+            node.generation = node.generation.saturating_add(1).max(1);
+        }
         node.needs_rebind = false;
         Ok(old_fid.filter(|old| *old != fid))
     }
@@ -320,12 +323,15 @@ impl NodeTable {
     pub fn refresh_qid(&mut self, qid: Qid, stat: Stat, path: Option<Vec<Vec<u8>>>) {
         for node in self.nodes.values_mut() {
             if same_qid(node.qid, qid) {
+                let identity_changed = !same_inode_identity(node, &stat);
                 if let Some(path) = &path {
                     node.path = path.clone();
                 }
                 node.qid = stat.qid;
                 node.stat = stat.clone();
-                node.generation = node.generation.saturating_add(1).max(1);
+                if identity_changed {
+                    node.generation = node.generation.saturating_add(1).max(1);
+                }
                 node.needs_rebind = false;
             }
         }
@@ -340,6 +346,7 @@ impl NodeTable {
     ) -> Option<Fid> {
         for node in self.nodes.values_mut() {
             if same_qid(node.qid, qid) {
+                let identity_changed = !same_inode_identity(node, &stat);
                 let old_fid = node.fid;
                 node.fid = Some(fid);
                 if let Some(path) = path {
@@ -347,7 +354,9 @@ impl NodeTable {
                 }
                 node.qid = stat.qid;
                 node.stat = stat;
-                node.generation = node.generation.saturating_add(1).max(1);
+                if identity_changed {
+                    node.generation = node.generation.saturating_add(1).max(1);
+                }
                 node.needs_rebind = false;
                 return old_fid;
             }
@@ -400,6 +409,16 @@ impl NodeTable {
             .find_map(|(nodeid, node)| (node.path == path).then_some(*nodeid))
     }
 
+    pub fn parent_nodeid(&self, nodeid: u64) -> Result<u64> {
+        let path = self.node(nodeid)?.path.clone();
+        match path.split_last() {
+            None => Ok(ROOT_NODEID),
+            Some((_name, parent_path)) => self
+                .nodeid_at_path(parent_path)
+                .ok_or_else(|| Error::new(libc::ESTALE, format!("unknown parent for {nodeid}"))),
+        }
+    }
+
     pub fn rebind_paths(&self) -> Vec<(u64, Vec<Vec<u8>>)> {
         self.nodes
             .iter()
@@ -423,13 +442,16 @@ impl NodeTable {
         }
         for (nodeid, fid, stat) in rebound {
             if let Some(node) = self.nodes.get_mut(&nodeid) {
+                let identity_changed = !same_inode_identity(node, &stat);
                 if let Some(old_fid) = node.fid {
                     replaced.push(old_fid);
                 }
                 node.fid = Some(fid);
                 node.qid = stat.qid;
                 node.stat = stat;
-                node.generation = node.generation.saturating_add(1).max(1);
+                if identity_changed {
+                    node.generation = node.generation.saturating_add(1).max(1);
+                }
                 node.needs_rebind = false;
             }
         }
@@ -601,6 +623,10 @@ fn same_qid(a: Qid, b: Qid) -> bool {
     a.path == b.path && a.version == b.version && a.qtype == b.qtype
 }
 
+fn same_inode_identity(node: &Node, stat: &Stat) -> bool {
+    same_qid(node.qid, stat.qid) && mode_kind(&node.stat) == mode_kind(stat)
+}
+
 fn path_has_prefix(path: &[Vec<u8>], prefix: &[Vec<u8>]) -> bool {
     path.starts_with(prefix)
 }
@@ -661,6 +687,36 @@ mod tests {
     }
 
     #[test]
+    fn parent_nodeid_follows_path_lineage() {
+        let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
+        let docs = nodes
+            .insert_lookup(
+                ROOT_NODEID,
+                2,
+                Stat::new("docs", Qid::dir(2), 0o555),
+                b"docs",
+            )
+            .map(|inserted| inserted.nodeid)
+            .expect("docs node should insert");
+        let alpha = nodes
+            .insert_lookup(
+                docs,
+                3,
+                Stat::new("alpha.md", Qid::file(3), 0o444),
+                b"alpha.md",
+            )
+            .map(|inserted| inserted.nodeid)
+            .expect("alpha node should insert");
+
+        assert_eq!(
+            nodes.parent_nodeid(ROOT_NODEID).expect("root parent"),
+            ROOT_NODEID
+        );
+        assert_eq!(nodes.parent_nodeid(docs).expect("docs parent"), ROOT_NODEID);
+        assert_eq!(nodes.parent_nodeid(alpha).expect("alpha parent"), docs);
+    }
+
+    #[test]
     fn lazy_lookup_nodes_keep_stat_without_a_fid_until_bound() {
         let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
         let docs = nodes
@@ -703,6 +759,49 @@ mod tests {
         let rebound = nodes.node(docs).expect("docs");
         assert_eq!(rebound.fid, Some(3));
         assert_eq!(rebound.stat.qid, Qid::dir(3));
+    }
+
+    #[test]
+    fn rebinding_same_inode_keeps_generation_stable() {
+        let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
+        let docs = nodes
+            .insert_lookup(
+                ROOT_NODEID,
+                2,
+                Stat::new("docs", Qid::dir(2), 0o555),
+                b"docs",
+            )
+            .map(|inserted| inserted.nodeid)
+            .expect("docs node should insert");
+
+        let generation = nodes.node(docs).expect("docs").generation;
+        let replaced = nodes
+            .replace_binding(docs, 3, Stat::new("docs", Qid::dir(2), 0o555))
+            .expect("docs node should rebind");
+
+        assert_eq!(replaced, Some(2));
+        assert_eq!(nodes.node(docs).expect("docs").generation, generation);
+    }
+
+    #[test]
+    fn rebinding_new_inode_bumps_generation() {
+        let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
+        let docs = nodes
+            .insert_lookup(
+                ROOT_NODEID,
+                2,
+                Stat::new("docs", Qid::dir(2), 0o555),
+                b"docs",
+            )
+            .map(|inserted| inserted.nodeid)
+            .expect("docs node should insert");
+
+        let generation = nodes.node(docs).expect("docs").generation;
+        let _ = nodes
+            .replace_binding(docs, 3, Stat::new("docs", Qid::dir(3), 0o555))
+            .expect("docs node should rebind");
+
+        assert!(nodes.node(docs).expect("docs").generation > generation);
     }
 
     #[test]
@@ -896,6 +995,29 @@ mod tests {
         let stale_node = nodes.node(stale).expect("stale node");
         assert_eq!(stale_node.fid, None);
         assert!(stale_node.needs_rebind);
+    }
+
+    #[test]
+    fn apply_rebind_results_keeps_generation_for_same_inode_refresh() {
+        let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
+        let docs = nodes
+            .insert_lookup(
+                ROOT_NODEID,
+                2,
+                Stat::new("docs", Qid::dir(2), 0o555),
+                b"docs",
+            )
+            .map(|inserted| inserted.nodeid)
+            .expect("docs node should insert");
+        let generation = nodes.node(docs).expect("docs").generation;
+
+        let replaced = nodes.apply_rebind_results(
+            vec![(docs, 3, Stat::new("docs", Qid::dir(2), 0o555))],
+            vec![],
+        );
+
+        assert_eq!(replaced, vec![2]);
+        assert_eq!(nodes.node(docs).expect("docs").generation, generation);
     }
 
     #[test]

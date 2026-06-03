@@ -1,6 +1,6 @@
 //! Stateless conversion helpers between the FUSE and 9P views of the world.
 
-use super::wire::{FuseDirent, FOPEN_DIRECT_IO};
+use super::wire::FOPEN_DIRECT_IO;
 use crate::{
     error::Error,
     p9::{ORDWR, OREAD, OTRUNC, OWRITE},
@@ -69,5 +69,9 @@ pub(super) fn duration_parts(duration: Duration) -> (u64, u32) {
 }
 
 pub(super) fn dirent_size(name_len: usize) -> usize {
-    (size_of::<FuseDirent>() - 1 + name_len + 7) & !7
+    (fuse_name_offset() + name_len + 7) & !7
+}
+
+pub(super) fn fuse_name_offset() -> usize {
+    size_of::<u64>() + size_of::<u64>() + size_of::<u32>() + size_of::<u32>()
 }

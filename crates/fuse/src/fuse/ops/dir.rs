@@ -15,7 +15,7 @@ use crate::{
         wire::{FuseEntryOut, FuseInHeader, FuseReadIn},
         R9pFuse,
     },
-    node::{is_dir, qid_to_inode, DirEntry, ROOT_NODEID},
+    node::{is_dir, qid_to_inode, DirEntry},
 };
 use std::{fs::File, mem::size_of};
 
@@ -33,7 +33,7 @@ impl R9pFuse {
         }
         let size = usize::try_from(input.size)
             .map_err(|_| Error::new(libc::EINVAL, "readdir too large"))?;
-        let data = encode_dirents(header.nodeid, input.offset, size, &handle.dir_entries)?;
+        let data = self.encode_dirents(header.nodeid, input.offset, size, &handle.dir_entries)?;
         reply_bytes(file, header.unique, &data)
     }
 
@@ -79,7 +79,7 @@ impl R9pFuse {
                 break;
             }
             let (entry_out, kind, ino) = match real {
-                None => (zero_entry_out(), libc::DT_DIR as u32, 0_u64),
+                None => self.special_direntplus_entry(parent_nodeid, name)?,
                 Some(entry) => {
                     let nodeid = self.bind_child(parent_nodeid, entry)?;
                     let generation = self.nodes()?.node(nodeid)?.generation;
@@ -110,29 +110,65 @@ impl R9pFuse {
         Ok(out)
     }
 
+    fn special_direntplus_entry(
+        &self,
+        parent_nodeid: u64,
+        name: &[u8],
+    ) -> Result<(FuseEntryOut, u32, u64)> {
+        let nodeid = {
+            let nodes = self.nodes()?;
+            if name == b".." {
+                nodes.parent_nodeid(parent_nodeid)?
+            } else {
+                parent_nodeid
+            }
+        };
+        let (generation, qid, stat) = {
+            let nodes = self.nodes()?;
+            let node = nodes.node(nodeid)?;
+            (node.generation, node.qid, node.stat.clone())
+        };
+        Ok((
+            self.entry_out(nodeid, generation, &stat),
+            libc::DT_DIR as u32,
+            qid_to_inode(qid),
+        ))
+    }
+
     fn bind_child(&self, parent_nodeid: u64, entry: &DirEntry) -> Result<u64> {
         let mut nodes = self.nodes()?;
         nodes.insert_lookup_lazy(parent_nodeid, entry.stat.clone(), &entry.name)
     }
+
+    fn encode_dirents(
+        &self,
+        parent_nodeid: u64,
+        offset: u64,
+        size: usize,
+        entries: &[DirEntry],
+    ) -> Result<Vec<u8>> {
+        let (dot_ino, dotdot_ino) = self.special_dirent_inodes(parent_nodeid)?;
+        encode_dirents(dot_ino, dotdot_ino, offset, size, entries)
+    }
+
+    fn special_dirent_inodes(&self, parent_nodeid: u64) -> Result<(u64, u64)> {
+        let nodes = self.nodes()?;
+        let dot = nodes.node(parent_nodeid)?;
+        let dotdot = nodes.node(nodes.parent_nodeid(parent_nodeid)?)?;
+        Ok((qid_to_inode(dot.qid), qid_to_inode(dotdot.qid)))
+    }
 }
 
 pub(in crate::fuse) fn encode_dirents(
-    parent_nodeid: u64,
+    dot_ino: u64,
+    dotdot_ino: u64,
     offset: u64,
     size: usize,
     entries: &[DirEntry],
 ) -> Result<Vec<u8>> {
     let mut logical = Vec::with_capacity(entries.len() + 2);
-    logical.push((
-        b".".to_vec(),
-        if parent_nodeid == ROOT_NODEID {
-            ROOT_NODEID
-        } else {
-            parent_nodeid
-        },
-        libc::DT_DIR as u32,
-    ));
-    logical.push((b"..".to_vec(), ROOT_NODEID, libc::DT_DIR as u32));
+    logical.push((b".".to_vec(), dot_ino, libc::DT_DIR as u32));
+    logical.push((b"..".to_vec(), dotdot_ino, libc::DT_DIR as u32));
     for entry in entries {
         logical.push((
             entry.name.clone(),
@@ -170,40 +206,5 @@ pub(in crate::fuse) fn encode_dirents(
 }
 
 fn direntplus_size(name_len: usize) -> usize {
-    // entry_out + dirent header (ino+off+namelen+type) + name, padded to 8.
-    let prefix = size_of::<FuseEntryOut>() + 8 + 8 + 4 + 4;
-    (prefix + name_len + 7) & !7
-}
-
-fn zero_entry_out() -> FuseEntryOut {
-    FuseEntryOut {
-        nodeid: 0,
-        generation: 0,
-        entry_valid: 0,
-        attr_valid: 0,
-        entry_valid_nsec: 0,
-        attr_valid_nsec: 0,
-        attr: zero_attr(),
-    }
-}
-
-fn zero_attr() -> crate::fuse::wire::FuseAttr {
-    crate::fuse::wire::FuseAttr {
-        ino: 0,
-        size: 0,
-        blocks: 0,
-        atime: 0,
-        mtime: 0,
-        ctime: 0,
-        atimensec: 0,
-        mtimensec: 0,
-        ctimensec: 0,
-        mode: 0,
-        nlink: 0,
-        uid: 0,
-        gid: 0,
-        rdev: 0,
-        blksize: 0,
-        flags: 0,
-    }
+    size_of::<FuseEntryOut>() + dirent_size(name_len)
 }

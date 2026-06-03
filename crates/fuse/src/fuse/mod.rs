@@ -480,7 +480,8 @@ fn normalize_config(config: &mut Config) {
 mod tests {
     use super::ops::encode_dirents;
     use super::util::{
-        flags_to_9p_mode, fuse_open_flags, is_namespace_shape_error, is_transport_error,
+        dirent_size, flags_to_9p_mode, fuse_name_offset, fuse_open_flags, is_namespace_shape_error,
+        is_transport_error,
     };
     use super::wire::FOPEN_DIRECT_IO;
     use super::{
@@ -511,10 +512,67 @@ mod tests {
             qid: Qid::file(7),
             stat: Stat::new("alpha", Qid::file(7), 0o444),
         };
-        let bytes = encode_dirents(1, 0, 1024, &[entry]).expect("dirents should encode");
+        let bytes = encode_dirents(100, 200, 0, 1024, &[entry]).expect("dirents should encode");
         assert!(!bytes.is_empty());
-        let too_small = encode_dirents(1, 0, 1, &[]).expect("dirents should encode");
+        let too_small = encode_dirents(100, 200, 0, 1, &[]).expect("dirents should encode");
         assert!(too_small.is_empty());
+    }
+
+    #[test]
+    fn directory_encoding_matches_linux_fuse_dirent_parser() {
+        let entries = vec![
+            DirEntry {
+                name: b"active_artifact_loaded_drift".to_vec(),
+                qid: Qid::file(7),
+                stat: Stat::new("active_artifact_loaded_drift", Qid::file(7), 0o444),
+            },
+            DirEntry {
+                name: b"active_artifact_loaded_drift_summary".to_vec(),
+                qid: Qid::file(8),
+                stat: Stat::new("active_artifact_loaded_drift_summary", Qid::file(8), 0o444),
+            },
+            DirEntry {
+                name: b"old_code_module_count".to_vec(),
+                qid: Qid::file(9),
+                stat: Stat::new("old_code_module_count", Qid::file(9), 0o444),
+            },
+        ];
+
+        let bytes = encode_dirents(100, 200, 0, 1024, &entries).expect("dirents should encode");
+
+        assert_eq!(
+            linux_parse_dirent_names(&bytes),
+            vec![
+                ".".to_string(),
+                "..".to_string(),
+                "active_artifact_loaded_drift".to_string(),
+                "active_artifact_loaded_drift_summary".to_string(),
+                "old_code_module_count".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn directory_encoding_uses_supplied_special_entry_inodes() {
+        let bytes = encode_dirents(100, 200, 0, 1024, &[]).expect("dirents should encode");
+        let first_ino = u64::from_le_bytes(bytes[0..8].try_into().expect("first ino"));
+        let second_offset = dirent_size(1);
+        let second_ino = u64::from_le_bytes(
+            bytes[second_offset..second_offset + 8]
+                .try_into()
+                .expect("second ino"),
+        );
+
+        assert_eq!(first_ino, 100);
+        assert_eq!(second_ino, 200);
+    }
+
+    #[test]
+    fn dirent_size_uses_linux_name_offset_not_rust_flexible_array_size() {
+        assert_eq!(fuse_name_offset(), 24);
+        assert_eq!(dirent_size(1), 32);
+        assert_eq!(dirent_size(2), 32);
+        assert_eq!(dirent_size(9), 40);
     }
 
     #[test]
@@ -618,5 +676,32 @@ mod tests {
             config.congestion_threshold,
             default_congestion_threshold(DEFAULT_MAX_BACKGROUND)
         );
+    }
+
+    fn linux_parse_dirent_names(bytes: &[u8]) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut offset = 0_usize;
+        while bytes.len().saturating_sub(offset) >= fuse_name_offset() {
+            let namelen_offset = offset + 16;
+            let namelen = u32::from_ne_bytes(
+                bytes[namelen_offset..namelen_offset + 4]
+                    .try_into()
+                    .expect("namelen"),
+            ) as usize;
+            assert!(namelen > 0, "linux FUSE rejects zero-length names");
+            let name_start = offset + fuse_name_offset();
+            let name_end = name_start + namelen;
+            assert!(name_end <= bytes.len(), "name overruns reply");
+            let name = &bytes[name_start..name_end];
+            assert!(!name.contains(&b'/'), "linux FUSE rejects slash in names");
+            names.push(String::from_utf8(name.to_vec()).expect("utf8 name"));
+            offset += dirent_size(namelen);
+        }
+        assert_eq!(
+            offset,
+            bytes.len(),
+            "reply must not contain trailing records"
+        );
+        names
     }
 }

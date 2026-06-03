@@ -1,8 +1,8 @@
 //! `open` / `read` / `write` / `release` op handlers.
 
 use super::namespace_change::{
-    close_commit_refreshes_namespace_bindings, write_refreshes_namespace_bindings,
-    write_uses_control_timeout,
+    close_commit_refreshes_namespace_bindings, write_can_replay_after_namespace_refresh,
+    write_refreshes_namespace_bindings, write_uses_control_timeout,
 };
 use crate::{
     error::{Error, Result},
@@ -16,7 +16,7 @@ use crate::{
         R9pFuse,
     },
     node::{is_dir, is_symlink, read_directory_entries, CLOSE_COMMIT_MODE_FLAG},
-    p9::{OREAD, OTRUNC},
+    p9::{OREAD, OTRUNC, OWRITE},
 };
 use std::{fs::File, mem::size_of};
 
@@ -271,6 +271,30 @@ impl R9pFuse {
                     "write failed during reconnect and was not replayed",
                 ));
             }
+            Err(error)
+                if is_namespace_shape_error(&error)
+                    && write_can_replay_after_namespace_refresh(
+                        &node_path,
+                        handle.close_commit,
+                        input.offset,
+                    ) =>
+            {
+                self.record_diagnostic_with_context(
+                    "control_write_replay_after_namespace_refresh",
+                    header,
+                    error.errno,
+                    error.message().to_string(),
+                    self.diagnostic_context(header, payload),
+                );
+                self.refresh_node(header.nodeid)?;
+                self.write_from_reopened_write_handle(
+                    header.nodeid,
+                    input.fh,
+                    input.offset,
+                    data,
+                    write_timeout,
+                )?
+            }
             Err(error) if is_namespace_shape_error(&error) => {
                 self.refresh_node(header.nodeid)?;
                 return Err(Error::new(
@@ -291,6 +315,37 @@ impl R9pFuse {
             self.invalidate_namespace_bindings_after_reply(file, "namespace-changing write");
         }
         Ok(())
+    }
+
+    fn write_from_reopened_write_handle(
+        &mut self,
+        nodeid: u64,
+        handle_id: u64,
+        offset: u64,
+        data: &[u8],
+        write_timeout: std::time::Duration,
+    ) -> Result<u32> {
+        let (client, node_fid) = self.bound_node_fid(nodeid)?;
+        let fid = client.clone_fid_timeout(node_fid, self.control_timeout())?;
+        if let Err(error) = client.open_timeout(fid, OWRITE, self.control_timeout()) {
+            let _ = client.clunk_timeout(fid, self.control_timeout());
+            return Err(error);
+        }
+        let old_handle =
+            match self
+                .nodes()?
+                .replace_write_handle_binding(handle_id, client.clone(), fid)
+            {
+                Ok(old_handle) => old_handle,
+                Err(error) => {
+                    let _ = client.clunk_timeout(fid, self.control_timeout());
+                    return Err(error);
+                }
+            };
+        let _ = old_handle
+            .client
+            .clunk_timeout(old_handle.fid, self.control_timeout());
+        client.write_timeout(fid, offset, data, write_timeout)
     }
 
     pub(in crate::fuse) fn release(

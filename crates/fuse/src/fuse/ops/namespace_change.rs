@@ -13,11 +13,16 @@ pub(super) fn close_commit_refreshes_namespace_bindings(close_commit: bool) -> b
     close_commit
 }
 
-pub(super) fn write_refreshes_namespace_bindings(
+pub(super) fn write_refreshes_namespace_bindings(path: &[Vec<u8>], close_commit: bool) -> bool {
+    is_control_file_name(path) && !close_commit
+}
+
+pub(super) fn write_can_replay_after_namespace_refresh(
     path: &[Vec<u8>],
     close_commit: bool,
+    offset: u64,
 ) -> bool {
-    is_control_file_name(path) && !close_commit
+    offset == 0 && (close_commit || is_control_file_name(path))
 }
 
 fn is_control_file_name(path: &[Vec<u8>]) -> bool {
@@ -29,8 +34,8 @@ fn is_control_file_name(path: &[Vec<u8>]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        close_commit_refreshes_namespace_bindings, write_refreshes_namespace_bindings,
-        write_uses_control_timeout,
+        close_commit_refreshes_namespace_bindings, write_can_replay_after_namespace_refresh,
+        write_refreshes_namespace_bindings, write_uses_control_timeout,
     };
 
     fn path(segments: &[&[u8]]) -> Vec<Vec<u8>> {
@@ -76,5 +81,17 @@ mod tests {
 
         assert!(write_refreshes_namespace_bindings(&ctl, false));
         assert!(!write_refreshes_namespace_bindings(&ctl, true));
+    }
+
+    #[test]
+    fn control_writes_can_replay_after_namespace_refresh_only_from_start() {
+        let ctl = path(&[b"runtime", b"framework", b"candidates", b"full", b"ctl"]);
+        let command = path(&[b"runtime", b"framework", b"reload", b"requests", b"new"]);
+        let file = path(&[b"entries", b"note"]);
+
+        assert!(write_can_replay_after_namespace_refresh(&ctl, false, 0));
+        assert!(write_can_replay_after_namespace_refresh(&command, true, 0));
+        assert!(!write_can_replay_after_namespace_refresh(&ctl, false, 1));
+        assert!(!write_can_replay_after_namespace_refresh(&file, false, 0));
     }
 }

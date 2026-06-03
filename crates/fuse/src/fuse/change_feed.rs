@@ -190,7 +190,7 @@ fn change_feed_loop(fs: &mut R9pFuse, file: &mut File, path: String, stop: Arc<A
                     error.message(),
                 );
                 fs.apply_coarse_invalidation(file, "change feed degraded");
-                if is_transport_error(&error) {
+                if feed_error_requires_data_reconnect(&error) {
                     feed_client = None;
                     data_client_stale = true;
                 }
@@ -230,7 +230,15 @@ fn consume_feed_until_error(
             since_event_id.as_deref(),
             fs.config.change_feed_cursor_template.as_deref(),
         );
-        let fid = open_feed(client, &poll_path, fs.lookup_timeout())?;
+        let fid = match open_feed(client, &poll_path, fs.lookup_timeout()) {
+            Ok(fid) => fid,
+            Err(error) if is_feed_poll_timeout(&error) => {
+                fs.status.set_change_feed("connected", None, None);
+                sleep_interruptible(fs.config.change_feed_poll_interval, stop);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         match client.read_timeout(fid, 0, 64 * 1024, fs.read_timeout()) {
             Ok(data) if data.is_empty() => {
                 let _ = client.clunk_timeout(fid, fs.control_timeout());
@@ -261,6 +269,14 @@ fn consume_feed_until_error(
         sleep_interruptible(fs.config.change_feed_poll_interval, stop);
     }
     Ok(())
+}
+
+fn is_feed_poll_timeout(error: &Error) -> bool {
+    error.errno == libc::ETIMEDOUT
+}
+
+fn feed_error_requires_data_reconnect(error: &Error) -> bool {
+    is_transport_error(error) && !is_feed_poll_timeout(error)
 }
 
 fn open_feed(client: &Client, path: &str, timeout: Duration) -> Result<Fid> {
@@ -465,8 +481,10 @@ fn scope_matches(configured_scope: Option<&str>, event_scope: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        feed_poll_path, parse_namespace_change_record, parse_namespace_path, scope_matches,
+        feed_error_requires_data_reconnect, feed_poll_path, is_feed_poll_timeout,
+        parse_namespace_change_record, parse_namespace_path, scope_matches,
     };
+    use crate::error::Error;
 
     #[test]
     fn parses_key_value_namespace_change_record() {
@@ -528,5 +546,16 @@ mod tests {
             feed_poll_path("/feeds/namespace", None, None),
             "/feeds/namespace"
         );
+    }
+
+    #[test]
+    fn feed_poll_timeout_does_not_stale_data_client() {
+        let timeout = Error::new(libc::ETIMEDOUT, "9P response timeout after 5.000s");
+        assert!(is_feed_poll_timeout(&timeout));
+        assert!(!feed_error_requires_data_reconnect(&timeout));
+
+        let reset = Error::new(libc::ECONNRESET, "connection reset by peer");
+        assert!(!is_feed_poll_timeout(&reset));
+        assert!(feed_error_requires_data_reconnect(&reset));
     }
 }

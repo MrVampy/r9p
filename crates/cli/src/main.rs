@@ -54,7 +54,7 @@ fn run() -> CliResult<()> {
     match command.as_str() {
         "version" => version_cmd(config, args),
         "attach" => attach_cmd(config, args),
-        "read" => read_cmd(config, args, ReadMode::Read),
+        "read" | "cat" => read_cmd(config, args, ReadMode::Read),
         "readfd" => read_cmd(config, args, ReadMode::ReadFd),
         "read-to" if config.machine => read_to_cmd(config, args),
         "write" => write_cmd(config, args, WriteMode::Write),
@@ -208,6 +208,7 @@ pub(crate) fn usage() -> ! {
     eprintln!("  version [service]");
     eprintln!("  attach [service]");
     eprintln!("  read name");
+    eprintln!("  cat name                 alias for read name");
     eprintln!("  readfd name");
     eprintln!("  write [-l] name");
     eprintln!("  write-at name offset");

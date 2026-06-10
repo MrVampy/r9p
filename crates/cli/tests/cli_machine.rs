@@ -318,6 +318,17 @@ fn machine_readfd_streams_raw_stdout() -> TestResult<()> {
 }
 
 #[test]
+fn machine_cat_alias_reads_file() -> TestResult<()> {
+    let shared = SharedFile::new(b"agent\n".to_vec());
+    let (address, handle) = start_server(shared)?;
+
+    let output = run_machine(&address, &["cat", "/data"], None)?;
+    assert_success(&output)?;
+    assert_stdout(&output, "read\t6167656e740a\n")?;
+    join_server(handle)
+}
+
+#[test]
 fn machine_read_to_streams_to_local_file_and_reports_count() -> TestResult<()> {
     let payload = large_payload();
     let shared = SharedFile::new(payload.clone());

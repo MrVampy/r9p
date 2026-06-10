@@ -124,6 +124,7 @@ pub(crate) fn parse_global_options(args: &mut Vec<String>) -> CliResult<Config> 
             continue;
         }
         if arg == "-a"
+            || arg == "--bind"
             || arg == "-A"
             || arg == "-u"
             || arg == "-m"
@@ -136,6 +137,11 @@ pub(crate) fn parse_global_options(args: &mut Vec<String>) -> CliResult<Config> 
                 .clone();
             set_global_option(&mut config, arg, value)?;
             i += 2;
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--bind=") {
+            set_global_option(&mut config, "--bind", value.to_string())?;
+            i += 1;
             continue;
         }
         if let Some(value) = arg.strip_prefix("-a") {
@@ -166,7 +172,7 @@ pub(crate) fn parse_global_options(args: &mut Vec<String>) -> CliResult<Config> 
 
 fn set_global_option(config: &mut Config, option: &str, value: String) -> CliResult<()> {
     match option {
-        "-a" => config.address = Some(value),
+        "-a" | "--bind" => config.address = Some(value),
         "-A" => config.aname = value,
         "-u" => config.uname = value,
         "-m" => {
@@ -202,7 +208,7 @@ fn parse_request_timeout(value: &str) -> CliResult<Option<Duration>> {
 
 pub(crate) fn usage() -> ! {
     eprintln!(
-        "usage: r9p [-n] [--machine] [-a address] [-A aname] [-u uname] [-m msize] [--request-timeout seconds] [--control-timeout seconds] cmd args..."
+        "usage: r9p [-n] [--machine] [-a|--bind address] [-A aname] [-u uname] [-m msize] [--request-timeout seconds] [--control-timeout seconds] cmd args..."
     );
     eprintln!("possible cmds:");
     eprintln!("  version [service]");
@@ -234,7 +240,7 @@ pub(crate) fn usage() -> ! {
     eprintln!("  create name...");
     eprintln!("  mkdir name...");
     eprintln!("  con [-r] name");
-    eprintln!("without -a, name elem/path means /path on server unix!$NAMESPACE/elem");
+    eprintln!("without -a/--bind, name elem/path means /path on server unix!$NAMESPACE/elem");
     std::process::exit(2);
 }
 
@@ -293,6 +299,31 @@ mod tests {
             args,
             ["read".to_string(), "/runtime/events/stream".to_string()]
         );
+    }
+
+    #[test]
+    fn global_bind_alias_sets_read_endpoint() {
+        let mut args = vec![
+            "--bind".to_string(),
+            "192.168.0.30:9564".to_string(),
+            "read".to_string(),
+            "/runtime/status".to_string(),
+        ];
+        let config = parse_global_options(&mut args).expect("options should parse");
+        assert_eq!(config.address.as_deref(), Some("192.168.0.30:9564"));
+        assert_eq!(args, ["read".to_string(), "/runtime/status".to_string()]);
+    }
+
+    #[test]
+    fn global_bind_equals_alias_sets_read_endpoint() {
+        let mut args = vec![
+            "--bind=192.168.0.30:9564".to_string(),
+            "cat".to_string(),
+            "/runtime/status".to_string(),
+        ];
+        let config = parse_global_options(&mut args).expect("options should parse");
+        assert_eq!(config.address.as_deref(), Some("192.168.0.30:9564"));
+        assert_eq!(args, ["cat".to_string(), "/runtime/status".to_string()]);
     }
 
     #[test]

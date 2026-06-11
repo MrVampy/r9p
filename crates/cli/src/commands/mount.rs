@@ -133,7 +133,15 @@ fn start_systemd_mount(config: &MountSupervisorConfig, mount_args: &[String]) ->
     let executable =
         env::current_exe().map_err(|error| cli_error(format!("resolve current r9p: {error}")))?;
     let mut command = Command::new("systemd-run");
-    command.args(["--user", "--unit", unit, "--collect", "--same-dir"]);
+    command.args([
+        "--user",
+        "--unit",
+        unit,
+        "--collect",
+        "--same-dir",
+        "--property=Restart=on-failure",
+        "--property=RestartSec=2",
+    ]);
     if let Ok(path) = env::var("PATH") {
         command.arg(format!("--setenv=PATH={path}"));
     }

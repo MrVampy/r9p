@@ -111,10 +111,30 @@ impl MountCleanup {
 
 pub(super) fn mount_fuse(mountpoint: &Path) -> Result<FuseMount> {
     let absolute_mountpoint = absolute_mountpoint(mountpoint)?;
+    clear_stale_fuse_mount(&absolute_mountpoint);
     let mountpoint_str = absolute_mountpoint
         .to_str()
         .ok_or_else(|| Error::new(libc::EINVAL, "mountpoint is not valid UTF-8"))?
         .to_string();
+    let fd = match mount_fuse_attempt(&mountpoint_str, true) {
+        Ok(fd) => fd,
+        Err(_) => mount_fuse_attempt(&mountpoint_str, false)?,
+    };
+    let connection_id = connection_id_for_mountpoint(&mountpoint_str);
+    let fuse_fd = Arc::new(AtomicI32::new(fd));
+    let cleanup = MountCleanup {
+        mountpoint: absolute_mountpoint,
+        connection_id,
+        fuse_fd: Arc::clone(&fuse_fd),
+    };
+    install_unmount_on_signal(cleanup.clone());
+    Ok(FuseMount {
+        file: Some(unsafe { File::from_raw_fd(fd) }),
+        cleanup,
+    })
+}
+
+fn mount_fuse_attempt(mountpoint_str: &str, auto_unmount: bool) -> Result<RawFd> {
     let mut sockets = [0_i32; 2];
     let rc = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, sockets.as_mut_ptr()) };
     if rc < 0 {
@@ -131,33 +151,99 @@ pub(super) fn mount_fuse(mountpoint: &Path) -> Result<FuseMount> {
     if pid == 0 {
         unsafe {
             libc::close(sockets[1]);
-            child_exec_fusermount(sockets[0], &mountpoint_str);
+            child_exec_fusermount(sockets[0], mountpoint_str, auto_unmount);
         }
     }
     unsafe {
         libc::close(sockets[0]);
     }
     let fd = recv_fd(sockets[1]);
-    unsafe {
-        libc::close(sockets[1]);
+    match (auto_unmount, fd) {
+        (true, Ok(fd)) => {
+            let mut status = 0_i32;
+            unsafe {
+                libc::waitpid(pid, &mut status, libc::WNOHANG);
+            }
+            std::mem::forget(unsafe { File::from_raw_fd(sockets[1]) });
+            Ok(fd)
+        }
+        (_, fd) => {
+            unsafe {
+                libc::close(sockets[1]);
+            }
+            let mut status = 0_i32;
+            unsafe {
+                libc::waitpid(pid, &mut status, 0);
+            }
+            fd
+        }
     }
-    let mut status = 0_i32;
-    unsafe {
-        libc::waitpid(pid, &mut status, 0);
+}
+
+fn clear_stale_fuse_mount(mountpoint: &Path) {
+    for _ in 0..4 {
+        if !mountpoint_is_stale_fuse(mountpoint) {
+            return;
+        }
+        lazy_unmount(mountpoint);
     }
-    let fd = fd?;
-    let connection_id = connection_id_for_mountpoint(&mountpoint_str);
-    let fuse_fd = Arc::new(AtomicI32::new(fd));
-    let cleanup = MountCleanup {
-        mountpoint: absolute_mountpoint,
-        connection_id,
-        fuse_fd: Arc::clone(&fuse_fd),
+}
+
+fn mountpoint_is_stale_fuse(mountpoint: &Path) -> bool {
+    if !mountpoint_listed_as_fuse(mountpoint) {
+        return false;
+    }
+    match std::fs::metadata(mountpoint) {
+        Ok(_) => false,
+        Err(error) => matches!(
+            error.raw_os_error(),
+            Some(libc::ENOTCONN) | Some(libc::ENOENT) | Some(libc::EIO)
+        ),
+    }
+}
+
+fn mountpoint_listed_as_fuse(mountpoint: &Path) -> bool {
+    let Some(target) = mountpoint.to_str() else {
+        return false;
     };
-    install_unmount_on_signal(cleanup.clone());
-    Ok(FuseMount {
-        file: Some(unsafe { File::from_raw_fd(fd) }),
-        cleanup,
+    let Ok(mounts) = std::fs::read_to_string("/proc/self/mounts") else {
+        return false;
+    };
+    mounts.lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        let _device = fields.next();
+        let (Some(path), Some(fstype)) = (fields.next(), fields.next()) else {
+            return false;
+        };
+        fstype.starts_with("fuse") && unescape_mounts_path(path) == target
     })
+}
+
+fn unescape_mounts_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    let mut bytes = path.bytes().peekable();
+    while let Some(byte) = bytes.next() {
+        if byte == b'\\' {
+            let mut octal = [0_u8; 3];
+            let mut count = 0;
+            while count < 3 {
+                match bytes.peek() {
+                    Some(digit) if digit.is_ascii_digit() => {
+                        octal[count] = *digit - b'0';
+                        bytes.next();
+                        count += 1;
+                    }
+                    _ => break,
+                }
+            }
+            if count == 3 {
+                out.push((octal[0] * 64 + octal[1] * 8 + octal[2]) as char);
+                continue;
+            }
+        }
+        out.push(byte as char);
+    }
+    out
 }
 
 fn absolute_mountpoint(mountpoint: &Path) -> Result<PathBuf> {
@@ -169,23 +255,37 @@ fn absolute_mountpoint(mountpoint: &Path) -> Result<PathBuf> {
         .map_err(|error| Error::io("resolve mountpoint path", error))
 }
 
-unsafe fn child_exec_fusermount(comm_fd: RawFd, mountpoint: &str) -> ! {
+unsafe fn child_exec_fusermount(comm_fd: RawFd, mountpoint: &str, auto_unmount: bool) -> ! {
     unblock_termination_signals();
     let env_name = CString::new("_FUSE_COMMFD").expect("static env name contains no NUL");
     let env_value = CString::new(comm_fd.to_string()).expect("fd string contains no NUL");
     let mountpoint = CString::new(mountpoint).expect("mountpoint contains no NUL");
     libc::setenv(env_name.as_ptr(), env_value.as_ptr(), 1);
 
+    let opt_flag = CString::new("-o").expect("static arg contains no NUL");
+    let opt_value = CString::new("auto_unmount").expect("static arg contains no NUL");
     let dashdash = CString::new("--").expect("static arg contains no NUL");
     for binary in fusermount_candidates() {
         let fusermount = CString::new(binary).expect("static command contains no NUL");
-        libc::execlp(
-            fusermount.as_ptr(),
-            fusermount.as_ptr(),
-            dashdash.as_ptr(),
-            mountpoint.as_ptr(),
-            ptr::null::<libc::c_char>(),
-        );
+        if auto_unmount {
+            libc::execlp(
+                fusermount.as_ptr(),
+                fusermount.as_ptr(),
+                opt_flag.as_ptr(),
+                opt_value.as_ptr(),
+                dashdash.as_ptr(),
+                mountpoint.as_ptr(),
+                ptr::null::<libc::c_char>(),
+            );
+        } else {
+            libc::execlp(
+                fusermount.as_ptr(),
+                fusermount.as_ptr(),
+                dashdash.as_ptr(),
+                mountpoint.as_ptr(),
+                ptr::null::<libc::c_char>(),
+            );
+        }
     }
     libc::_exit(1);
 }

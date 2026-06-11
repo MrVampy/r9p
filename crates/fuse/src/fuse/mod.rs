@@ -88,6 +88,56 @@ pub struct R9pFuse {
     status: MountStatus,
     uid: u32,
     gid: u32,
+    shape_recovery: Arc<Mutex<ShapeRecovery>>,
+}
+
+#[derive(Clone)]
+pub(in crate::fuse) struct ShapeRecovery {
+    failures: u32,
+    window_start: Option<std::time::Instant>,
+    last_forced: Option<std::time::Instant>,
+}
+
+impl ShapeRecovery {
+    const WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+    const COOLDOWN: std::time::Duration = std::time::Duration::from_secs(5);
+    const THRESHOLD: u32 = 8;
+
+    fn new() -> Self {
+        Self {
+            failures: 0,
+            window_start: None,
+            last_forced: None,
+        }
+    }
+
+    fn note(&mut self) -> bool {
+        self.note_at(std::time::Instant::now())
+    }
+
+    fn note_at(&mut self, now: std::time::Instant) -> bool {
+        match self.window_start {
+            Some(start) if now.duration_since(start) <= Self::WINDOW => {
+                self.failures += 1;
+            }
+            _ => {
+                self.window_start = Some(now);
+                self.failures = 1;
+            }
+        }
+        if self.failures < Self::THRESHOLD {
+            return false;
+        }
+        if let Some(last) = self.last_forced {
+            if now.duration_since(last) < Self::COOLDOWN {
+                return false;
+            }
+        }
+        self.last_forced = Some(now);
+        self.failures = 0;
+        self.window_start = None;
+        true
+    }
 }
 
 #[derive(Clone)]
@@ -159,6 +209,7 @@ impl R9pFuse {
             status,
             uid,
             gid,
+            shape_recovery: Arc::new(Mutex::new(ShapeRecovery::new())),
         };
         fs.run(mount.file_mut())
     }
@@ -582,6 +633,27 @@ mod tests {
         assert_eq!(fuse_open_flags(false, ORDWR), 0);
         assert_eq!(fuse_open_flags(false, OWRITE | OTRUNC), 0);
         assert_eq!(fuse_open_flags(true, OREAD), 0);
+    }
+
+    #[test]
+    fn shape_recovery_forces_reconnect_after_threshold_with_cooldown() {
+        use std::time::{Duration, Instant};
+        let mut recovery = super::ShapeRecovery::new();
+        let start = Instant::now();
+        for i in 0..7 {
+            assert!(!recovery.note_at(start + Duration::from_millis(i)));
+        }
+        assert!(recovery.note_at(start + Duration::from_millis(7)));
+        for i in 8..16 {
+            assert!(!recovery.note_at(start + Duration::from_millis(i)));
+        }
+        let later = start + Duration::from_secs(6);
+        assert!(recovery.note_at(later));
+        assert!(!recovery.note_at(later + Duration::from_millis(1)));
+        let mut spaced = super::ShapeRecovery::new();
+        for i in 0..20 {
+            assert!(!spaced.note_at(start + Duration::from_secs(11 * i)));
+        }
     }
 
     #[test]

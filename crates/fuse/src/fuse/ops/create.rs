@@ -36,7 +36,7 @@ impl R9pFuse {
             match self.create_remote(header.nodeid, name, perm, mode) {
                 Ok(created) => created,
                 Err(error) if is_namespace_shape_error(&error) => {
-                    self.refresh_node(header.nodeid)?;
+                    self.recover_namespace_shape(header.nodeid)?;
                     self.create_remote(header.nodeid, name, perm, mode)?
                 }
                 Err(error) => return Err(error),
@@ -117,7 +117,7 @@ impl R9pFuse {
             match self.create_remote(header.nodeid, name, DMDIR | (input.mode & 0o777), OREAD) {
                 Ok(created) => created,
                 Err(error) if is_namespace_shape_error(&error) => {
-                    self.refresh_node(header.nodeid)?;
+                    self.recover_namespace_shape(header.nodeid)?;
                     self.create_remote(header.nodeid, name, DMDIR | (input.mode & 0o777), OREAD)?
                 }
                 Err(error) => return Err(error),
@@ -142,7 +142,7 @@ impl R9pFuse {
             match self.create_remote(header.nodeid, name, input.mode & 0o777, OREAD) {
                 Ok(created) => created,
                 Err(error) if is_namespace_shape_error(&error) => {
-                    self.refresh_node(header.nodeid)?;
+                    self.recover_namespace_shape(header.nodeid)?;
                     self.create_remote(header.nodeid, name, input.mode & 0o777, OREAD)?
                 }
                 Err(error) => return Err(error),

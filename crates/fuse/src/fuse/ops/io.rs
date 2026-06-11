@@ -45,7 +45,7 @@ impl R9pFuse {
                 ));
             }
             Err(error) if is_namespace_shape_error(&error) => {
-                self.refresh_node(header.nodeid)?;
+                self.recover_namespace_shape(header.nodeid)?;
                 return Err(Error::new(
                     libc::ESTALE,
                     "symlink handle is stale after namespace refresh",
@@ -68,7 +68,7 @@ impl R9pFuse {
         match self.open_once(file, header, input, is_dir_open) {
             Ok(()) => Ok(()),
             Err(error) if is_namespace_shape_error(&error) => {
-                self.refresh_node(header.nodeid)?;
+                self.recover_namespace_shape(header.nodeid)?;
                 self.open_once(file, header, input, is_dir_open)
             }
             Err(error) if is_transport_error(&error) && replayable => {
@@ -194,11 +194,11 @@ impl R9pFuse {
                 if is_namespace_shape_error(&error)
                     && read_handle_is_replayable(handle.is_dir, handle.write_on_release) =>
             {
-                self.refresh_node(header.nodeid)?;
+                self.recover_namespace_shape(header.nodeid)?;
                 self.read_from_reopened_handle(header.nodeid, input.fh, input.offset, input.size)?
             }
             Err(error) if is_namespace_shape_error(&error) => {
-                self.refresh_node(header.nodeid)?;
+                self.recover_namespace_shape(header.nodeid)?;
                 return Err(Error::new(libc::ESTALE, "file handle is not replayable"));
             }
             Err(error) => return Err(error),
@@ -286,7 +286,7 @@ impl R9pFuse {
                     error.message().to_string(),
                     self.diagnostic_context(header, payload),
                 );
-                self.refresh_node(header.nodeid)?;
+                self.recover_namespace_shape(header.nodeid)?;
                 self.write_from_reopened_write_handle(
                     header.nodeid,
                     input.fh,
@@ -296,7 +296,7 @@ impl R9pFuse {
                 )?
             }
             Err(error) if is_namespace_shape_error(&error) => {
-                self.refresh_node(header.nodeid)?;
+                self.recover_namespace_shape(header.nodeid)?;
                 return Err(Error::new(
                     libc::EIO,
                     "write failed during namespace refresh and was not replayed",
@@ -392,7 +392,7 @@ impl R9pFuse {
                             },
                         );
                     } else {
-                        self.refresh_node(header.nodeid)?;
+                        self.recover_namespace_shape(header.nodeid)?;
                         return Err(Error::new(
                             libc::EIO,
                             "release failed during namespace refresh; close result is unknown",

@@ -27,7 +27,7 @@ impl R9pFuse {
                 self.getattr_once(file, header)
             }
             Err(error) if is_namespace_shape_error(&error) => {
-                self.refresh_node(header.nodeid)?;
+                self.recover_namespace_shape(header.nodeid)?;
                 self.getattr_once(file, header)
             }
             Err(error) => Err(error),
@@ -57,14 +57,14 @@ impl R9pFuse {
         match self.setattr_once(file, header, input) {
             Ok(()) => Ok(()),
             Err(error) if is_namespace_shape_error(&error) && uses_handle => {
-                self.refresh_node(header.nodeid)?;
+                self.recover_namespace_shape(header.nodeid)?;
                 Err(Error::new(
                     libc::ESTALE,
                     "setattr file handle is stale after namespace refresh",
                 ))
             }
             Err(error) if is_namespace_shape_error(&error) => {
-                self.refresh_node(header.nodeid)?;
+                self.recover_namespace_shape(header.nodeid)?;
                 self.setattr_once(file, header, input)
             }
             Err(error) => Err(error),

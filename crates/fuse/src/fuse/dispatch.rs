@@ -296,6 +296,36 @@ impl R9pFuse {
         Ok(())
     }
 
+    pub(super) fn recover_namespace_shape(&mut self, nodeid: u64) -> Result<()> {
+        match self.refresh_node(nodeid) {
+            Ok(()) => {
+                let force = self
+                    .shape_recovery
+                    .lock()
+                    .map(|mut recovery| recovery.note())
+                    .unwrap_or(false);
+                if force {
+                    if self.config.debug {
+                        eprintln!(
+                            "r9p mount: repeated namespace shape failures; forcing reconnect"
+                        );
+                    }
+                    self.reconnect()?;
+                }
+                Ok(())
+            }
+            Err(refresh_error) => {
+                if self.config.debug {
+                    eprintln!(
+                        "r9p mount: node refresh failed ({}); escalating to reconnect",
+                        refresh_error.message()
+                    );
+                }
+                self.reconnect().map_err(|_| refresh_error)
+            }
+        }
+    }
+
     pub(super) fn refresh_node(&mut self, nodeid: u64) -> Result<()> {
         if self.config.debug {
             eprintln!("r9p mount: refreshing path-backed node {nodeid}");

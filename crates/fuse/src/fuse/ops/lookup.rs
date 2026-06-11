@@ -36,7 +36,7 @@ impl R9pFuse {
                 self.lookup_once(file, header, &name)
             }
             Err(error) if is_namespace_shape_error(&error) => {
-                self.refresh_node(header.nodeid)?;
+                self.recover_namespace_shape(header.nodeid)?;
                 self.lookup_once(file, header, &name)
             }
             Err(error) => Err(error),

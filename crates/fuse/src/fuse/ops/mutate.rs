@@ -44,7 +44,7 @@ impl R9pFuse {
                 self.walk_child_for_mutation(header.nodeid, name)?
             }
             Err(error) if is_namespace_shape_error(&error) => {
-                self.refresh_node(header.nodeid)?;
+                self.recover_namespace_shape(header.nodeid)?;
                 self.walk_child_for_mutation(header.nodeid, name)?
             }
             Err(error) => return Err(error),
@@ -79,7 +79,7 @@ impl R9pFuse {
                 self.prepare_rename(header.nodeid, old_name, new_name)?
             }
             Err(error) if is_namespace_shape_error(&error) => {
-                self.refresh_node(header.nodeid)?;
+                self.recover_namespace_shape(header.nodeid)?;
                 self.prepare_rename(header.nodeid, old_name, new_name)?
             }
             Err(error) => return Err(error),

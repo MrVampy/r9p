@@ -89,7 +89,7 @@ impl R9pFuse {
                             },
                         );
                     } else {
-                        self.refresh_node(header.nodeid)?;
+                        self.recover_namespace_shape(header.nodeid)?;
                         return Err(Error::new(
                             libc::EIO,
                             "flush failed during namespace refresh; close result is unknown",

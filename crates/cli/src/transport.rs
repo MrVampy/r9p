@@ -1,6 +1,7 @@
 use std::{
-    io::{Read, Result as IoResult, Write},
-    net::TcpStream,
+    error::Error as StdError,
+    io::{self, Read, Result as IoResult, Write},
+    net::{TcpStream, ToSocketAddrs},
     path::Path,
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     time::Duration,
@@ -40,13 +41,39 @@ pub(crate) fn dial_address(
         return dial_command(command);
     }
     let socket = blocking::parse_tcp_address(address)?;
-    let stream = TcpStream::connect(&socket)
-        .map_err(|error| cli_error(format!("connect {socket}: {error}")))?;
+    let stream = connect_tcp_stream(&socket, request_timeout)?;
     stream
         .set_nodelay(true)
         .map_err(|error| cli_error(format!("set TCP_NODELAY: {error}")))?;
     apply_tcp_timeout(&stream, request_timeout)?;
     Ok(Box::new(stream))
+}
+
+fn connect_tcp_stream(socket: &str, request_timeout: Option<Duration>) -> CliResult<TcpStream> {
+    match request_timeout {
+        Some(timeout) => connect_tcp_stream_with_timeout(socket, timeout),
+        None => TcpStream::connect(socket)
+            .map_err(|error| transport_io_error(format!("connect {socket}"), error)),
+    }
+}
+
+fn connect_tcp_stream_with_timeout(socket: &str, timeout: Duration) -> CliResult<TcpStream> {
+    let addrs = socket
+        .to_socket_addrs()
+        .map_err(|error| transport_io_error(format!("resolve {socket}"), error))?;
+    let mut last_error = None;
+    for addr in addrs {
+        match TcpStream::connect_timeout(&addr, timeout) {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    match last_error {
+        Some(error) => Err(transport_io_error(format!("connect {socket}"), error)),
+        None => Err(cli_error(format!(
+            "connect {socket}: no socket addresses resolved"
+        ))),
+    }
 }
 
 fn apply_tcp_timeout(stream: &TcpStream, request_timeout: Option<Duration>) -> CliResult<()> {
@@ -173,9 +200,24 @@ pub(crate) fn read_response(stream: &mut Box<dyn ReadWrite>) -> CliResult<RMessa
     Ok(codec::decode_rmessage(&frame)?)
 }
 
+fn transport_io_error(context: impl AsRef<str>, error: io::Error) -> Box<dyn StdError> {
+    if matches!(
+        error.kind(),
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+    ) {
+        return cli_error(format!(
+            "{}: 9P transport timeout or would-block: {error}",
+            context.as_ref()
+        ));
+    }
+    cli_error(format!("{}: {error}", context.as_ref()))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{command_address, unix_address_path};
+    use std::io;
+
+    use super::{command_address, transport_io_error, unix_address_path};
 
     #[test]
     fn accepts_legacy_and_descriptor_unix_address_forms() {
@@ -201,5 +243,15 @@ mod tests {
             Some("ssh host nc -U /tmp/r9p.sock")
         );
         assert_eq!(command_address("tcp!127.0.0.1!564"), None);
+    }
+
+    #[test]
+    fn transport_timeout_errors_are_typed() {
+        let message = transport_io_error(
+            "connect 192.0.2.1:564",
+            io::Error::from(io::ErrorKind::TimedOut),
+        )
+        .to_string();
+        assert!(message.contains("9P transport timeout or would-block"));
     }
 }

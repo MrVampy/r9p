@@ -294,7 +294,7 @@ fn assert_descriptor_revision_current(
     expected_revision: &str,
 ) -> CliResult<()> {
     match descriptor.extra_fields.get("git_revision") {
-        Some(revision) if revision == &expected_revision => Ok(()),
+        Some(revision) if revision == expected_revision => Ok(()),
         Some(revision) => Err(cli_error(format!(
             "r9p_export_git_revision_stale:expected={expected_revision}:actual={revision}"
         ))),

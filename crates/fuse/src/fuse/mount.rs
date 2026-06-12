@@ -215,35 +215,8 @@ fn mountpoint_listed_as_fuse(mountpoint: &Path) -> bool {
         let (Some(path), Some(fstype)) = (fields.next(), fields.next()) else {
             return false;
         };
-        fstype.starts_with("fuse") && unescape_mounts_path(path) == target
+        fstype.starts_with("fuse") && decode_mounts_path(path) == target.as_bytes()
     })
-}
-
-fn unescape_mounts_path(path: &str) -> String {
-    let mut out = String::with_capacity(path.len());
-    let mut bytes = path.bytes().peekable();
-    while let Some(byte) = bytes.next() {
-        if byte == b'\\' {
-            let mut octal = [0_u8; 3];
-            let mut count = 0;
-            while count < 3 {
-                match bytes.peek() {
-                    Some(digit) if digit.is_ascii_digit() => {
-                        octal[count] = *digit - b'0';
-                        bytes.next();
-                        count += 1;
-                    }
-                    _ => break,
-                }
-            }
-            if count == 3 {
-                out.push((octal[0] * 64 + octal[1] * 8 + octal[2]) as char);
-                continue;
-            }
-        }
-        out.push(byte as char);
-    }
-    out
 }
 
 fn absolute_mountpoint(mountpoint: &Path) -> Result<PathBuf> {
@@ -436,7 +409,7 @@ fn parse_connection_id_from_mountinfo(mountinfo: &str, mountpoint: &str) -> Opti
         if fields.len() < 5 {
             continue;
         }
-        if decode_mountinfo_path(fields[4]) != mountpoint {
+        if decode_mounts_path(fields[4]) != mountpoint.as_bytes() {
             continue;
         }
         let (_major, minor) = fields[2].split_once(':')?;
@@ -445,35 +418,34 @@ fn parse_connection_id_from_mountinfo(mountinfo: &str, mountpoint: &str) -> Opti
     None
 }
 
-fn decode_mountinfo_path(path: &str) -> String {
-    let mut out = String::with_capacity(path.len());
-    let mut bytes = path.as_bytes().iter().copied().peekable();
+fn decode_mounts_path(path: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(path.len());
+    let mut bytes = path.bytes().peekable();
     while let Some(byte) = bytes.next() {
         if byte != b'\\' {
-            out.push(byte as char);
+            out.push(byte);
             continue;
         }
-        let mut octal = [0_u8; 3];
-        let mut complete = true;
-        for digit in &mut octal {
-            match bytes.next() {
-                Some(value @ b'0'..=b'7') => *digit = value,
-                Some(value) => {
-                    out.push('\\');
-                    out.push(value as char);
-                    complete = false;
-                    break;
+        let mut digits = [0_u8; 3];
+        let mut count = 0;
+        while count < 3 {
+            match bytes.peek() {
+                Some(&digit @ b'0'..=b'7') => {
+                    digits[count] = digit;
+                    bytes.next();
+                    count += 1;
                 }
-                None => {
-                    out.push('\\');
-                    complete = false;
-                    break;
-                }
+                _ => break,
             }
         }
-        if complete {
-            let value = (octal[0] - b'0') * 64 + (octal[1] - b'0') * 8 + (octal[2] - b'0');
-            out.push(value as char);
+        let value = digits[..count]
+            .iter()
+            .fold(0_u32, |acc, digit| acc * 8 + u32::from(digit - b'0'));
+        if count == 3 && value <= 0xFF {
+            out.push(value as u8);
+        } else {
+            out.push(b'\\');
+            out.extend_from_slice(&digits[..count]);
         }
     }
     out
@@ -481,7 +453,7 @@ fn decode_mountinfo_path(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_mountinfo_path, fusermount_candidates, parse_connection_id_from_mountinfo};
+    use super::{decode_mounts_path, fusermount_candidates, parse_connection_id_from_mountinfo};
 
     #[test]
     fn prefers_fusermount3_before_fuse2_helper() {
@@ -503,9 +475,30 @@ mod tests {
     #[test]
     fn decodes_mountinfo_octal_escapes() {
         assert_eq!(
-            "/tmp/r9p mount/live",
-            decode_mountinfo_path("/tmp/r9p\\040mount/live")
+            b"/tmp/r9p mount/live".to_vec(),
+            decode_mounts_path("/tmp/r9p\\040mount/live")
         );
+    }
+
+    #[test]
+    fn decodes_multibyte_utf8_mount_paths_bytewise() {
+        assert_eq!(
+            "/tmp/r9pø/live".as_bytes().to_vec(),
+            decode_mounts_path("/tmp/r9p\\303\\270/live")
+        );
+        let mountinfo =
+            "68 30 0:57 / /home/mrvamp/V\\303\\270lt/.vault/live rw - fuse /dev/fuse rw\n";
+        assert_eq!(
+            Some(57),
+            parse_connection_id_from_mountinfo(mountinfo, "/home/mrvamp/Vølt/.vault/live")
+        );
+    }
+
+    #[test]
+    fn preserves_malformed_octal_escapes_without_panicking() {
+        assert_eq!(b"/tmp/\\777x".to_vec(), decode_mounts_path("/tmp/\\777x"));
+        assert_eq!(b"/tmp/\\47x".to_vec(), decode_mounts_path("/tmp/\\47x"));
+        assert_eq!(b"/tmp/end\\".to_vec(), decode_mounts_path("/tmp/end\\"));
     }
 
     #[test]

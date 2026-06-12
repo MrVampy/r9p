@@ -240,9 +240,13 @@ impl FileTree for FrontTree {
             .ok_or_else(|| Error::from_static(EBADFID))?;
         let mut qids = Vec::with_capacity(names.len());
         for name in names {
-            let child = match &state.node(current)?.body {
-                Body::Dir(children) => children.get(name.as_slice()).copied(),
-                Body::File(_) => None,
+            let child = if name.as_slice() == b".." {
+                Some(state.node(current)?.parent)
+            } else {
+                match &state.node(current)?.body {
+                    Body::Dir(children) => children.get(name.as_slice()).copied(),
+                    Body::File(_) => None,
+                }
             };
             match child {
                 Some(id) => {
@@ -358,6 +362,21 @@ mod tests {
         tree.attach(1, b"claude", b"/")?;
         let qids = walk_to(&mut tree, 1, 2, &["market", "absent"]);
         assert_eq!(qids.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn dotdot_walks_to_parent() -> Result<()> {
+        let front = Front::new();
+        front.set("market/status", b"x")?;
+        let mut tree = front.tree();
+        tree.attach(1, b"claude", b"/")?;
+        let qids = walk_to(&mut tree, 1, 2, &["market", "status"]);
+        assert_eq!(qids.len(), 2);
+        let names = vec![b"..".to_vec(), b"..".to_vec()];
+        let back = tree.walk(2, 3, qids[1], &names).expect("dotdot walk");
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[1].path, ROOT_ID);
         Ok(())
     }
 

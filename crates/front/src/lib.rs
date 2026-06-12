@@ -24,11 +24,65 @@ const ORCLOSE: u8 = 0x40;
 const OPEN_MODE_MASK: u8 = 0x03;
 const KNOWN_OPEN_BITS: u8 = OPEN_MODE_MASK | OTRUNC | ORCLOSE;
 
+pub const DEFAULT_LOG_CAPACITY: usize = 1 << 20;
+
 enum Body {
     Dir(BTreeMap<Vec<u8>, u64>),
     File(Vec<u8>),
-    Log(Vec<u8>),
+    Log(LogBody),
     IntakeNew(u64),
+}
+
+struct LogBody {
+    entries: VecDeque<Vec<u8>>,
+    start: u64,
+    retained: usize,
+}
+
+impl LogBody {
+    fn new(bytes: Vec<u8>) -> Self {
+        let retained = bytes.len();
+        let mut entries = VecDeque::new();
+        entries.push_back(bytes);
+        Self {
+            entries,
+            start: 0,
+            retained,
+        }
+    }
+
+    fn end(&self) -> u64 {
+        self.start + self.retained as u64
+    }
+
+    fn append(&mut self, bytes: Vec<u8>, capacity: usize) {
+        self.retained += bytes.len();
+        self.entries.push_back(bytes);
+        while self.retained > capacity && self.entries.len() > 1 {
+            if let Some(oldest) = self.entries.pop_front() {
+                self.start += oldest.len() as u64;
+                self.retained -= oldest.len();
+            }
+        }
+    }
+
+    fn read(&self, offset: u64, count: usize) -> Vec<u8> {
+        let mut skip = usize::try_from(offset.saturating_sub(self.start)).unwrap_or(usize::MAX);
+        let mut out = Vec::new();
+        for entry in &self.entries {
+            if skip >= entry.len() {
+                skip -= entry.len();
+                continue;
+            }
+            let take = (entry.len() - skip).min(count - out.len());
+            out.extend_from_slice(&entry[skip..skip + take]);
+            skip = 0;
+            if out.len() == count {
+                break;
+            }
+        }
+        out
+    }
 }
 
 pub struct IntakeRequest {
@@ -50,6 +104,7 @@ struct State {
     intakes: BTreeMap<u64, Intake>,
     pending: VecDeque<IntakeRequest>,
     wait_timeout: Duration,
+    log_capacity: usize,
 }
 
 struct Intake {
@@ -75,6 +130,7 @@ impl State {
             intakes: BTreeMap::new(),
             pending: VecDeque::new(),
             wait_timeout: Duration::from_secs(30),
+            log_capacity: DEFAULT_LOG_CAPACITY,
         }
     }
 
@@ -99,7 +155,7 @@ impl State {
         let (mode, length) = match &node.body {
             Body::Dir(_) => (0o040555u32, 0u64),
             Body::File(bytes) => (0o444u32, bytes.len() as u64),
-            Body::Log(bytes) => (0o444u32, bytes.len() as u64),
+            Body::Log(log) => (0o444u32, log.end()),
             Body::IntakeNew(_) => (0o222u32, 0u64),
         };
         Ok(Stat {
@@ -154,6 +210,7 @@ impl State {
     }
 
     fn place(&mut self, path: &str, body: Body) -> Result<u64> {
+        let capacity = self.log_capacity;
         let segments = split_path(path)?;
         let (last, dirs) = segments
             .split_last()
@@ -174,9 +231,11 @@ impl State {
                         node.body = Body::File(bytes);
                         Ok(id)
                     }
-                    (Body::Log(existing_bytes), Body::Log(bytes)) => {
+                    (Body::Log(existing), Body::Log(incoming)) => {
                         node.version = node.version.wrapping_add(1);
-                        existing_bytes.extend(bytes);
+                        for entry in incoming.entries {
+                            existing.append(entry, capacity);
+                        }
                         Ok(id)
                     }
                     _ => Err(Error::from_static(EPERM)),
@@ -261,8 +320,14 @@ impl Front {
     }
 
     pub fn append_event(&self, path: &str, bytes: &[u8]) -> Result<()> {
-        self.lock()?.place(path, Body::Log(bytes.to_vec()))?;
+        self.lock()?
+            .place(path, Body::Log(LogBody::new(bytes.to_vec())))?;
         self.shared.1.notify_all();
+        Ok(())
+    }
+
+    pub fn set_log_capacity(&self, capacity: usize) -> Result<()> {
+        self.lock()?.log_capacity = capacity.max(1);
         Ok(())
     }
 
@@ -325,11 +390,15 @@ impl Front {
             if cancel.is_some_and(|cancel| cancel.load(Ordering::SeqCst)) {
                 return Err(Error::from_static("request flushed"));
             }
-            if let Body::Log(bytes) = &state.node(id)?.body {
-                if offset < bytes.len() as u64 {
-                    let start = usize::try_from(offset).map_err(|_| Error::from_static(EPERM))?;
-                    let end = bytes.len().min(start.saturating_add(count as usize));
-                    return Ok(ReadData::Bytes(bytes[start..end].to_vec()));
+            if let Body::Log(log) = &state.node(id)?.body {
+                if offset < log.start {
+                    return Err(Error::from(format!(
+                        "log window passed: earliest retained offset {}",
+                        log.start
+                    )));
+                }
+                if offset < log.end() {
+                    return Ok(ReadData::Bytes(log.read(offset, count as usize)));
                 }
             } else {
                 return Err(Error::from_static(ENOENT));
@@ -571,6 +640,58 @@ mod tests {
         assert_eq!(data, ReadData::Bytes(b"one\ntwo\n".to_vec()));
         let tail = tree.read(2, qids[1], 4, 4096)?;
         assert_eq!(tail, ReadData::Bytes(b"two\n".to_vec()));
+        Ok(())
+    }
+
+    #[test]
+    fn log_window_drops_whole_entries_and_keeps_absolute_offsets() -> Result<()> {
+        let front = Front::new();
+        front.set_log_capacity(10)?;
+        front.append_event("market/events", b"aaaa\n")?;
+        front.append_event("market/events", b"bbbb\n")?;
+        front.append_event("market/events", b"cccc\n")?;
+        let mut tree = front.tree();
+        tree.attach(1, b"claude", b"/")?;
+        let qids = walk_to(&mut tree, 1, 2, &["market", "events"]);
+        let stat = tree.stat(qids[1])?;
+        assert_eq!(stat.length, 15);
+        let data = tree.read(2, qids[1], 5, 4096)?;
+        assert_eq!(data, ReadData::Bytes(b"bbbb\ncccc\n".to_vec()));
+        let mid = tree.read(2, qids[1], 12, 4096)?;
+        assert_eq!(mid, ReadData::Bytes(b"cc\n".to_vec()));
+        Ok(())
+    }
+
+    #[test]
+    fn log_read_behind_window_fails_typed_with_earliest_offset() -> Result<()> {
+        let front = Front::new();
+        front.set_log_capacity(10)?;
+        front.append_event("market/events", b"aaaa\n")?;
+        front.append_event("market/events", b"bbbb\n")?;
+        front.append_event("market/events", b"cccc\n")?;
+        let mut tree = front.tree();
+        tree.attach(1, b"claude", b"/")?;
+        let qids = walk_to(&mut tree, 1, 2, &["market", "events"]);
+        let error = tree
+            .read(2, qids[1], 0, 4096)
+            .expect_err("behind-window read must fail");
+        assert_eq!(
+            error.message(),
+            b"log window passed: earliest retained offset 5"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn log_keeps_a_single_oversized_entry() -> Result<()> {
+        let front = Front::new();
+        front.set_log_capacity(4)?;
+        front.append_event("market/events", b"0123456789\n")?;
+        let mut tree = front.tree();
+        tree.attach(1, b"claude", b"/")?;
+        let qids = walk_to(&mut tree, 1, 2, &["market", "events"]);
+        let data = tree.read(2, qids[1], 0, 4096)?;
+        assert_eq!(data, ReadData::Bytes(b"0123456789\n".to_vec()));
         Ok(())
     }
 

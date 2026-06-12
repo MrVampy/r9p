@@ -1,4 +1,4 @@
-const lib = Deno.dlopen("../../target/debug/libfront.so", {
+const lib = Deno.dlopen("../../../target/debug/libfront.so", {
   r9p_front_abi_version: { parameters: [], result: "u32" },
   r9p_front_new: { parameters: [], result: "pointer" },
   r9p_front_free: { parameters: ["pointer"], result: "void" },

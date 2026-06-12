@@ -2,6 +2,7 @@ use r9p::{
     blocking::{OREAD, OWRITE},
     codec,
     qid::Qid,
+    qid::DMDIR,
     stat::Stat,
 };
 
@@ -23,9 +24,14 @@ pub(crate) fn machine_list_cmd(config: Config, args: Vec<String>) -> CliResult<(
     };
     let (mut client, path) = connect_path(&target)?;
     let fid = client.walk_path(&path)?;
-    client.open(fid, OREAD)?;
-    let stats = read_dir_stats(&mut client, fid)?;
-    for stat in stats {
+    let stat = client.stat(fid)?;
+    if stat.mode & DMDIR != 0 {
+        client.open(fid, OREAD)?;
+        let stats = read_dir_stats(&mut client, fid)?;
+        for stat in stats {
+            print_machine_stat("entry", &stat);
+        }
+    } else {
         print_machine_stat("entry", &stat);
     }
     client.clunk(fid)?;

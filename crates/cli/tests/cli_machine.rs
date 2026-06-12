@@ -329,6 +329,23 @@ fn machine_cat_alias_reads_file() -> TestResult<()> {
 }
 
 #[test]
+fn machine_list_on_file_prints_stat_without_reading_content() -> TestResult<()> {
+    let shared = SharedFile::new(b"agent\n".to_vec());
+    let (address, handle) = start_server(shared.clone())?;
+
+    let output = run_machine(&address, &["list", "/data"], None)?;
+    assert_success(&output)?;
+    assert_stdout(
+        &output,
+        "entry\t64617461\t0\t0\t2\t6\t384\t0\t0\t0\t0\t7261636d65\t7261636d65\t7261636d65\n",
+    )?;
+    if shared.read_count() != 0 {
+        return Err(test_error("list read file content instead of using stat"));
+    }
+    join_server(handle)
+}
+
+#[test]
 fn machine_read_to_streams_to_local_file_and_reports_count() -> TestResult<()> {
     let payload = large_payload();
     let shared = SharedFile::new(payload.clone());

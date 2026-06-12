@@ -1,3 +1,6 @@
+pub mod abi;
+pub mod serve;
+
 use r9p::error::{Error, Result};
 use r9p::fid::Fid;
 use r9p::qid::{Qid, QTDIR, QTFILE};

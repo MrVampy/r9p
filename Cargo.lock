@@ -13,6 +13,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "front"
+version = "0.1.0"
+dependencies = [
+ "r9p",
+]
+
+[[package]]
 name = "fs"
 version = "0.1.0"
 dependencies = [

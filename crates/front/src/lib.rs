@@ -7,6 +7,7 @@ use r9p::qid::{Qid, QTDIR, QTFILE};
 use r9p::server::{FileTree, OpenFile, ReadData};
 use r9p::stat::Stat;
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -16,6 +17,12 @@ const EPERM: &str = "permission denied";
 const ENOTDIR: &str = "not a directory";
 
 const ROOT_ID: u64 = 0;
+const OREAD: u8 = 0;
+const OWRITE: u8 = 1;
+const OTRUNC: u8 = 0x10;
+const ORCLOSE: u8 = 0x40;
+const OPEN_MODE_MASK: u8 = 0x03;
+const KNOWN_OPEN_BITS: u8 = OPEN_MODE_MASK | OTRUNC | ORCLOSE;
 
 enum Body {
     Dir(BTreeMap<Vec<u8>, u64>),
@@ -39,7 +46,7 @@ struct Node {
 struct State {
     nodes: BTreeMap<u64, Node>,
     next_id: u64,
-    fids: BTreeMap<Fid, u64>,
+    next_request_id: u64,
     intakes: BTreeMap<u64, Intake>,
     pending: VecDeque<IntakeRequest>,
     wait_timeout: Duration,
@@ -47,7 +54,6 @@ struct State {
 
 struct Intake {
     prefix: String,
-    next_request: u64,
 }
 
 impl State {
@@ -65,7 +71,7 @@ impl State {
         Self {
             nodes,
             next_id: 1,
-            fids: BTreeMap::new(),
+            next_request_id: 1,
             intakes: BTreeMap::new(),
             pending: VecDeque::new(),
             wait_timeout: Duration::from_secs(30),
@@ -73,7 +79,9 @@ impl State {
     }
 
     fn node(&self, id: u64) -> Result<&Node> {
-        self.nodes.get(&id).ok_or_else(|| Error::from_static(ENOENT))
+        self.nodes
+            .get(&id)
+            .ok_or_else(|| Error::from_static(ENOENT))
     }
 
     fn qid_for(&self, id: u64) -> Result<Qid> {
@@ -211,6 +219,16 @@ fn split_path(path: &str) -> Result<Vec<Vec<u8>>> {
         .collect())
 }
 
+fn open_allowed(body: &Body, mode: u8) -> bool {
+    if mode & !KNOWN_OPEN_BITS != 0 || mode & (OTRUNC | ORCLOSE) != 0 {
+        return false;
+    }
+    match body {
+        Body::Dir(_) | Body::File(_) | Body::Log(_) => mode & OPEN_MODE_MASK == OREAD,
+        Body::IntakeNew(_) => mode & OPEN_MODE_MASK == OWRITE,
+    }
+}
+
 #[derive(Clone)]
 pub struct Front {
     shared: Arc<(Mutex<State>, Condvar)>,
@@ -264,13 +282,7 @@ impl Front {
         if let Some(node) = state.nodes.get_mut(&id) {
             node.body = Body::IntakeNew(id);
         }
-        state.intakes.insert(
-            id,
-            Intake {
-                prefix: trimmed,
-                next_request: 1,
-            },
-        );
+        state.intakes.insert(id, Intake { prefix: trimmed });
         Ok(())
     }
 
@@ -306,9 +318,13 @@ impl Front {
         id: u64,
         offset: u64,
         count: u32,
+        cancel: Option<&AtomicBool>,
     ) -> Result<ReadData> {
         let deadline = Instant::now() + state.wait_timeout;
         loop {
+            if cancel.is_some_and(|cancel| cancel.load(Ordering::SeqCst)) {
+                return Err(Error::from_static("request flushed"));
+            }
             if let Body::Log(bytes) = &state.node(id)?.body {
                 if offset < bytes.len() as u64 {
                     let start = usize::try_from(offset).map_err(|_| Error::from_static(EPERM))?;
@@ -334,25 +350,58 @@ impl Front {
     pub fn tree(&self) -> FrontTree {
         FrontTree {
             front: self.clone(),
+            fids: BTreeMap::new(),
+        }
+    }
+
+    pub(crate) fn wake_readers(&self) {
+        self.shared.1.notify_all();
+    }
+
+    pub(crate) fn read_node(
+        &self,
+        id: u64,
+        offset: u64,
+        count: u32,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<ReadData> {
+        let state = self.lock()?;
+        match &state.node(id)?.body {
+            Body::Dir(children) => {
+                let mut stats = Vec::with_capacity(children.len());
+                for &child in children.values() {
+                    stats.push(state.stat_for(child)?);
+                }
+                Ok(ReadData::Directory(stats))
+            }
+            Body::File(bytes) => {
+                let start = usize::try_from(offset.min(bytes.len() as u64))
+                    .map_err(|_| Error::from_static(EPERM))?;
+                let end = bytes.len().min(start.saturating_add(count as usize));
+                Ok(ReadData::Bytes(bytes[start..end].to_vec()))
+            }
+            Body::Log(_) => self.read_log(state, id, offset, count, cancel),
+            Body::IntakeNew(_) => Err(Error::from_static(EPERM)),
         }
     }
 }
 
 pub struct FrontTree {
     front: Front,
+    fids: BTreeMap<Fid, u64>,
 }
 
 impl FileTree for FrontTree {
     fn attach(&mut self, fid: Fid, _uname: &[u8], _aname: &[u8]) -> Result<Qid> {
-        let mut state = self.front.lock()?;
+        let state = self.front.lock()?;
         let qid = state.qid_for(ROOT_ID)?;
-        state.fids.insert(fid, ROOT_ID);
+        self.fids.insert(fid, ROOT_ID);
         Ok(qid)
     }
 
     fn walk(&mut self, fid: Fid, newfid: Fid, _start: Qid, names: &[Vec<u8>]) -> Result<Vec<Qid>> {
-        let mut state = self.front.lock()?;
-        let mut current = *state
+        let state = self.front.lock()?;
+        let mut current = *self
             .fids
             .get(&fid)
             .ok_or_else(|| Error::from_static(EBADFID))?;
@@ -375,59 +424,34 @@ impl FileTree for FrontTree {
             }
         }
         if qids.len() == names.len() {
-            state.fids.insert(newfid, current);
+            self.fids.insert(newfid, current);
         }
         Ok(qids)
     }
 
     fn open(&mut self, fid: Fid, qid: Qid, mode: u8) -> Result<OpenFile> {
         let state = self.front.lock()?;
-        let id = *state
+        let id = *self
             .fids
             .get(&fid)
             .ok_or_else(|| Error::from_static(EBADFID))?;
         if state.qid_for(id)?.path != qid.path {
             return Err(Error::from_static(EBADFID));
         }
-        let writable = matches!(state.node(id)?.body, Body::IntakeNew(_));
-        let wants_write = mode & 0x03 != 0;
-        if mode & 0x10 != 0 || (wants_write && !writable) || (!wants_write && writable) {
+        if !open_allowed(&state.node(id)?.body, mode) {
             return Err(Error::from_static(EPERM));
         }
         Ok(OpenFile { qid, iounit: 0 })
     }
 
     fn read(&mut self, fid: Fid, _qid: Qid, offset: u64, count: u32) -> Result<ReadData> {
-        let state = self.front.lock()?;
-        let id = *state
-            .fids
-            .get(&fid)
-            .ok_or_else(|| Error::from_static(EBADFID))?;
-        match &state.node(id)?.body {
-            Body::Dir(children) => {
-                if offset != 0 {
-                    return Ok(ReadData::Directory(Vec::new()));
-                }
-                let mut stats = Vec::with_capacity(children.len());
-                for &child in children.values() {
-                    stats.push(state.stat_for(child)?);
-                }
-                Ok(ReadData::Directory(stats))
-            }
-            Body::File(bytes) => {
-                let start = usize::try_from(offset.min(bytes.len() as u64))
-                    .map_err(|_| Error::from_static(EPERM))?;
-                let end = bytes.len().min(start.saturating_add(count as usize));
-                Ok(ReadData::Bytes(bytes[start..end].to_vec()))
-            }
-            Body::Log(_) => self.front.read_log(state, id, offset, count),
-            Body::IntakeNew(_) => Err(Error::from_static(EPERM)),
-        }
+        let id = self.read_target(fid)?;
+        self.front.read_node(id, offset, count, None)
     }
 
     fn write(&mut self, fid: Fid, _qid: Qid, _offset: u64, data: &[u8]) -> Result<u32> {
         let mut state = self.front.lock()?;
-        let id = *state
+        let id = *self
             .fids
             .get(&fid)
             .ok_or_else(|| Error::from_static(EBADFID))?;
@@ -435,15 +459,14 @@ impl FileTree for FrontTree {
             Body::IntakeNew(intake_id) => intake_id,
             _ => return Err(Error::from_static(EPERM)),
         };
-        let (prefix, request_id) = {
-            let intake = state
-                .intakes
-                .get_mut(&intake_id)
-                .ok_or_else(|| Error::from_static(ENOENT))?;
-            let request_id = intake.next_request;
-            intake.next_request += 1;
-            (intake.prefix.clone(), request_id)
-        };
+        let prefix = state
+            .intakes
+            .get(&intake_id)
+            .ok_or_else(|| Error::from_static(ENOENT))?
+            .prefix
+            .clone();
+        let request_id = state.next_request_id;
+        state.next_request_id = state.next_request_id.saturating_add(1);
         state.place(
             &format!("{prefix}/{request_id}/request"),
             Body::File(data.to_vec()),
@@ -466,8 +489,21 @@ impl FileTree for FrontTree {
     }
 
     fn clunk(&mut self, fid: Fid, _qid: Qid) -> Result<()> {
-        self.front.lock()?.fids.remove(&fid);
+        self.fids.remove(&fid);
         Ok(())
+    }
+}
+
+impl FrontTree {
+    pub(crate) fn read_target(&self, fid: Fid) -> Result<u64> {
+        self.fids
+            .get(&fid)
+            .copied()
+            .ok_or_else(|| Error::from_static(EBADFID))
+    }
+
+    pub(crate) fn front(&self) -> Front {
+        self.front.clone()
     }
 }
 
@@ -609,6 +645,41 @@ mod tests {
         let file_qids = walk_to(&mut tree, 1, 3, &["market", "status"]);
         assert!(tree.open(3, file_qids[1], 1).is_err());
         assert!(tree.write(3, file_qids[1], 0, b"nope").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn open_modes_are_exact_permissions_not_writeish_bits() -> Result<()> {
+        let front = Front::new();
+        front.register_intake("queries")?;
+        front.set("market/status", b"x")?;
+        let mut tree = front.tree();
+        tree.attach(1, b"claude", b"/")?;
+        let new_qids = walk_to(&mut tree, 1, 2, &["queries", "new"]);
+        assert!(tree.open(2, new_qids[1], OWRITE).is_ok());
+        assert!(tree.open(2, new_qids[1], 2).is_err());
+        assert!(tree.open(2, new_qids[1], 3).is_err());
+        assert!(tree.open(2, new_qids[1], OWRITE | OTRUNC).is_err());
+        let file_qids = walk_to(&mut tree, 1, 3, &["market", "status"]);
+        assert!(tree.open(3, file_qids[1], OREAD).is_ok());
+        assert!(tree.open(3, file_qids[1], 3).is_err());
+        assert!(tree.open(3, file_qids[1], OREAD | ORCLOSE).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn tree_fids_are_per_connection() -> Result<()> {
+        let front = Front::new();
+        front.set("market/status", b"x")?;
+        let mut first = front.tree();
+        let mut second = front.tree();
+        first.attach(1, b"first", b"/")?;
+        second.attach(1, b"second", b"/")?;
+        let first_qids = walk_to(&mut first, 1, 2, &["market", "status"]);
+        first.clunk(1, Qid::dir(ROOT_ID))?;
+        let second_qids = walk_to(&mut second, 1, 2, &["market", "status"]);
+        assert_eq!(first_qids.len(), 2);
+        assert_eq!(second_qids.len(), 2);
         Ok(())
     }
 

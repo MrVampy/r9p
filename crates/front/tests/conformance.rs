@@ -3,8 +3,15 @@ use front::abi::{
     r9p_front_new, r9p_front_next_request, r9p_front_register_intake, r9p_front_request_copy,
     r9p_front_serve_tcp, r9p_front_set, r9p_front_stop,
 };
+use front::Front;
 use r9p::blocking::Client;
+use r9p::fid::NOFID;
+use r9p::message::{RMessage, TMessage, NOTAG};
+use r9p::stat::decode_dir_entries;
+use r9p::{codec, Error};
 use std::ffi::c_char;
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -18,7 +25,7 @@ fn cbytes(value: &[u8]) -> (*const u8, usize) {
 
 #[test]
 fn abi_roundtrip_over_tcp() {
-    assert_eq!(r9p_front_abi_version(), 1);
+    assert_eq!(r9p_front_abi_version(), 2);
     let handle = r9p_front_new();
     let (path, path_len) = cstr("market/status");
     let (bytes, bytes_len) = cbytes(b"#M(\"state\" 'open)");
@@ -46,12 +53,34 @@ fn abi_roundtrip_over_tcp() {
     assert_ne!(port, 0);
     let address = format!("127.0.0.1:{port}");
 
-    let mut client =
-        Client::connect_tcp(&address, "claude", "/", 65536).expect("connect front");
+    let mut client = Client::connect_tcp(&address, "claude", "/", 65536).expect("connect front");
     let status_fid = client.walk_path("/market/status").expect("walk status");
     client.open(status_fid, 0).expect("open status");
     let status = client.read(status_fid, 0, 4096).expect("read status");
     assert_eq!(status, b"#M(\"state\" 'open)".to_vec());
+
+    let market_fid = client.walk_path("/market").expect("walk market");
+    client.open(market_fid, 0).expect("open market");
+    let first_dir_chunk = client.read(market_fid, 0, 96).expect("read market dir");
+    assert_eq!(
+        decode_dir_entries(&first_dir_chunk)
+            .expect("decode first dir chunk")
+            .len(),
+        1
+    );
+    let second_dir_chunk = client
+        .read(
+            market_fid,
+            u64::try_from(first_dir_chunk.len()).expect("dir chunk length"),
+            4096,
+        )
+        .expect("read market dir at offset");
+    assert_eq!(
+        decode_dir_entries(&second_dir_chunk)
+            .expect("decode second dir chunk")
+            .len(),
+        1
+    );
 
     let events_fid = client.walk_path("/market/events").expect("walk events");
     client.open(events_fid, 0).expect("open events");
@@ -79,7 +108,15 @@ fn abi_roundtrip_over_tcp() {
     let wrote = client
         .write_once(new_fid, 0, b"#M(\"kind\" \"search\" \"text\" \"Trump\")")
         .expect("write query");
-    assert_eq!(wrote as usize, b"#M(\"kind\" \"search\" \"text\" \"Trump\")".len());
+    assert_eq!(
+        wrote as usize,
+        b"#M(\"kind\" \"search\" \"text\" \"Trump\")".len()
+    );
+    let second_query = b"#M(\"kind\" \"search\" \"text\" \"Biden\")";
+    let wrote = client
+        .write_once(new_fid, 0, second_query)
+        .expect("write second query");
+    assert_eq!(wrote as usize, second_query.len());
 
     let mut request_id = 0u64;
     let mut request_len = 0usize;
@@ -88,15 +125,41 @@ fn abi_roundtrip_over_tcp() {
         0
     );
     assert_eq!(request_id, 1);
-    let mut buf = vec![0u8; request_len];
-    let copied = unsafe { r9p_front_request_copy(handle, buf.as_mut_ptr(), buf.len()) };
+    let first_request_id = request_id;
+    let first_request_len = request_len;
+    assert_eq!(
+        unsafe { r9p_front_next_request(handle, 1000, &mut request_id, &mut request_len) },
+        0
+    );
+    assert_eq!(request_id, 2);
+    let mut second_buf = vec![0u8; request_len];
+    let copied = unsafe {
+        r9p_front_request_copy(
+            handle,
+            request_id,
+            second_buf.as_mut_ptr(),
+            second_buf.len(),
+        )
+    };
     assert_eq!(copied as usize, request_len);
+    assert_eq!(second_buf, second_query.to_vec());
+    let mut buf = vec![0u8; first_request_len];
+    let copied =
+        unsafe { r9p_front_request_copy(handle, first_request_id, buf.as_mut_ptr(), buf.len()) };
+    assert_eq!(copied as usize, first_request_len);
     assert_eq!(buf, b"#M(\"kind\" \"search\" \"text\" \"Trump\")".to_vec());
 
     let (result, result_len) = cbytes(b"#M(\"hits\" (\"will-trump\" ))");
     assert_eq!(
         unsafe {
-            r9p_front_complete_request(handle, intake, intake_len, request_id, result, result_len)
+            r9p_front_complete_request(
+                handle,
+                intake,
+                intake_len,
+                first_request_id,
+                result,
+                result_len,
+            )
         },
         0
     );
@@ -107,4 +170,120 @@ fn abi_roundtrip_over_tcp() {
 
     assert_eq!(unsafe { r9p_front_stop(handle) }, 0);
     unsafe { r9p_front_free(handle) };
+}
+
+#[test]
+fn flush_interrupts_blocked_log_read() {
+    let front = Front::new();
+    front
+        .append_event("market/events", b"seed\n")
+        .expect("seed events");
+    let serve = front.serve_tcp("127.0.0.1:0").expect("serve front");
+    let mut stream = TcpStream::connect(serve.addr()).expect("connect front");
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .expect("set read timeout");
+
+    write_tmessage(
+        &mut stream,
+        &TMessage::Version {
+            tag: NOTAG,
+            msize: 8192,
+            version: b"9P2000".to_vec(),
+        },
+    )
+    .expect("write version");
+    assert!(matches!(
+        read_rmessage(&mut stream).expect("read version"),
+        RMessage::Version { .. }
+    ));
+    write_tmessage(
+        &mut stream,
+        &TMessage::Attach {
+            tag: 1,
+            fid: 1,
+            afid: NOFID,
+            uname: b"codex".to_vec(),
+            aname: b"/".to_vec(),
+        },
+    )
+    .expect("write attach");
+    assert!(matches!(
+        read_rmessage(&mut stream).expect("read attach"),
+        RMessage::Attach { tag: 1, .. }
+    ));
+    write_tmessage(
+        &mut stream,
+        &TMessage::Walk {
+            tag: 2,
+            fid: 1,
+            newfid: 2,
+            wnames: vec![b"market".to_vec(), b"events".to_vec()],
+        },
+    )
+    .expect("write walk");
+    assert!(matches!(
+        read_rmessage(&mut stream).expect("read walk"),
+        RMessage::Walk { tag: 2, .. }
+    ));
+    write_tmessage(
+        &mut stream,
+        &TMessage::Open {
+            tag: 3,
+            fid: 2,
+            mode: 0,
+        },
+    )
+    .expect("write open");
+    assert!(matches!(
+        read_rmessage(&mut stream).expect("read open"),
+        RMessage::Open { tag: 3, .. }
+    ));
+
+    write_tmessage(
+        &mut stream,
+        &TMessage::Read {
+            tag: 4,
+            fid: 2,
+            offset: 5,
+            count: 4096,
+        },
+    )
+    .expect("write blocking read");
+    thread::sleep(Duration::from_millis(50));
+    write_tmessage(&mut stream, &TMessage::Flush { tag: 5, oldtag: 4 }).expect("write flush");
+    assert_eq!(
+        read_rmessage(&mut stream).expect("read flush"),
+        RMessage::Flush { tag: 5 }
+    );
+    assert!(read_rmessage(&mut stream).is_err());
+
+    serve.shutdown();
+}
+
+fn write_tmessage(stream: &mut TcpStream, message: &TMessage) -> Result<(), Error> {
+    let frame = codec::encode_tmessage(message)?;
+    stream
+        .write_all(&frame)
+        .map_err(|error| Error::new(format!("write 9P frame: {error}")))?;
+    stream
+        .flush()
+        .map_err(|error| Error::new(format!("flush 9P frame: {error}")))
+}
+
+fn read_rmessage(stream: &mut TcpStream) -> Result<RMessage, Error> {
+    let mut prefix = [0_u8; 4];
+    stream
+        .read_exact(&mut prefix)
+        .map_err(|error| Error::new(format!("read 9P frame size: {error}")))?;
+    let size = u32::from_le_bytes(prefix);
+    let rest_len = usize::try_from(size.saturating_sub(4))
+        .map_err(|_| Error::from_static("oversized 9P frame"))?;
+    let mut frame = Vec::with_capacity(rest_len + 4);
+    frame.extend(prefix);
+    frame.resize(rest_len + 4, 0);
+    stream
+        .read_exact(&mut frame[4..])
+        .map_err(|error| Error::new(format!("read 9P frame body: {error}")))?;
+    codec::decode_rmessage(&frame)
 }

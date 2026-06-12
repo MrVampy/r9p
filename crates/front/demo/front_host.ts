@@ -24,7 +24,7 @@ const lib = Deno.dlopen("../../target/debug/libfront.so", {
     nonblocking: true,
   },
   r9p_front_request_copy: {
-    parameters: ["pointer", "buffer", "usize"],
+    parameters: ["pointer", "u64", "buffer", "usize"],
     result: "isize",
   },
   r9p_front_complete_request: {
@@ -40,7 +40,7 @@ const str = (value: string): [Uint8Array, number] => {
   return [bytes, bytes.length];
 };
 
-if (lib.symbols.r9p_front_abi_version() !== 1) {
+if (lib.symbols.r9p_front_abi_version() !== 2) {
   throw new Error("abi version mismatch");
 }
 const front = lib.symbols.r9p_front_new();
@@ -65,7 +65,7 @@ while (true) {
     const requestId = new DataView(idOut.buffer).getBigUint64(0, true);
     const len = Number(new DataView(lenOut.buffer).getBigUint64(0, true));
     const buf = new Uint8Array(len);
-    lib.symbols.r9p_front_request_copy(front, buf, len);
+    lib.symbols.r9p_front_request_copy(front, requestId, buf, len);
     console.log(`query ${requestId}: ${new TextDecoder().decode(buf)}`);
     const [result, resultLen] = str('#M("hits" ())');
     lib.symbols.r9p_front_complete_request(front, intake, intakeLen, requestId, result, resultLen);

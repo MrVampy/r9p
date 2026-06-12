@@ -1,0 +1,15 @@
+[package]
+name = "front"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+version = "0.1.0"
+description = "Embeddable in-memory 9P front for the r9p communication suite"
+repository = "https://github.com/MrVampy/r9p"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unwrap_used = "deny"
+
+[dependencies]
+r9p = { path = "../core" }

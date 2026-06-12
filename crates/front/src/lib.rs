@@ -3,8 +3,9 @@ use r9p::fid::Fid;
 use r9p::qid::{Qid, QTDIR, QTFILE};
 use r9p::server::{FileTree, OpenFile, ReadData};
 use r9p::stat::Stat;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 const EBADFID: &str = "unknown fid";
 const ENOENT: &str = "file does not exist";
@@ -16,6 +17,13 @@ const ROOT_ID: u64 = 0;
 enum Body {
     Dir(BTreeMap<Vec<u8>, u64>),
     File(Vec<u8>),
+    Log(Vec<u8>),
+    IntakeNew(u64),
+}
+
+pub struct IntakeRequest {
+    pub request_id: u64,
+    pub bytes: Vec<u8>,
 }
 
 struct Node {
@@ -29,6 +37,14 @@ struct State {
     nodes: BTreeMap<u64, Node>,
     next_id: u64,
     fids: BTreeMap<Fid, u64>,
+    intakes: BTreeMap<u64, Intake>,
+    pending: VecDeque<IntakeRequest>,
+    wait_timeout: Duration,
+}
+
+struct Intake {
+    prefix: String,
+    next_request: u64,
 }
 
 impl State {
@@ -47,6 +63,9 @@ impl State {
             nodes,
             next_id: 1,
             fids: BTreeMap::new(),
+            intakes: BTreeMap::new(),
+            pending: VecDeque::new(),
+            wait_timeout: Duration::from_secs(30),
         }
     }
 
@@ -58,7 +77,7 @@ impl State {
         let node = self.node(id)?;
         let qtype = match node.body {
             Body::Dir(_) => QTDIR,
-            Body::File(_) => QTFILE,
+            _ => QTFILE,
         };
         Ok(Qid::new(qtype, node.version, id))
     }
@@ -69,6 +88,8 @@ impl State {
         let (mode, length) = match &node.body {
             Body::Dir(_) => (0o040555u32, 0u64),
             Body::File(bytes) => (0o444u32, bytes.len() as u64),
+            Body::Log(bytes) => (0o444u32, bytes.len() as u64),
+            Body::IntakeNew(_) => (0o222u32, 0u64),
         };
         Ok(Stat {
             type_: 0,
@@ -94,7 +115,7 @@ impl State {
             if let Some(&existing) = children.get(name) {
                 return match self.node(existing)?.body {
                     Body::Dir(_) => Ok(existing),
-                    Body::File(_) => Err(Error::from_static(ENOTDIR)),
+                    _ => Err(Error::from_static(ENOTDIR)),
                 };
             }
         } else {
@@ -121,7 +142,7 @@ impl State {
         Ok(id)
     }
 
-    fn set_file(&mut self, path: &str, bytes: Vec<u8>) -> Result<()> {
+    fn place(&mut self, path: &str, body: Body) -> Result<u64> {
         let segments = split_path(path)?;
         let (last, dirs) = segments
             .split_last()
@@ -132,17 +153,22 @@ impl State {
         }
         let existing = match &self.node(parent)?.body {
             Body::Dir(children) => children.get(last.as_slice()).copied(),
-            Body::File(_) => return Err(Error::from_static(ENOTDIR)),
+            _ => return Err(Error::from_static(ENOTDIR)),
         };
         match existing {
             Some(id) => match self.nodes.get_mut(&id) {
-                Some(node) => match &mut node.body {
-                    Body::File(_) => {
+                Some(node) => match (&mut node.body, body) {
+                    (Body::File(_), Body::File(bytes)) => {
                         node.version = node.version.wrapping_add(1);
                         node.body = Body::File(bytes);
-                        Ok(())
+                        Ok(id)
                     }
-                    Body::Dir(_) => Err(Error::from_static(EPERM)),
+                    (Body::Log(existing_bytes), Body::Log(bytes)) => {
+                        node.version = node.version.wrapping_add(1);
+                        existing_bytes.extend(bytes);
+                        Ok(id)
+                    }
+                    _ => Err(Error::from_static(EPERM)),
                 },
                 None => Err(Error::from_static(ENOENT)),
             },
@@ -155,7 +181,7 @@ impl State {
                         name: last.clone(),
                         parent,
                         version: 0,
-                        body: Body::File(bytes),
+                        body,
                     },
                 );
                 if let Some(Node {
@@ -165,7 +191,7 @@ impl State {
                 {
                     children.insert(last.clone(), id);
                 }
-                Ok(())
+                Ok(id)
             }
         }
     }
@@ -208,9 +234,98 @@ impl Front {
     }
 
     pub fn set(&self, path: &str, bytes: &[u8]) -> Result<()> {
-        self.lock()?.set_file(path, bytes.to_vec())?;
+        self.lock()?.place(path, Body::File(bytes.to_vec()))?;
         self.shared.1.notify_all();
         Ok(())
+    }
+
+    pub fn append_event(&self, path: &str, bytes: &[u8]) -> Result<()> {
+        self.lock()?.place(path, Body::Log(bytes.to_vec()))?;
+        self.shared.1.notify_all();
+        Ok(())
+    }
+
+    pub fn set_wait_timeout(&self, timeout: Duration) -> Result<()> {
+        self.lock()?.wait_timeout = timeout;
+        Ok(())
+    }
+
+    pub fn register_intake(&self, prefix: &str) -> Result<()> {
+        let mut state = self.lock()?;
+        let trimmed = prefix.trim_matches('/').to_string();
+        if trimmed.is_empty() {
+            return Err(Error::from_static(EPERM));
+        }
+        let new_path = format!("{trimmed}/new");
+        let id = state.place(&new_path, Body::IntakeNew(0))?;
+        if let Some(node) = state.nodes.get_mut(&id) {
+            node.body = Body::IntakeNew(id);
+        }
+        state.intakes.insert(
+            id,
+            Intake {
+                prefix: trimmed,
+                next_request: 1,
+            },
+        );
+        Ok(())
+    }
+
+    pub fn next_request(&self, timeout: Duration) -> Result<Option<IntakeRequest>> {
+        let deadline = Instant::now() + timeout;
+        let mut state = self.lock()?;
+        loop {
+            if let Some(request) = state.pending.pop_front() {
+                return Ok(Some(request));
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Ok(None);
+            }
+            let (next, _timeout_result) = self
+                .shared
+                .1
+                .wait_timeout(state, deadline - now)
+                .map_err(|_| Error::from_static("front state poisoned"))?;
+            state = next;
+        }
+    }
+
+    pub fn complete_request(&self, prefix: &str, request_id: u64, bytes: &[u8]) -> Result<()> {
+        let trimmed = prefix.trim_matches('/');
+        let result_path = format!("{trimmed}/{request_id}/result");
+        self.set(&result_path, bytes)
+    }
+
+    fn read_log(
+        &self,
+        mut state: std::sync::MutexGuard<'_, State>,
+        id: u64,
+        offset: u64,
+        count: u32,
+    ) -> Result<ReadData> {
+        let deadline = Instant::now() + state.wait_timeout;
+        loop {
+            if let Body::Log(bytes) = &state.node(id)?.body {
+                if offset < bytes.len() as u64 {
+                    let start = usize::try_from(offset).map_err(|_| Error::from_static(EPERM))?;
+                    let end = bytes.len().min(start.saturating_add(count as usize));
+                    return Ok(ReadData::Bytes(bytes[start..end].to_vec()));
+                }
+            } else {
+                return Err(Error::from_static(ENOENT));
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Ok(ReadData::Bytes(Vec::new()));
+            }
+            let (next, _timeout_result) = self
+                .shared
+                .1
+                .wait_timeout(state, deadline - now)
+                .map_err(|_| Error::from_static("front state poisoned"))?;
+            state = next;
+        }
     }
 
     pub fn tree(&self) -> FrontTree {
@@ -245,7 +360,7 @@ impl FileTree for FrontTree {
             } else {
                 match &state.node(current)?.body {
                     Body::Dir(children) => children.get(name.as_slice()).copied(),
-                    Body::File(_) => None,
+                    _ => None,
                 }
             };
             match child {
@@ -263,9 +378,6 @@ impl FileTree for FrontTree {
     }
 
     fn open(&mut self, fid: Fid, qid: Qid, mode: u8) -> Result<OpenFile> {
-        if mode & 0x03 != 0 || mode & 0x10 != 0 {
-            return Err(Error::from_static(EPERM));
-        }
         let state = self.front.lock()?;
         let id = *state
             .fids
@@ -273,6 +385,11 @@ impl FileTree for FrontTree {
             .ok_or_else(|| Error::from_static(EBADFID))?;
         if state.qid_for(id)?.path != qid.path {
             return Err(Error::from_static(EBADFID));
+        }
+        let writable = matches!(state.node(id)?.body, Body::IntakeNew(_));
+        let wants_write = mode & 0x03 != 0;
+        if mode & 0x10 != 0 || (wants_write && !writable) || (!wants_write && writable) {
+            return Err(Error::from_static(EPERM));
         }
         Ok(OpenFile { qid, iounit: 0 })
     }
@@ -300,7 +417,45 @@ impl FileTree for FrontTree {
                 let end = bytes.len().min(start.saturating_add(count as usize));
                 Ok(ReadData::Bytes(bytes[start..end].to_vec()))
             }
+            Body::Log(_) => self.front.read_log(state, id, offset, count),
+            Body::IntakeNew(_) => Err(Error::from_static(EPERM)),
         }
+    }
+
+    fn write(&mut self, fid: Fid, _qid: Qid, _offset: u64, data: &[u8]) -> Result<u32> {
+        let mut state = self.front.lock()?;
+        let id = *state
+            .fids
+            .get(&fid)
+            .ok_or_else(|| Error::from_static(EBADFID))?;
+        let intake_id = match state.node(id)?.body {
+            Body::IntakeNew(intake_id) => intake_id,
+            _ => return Err(Error::from_static(EPERM)),
+        };
+        let (prefix, request_id) = {
+            let intake = state
+                .intakes
+                .get_mut(&intake_id)
+                .ok_or_else(|| Error::from_static(ENOENT))?;
+            let request_id = intake.next_request;
+            intake.next_request += 1;
+            (intake.prefix.clone(), request_id)
+        };
+        state.place(
+            &format!("{prefix}/{request_id}/request"),
+            Body::File(data.to_vec()),
+        )?;
+        state.place(
+            &format!("{prefix}/created"),
+            Body::File(request_id.to_string().into_bytes()),
+        )?;
+        state.pending.push_back(IntakeRequest {
+            request_id,
+            bytes: data.to_vec(),
+        });
+        drop(state);
+        self.front.shared.1.notify_all();
+        u32::try_from(data.len()).map_err(|_| Error::from_static(EPERM))
     }
 
     fn stat(&mut self, qid: Qid) -> Result<Stat> {
@@ -362,6 +517,95 @@ mod tests {
         tree.attach(1, b"claude", b"/")?;
         let qids = walk_to(&mut tree, 1, 2, &["market", "absent"]);
         assert_eq!(qids.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn log_appends_and_reads_in_order() -> Result<()> {
+        let front = Front::new();
+        front.append_event("market/events", b"one\n")?;
+        front.append_event("market/events", b"two\n")?;
+        let mut tree = front.tree();
+        tree.attach(1, b"claude", b"/")?;
+        let qids = walk_to(&mut tree, 1, 2, &["market", "events"]);
+        let data = tree.read(2, qids[1], 0, 4096)?;
+        assert_eq!(data, ReadData::Bytes(b"one\ntwo\n".to_vec()));
+        let tail = tree.read(2, qids[1], 4, 4096)?;
+        assert_eq!(tail, ReadData::Bytes(b"two\n".to_vec()));
+        Ok(())
+    }
+
+    #[test]
+    fn log_read_at_tail_blocks_until_push() -> Result<()> {
+        let front = Front::new();
+        front.append_event("market/events", b"seed\n")?;
+        front.set_wait_timeout(Duration::from_secs(5))?;
+        let pusher = front.clone();
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(80));
+            pusher.append_event("market/events", b"wake\n")
+        });
+        let mut tree = front.tree();
+        tree.attach(1, b"claude", b"/")?;
+        let qids = walk_to(&mut tree, 1, 2, &["market", "events"]);
+        let started = Instant::now();
+        let data = tree.read(2, qids[1], 5, 4096)?;
+        assert_eq!(data, ReadData::Bytes(b"wake\n".to_vec()));
+        assert!(started.elapsed() >= Duration::from_millis(50));
+        handle.join().expect("push thread").expect("push result");
+        Ok(())
+    }
+
+    #[test]
+    fn log_read_at_tail_times_out_empty() -> Result<()> {
+        let front = Front::new();
+        front.append_event("market/events", b"seed\n")?;
+        front.set_wait_timeout(Duration::from_millis(60))?;
+        let mut tree = front.tree();
+        tree.attach(1, b"claude", b"/")?;
+        let qids = walk_to(&mut tree, 1, 2, &["market", "events"]);
+        let data = tree.read(2, qids[1], 5, 4096)?;
+        assert_eq!(data, ReadData::Bytes(Vec::new()));
+        Ok(())
+    }
+
+    #[test]
+    fn intake_write_lands_request_and_completion() -> Result<()> {
+        let front = Front::new();
+        front.register_intake("queries")?;
+        let mut tree = front.tree();
+        tree.attach(1, b"claude", b"/")?;
+        let qids = walk_to(&mut tree, 1, 2, &["queries", "new"]);
+        tree.open(2, qids[1], 1)?;
+        let wrote = tree.write(2, qids[1], 0, b"#M(\"kind\" \"search\")")?;
+        assert_eq!(wrote as usize, b"#M(\"kind\" \"search\")".len());
+        let request = front
+            .next_request(Duration::from_millis(200))?
+            .expect("pending request");
+        assert_eq!(request.request_id, 1);
+        assert_eq!(request.bytes, b"#M(\"kind\" \"search\")".to_vec());
+        front.complete_request("queries", request.request_id, b"#M(\"hits\" ())")?;
+        let qids = walk_to(&mut tree, 1, 3, &["queries", "1", "result"]);
+        let data = tree.read(3, qids[2], 0, 4096)?;
+        assert_eq!(data, ReadData::Bytes(b"#M(\"hits\" ())".to_vec()));
+        let created = walk_to(&mut tree, 1, 4, &["queries", "created"]);
+        let marker = tree.read(4, created[1], 0, 64)?;
+        assert_eq!(marker, ReadData::Bytes(b"1".to_vec()));
+        Ok(())
+    }
+
+    #[test]
+    fn intake_new_rejects_reads_and_plain_files_reject_writes() -> Result<()> {
+        let front = Front::new();
+        front.register_intake("queries")?;
+        front.set("market/status", b"x")?;
+        let mut tree = front.tree();
+        tree.attach(1, b"claude", b"/")?;
+        let new_qids = walk_to(&mut tree, 1, 2, &["queries", "new"]);
+        assert!(tree.open(2, new_qids[1], 0).is_err());
+        let file_qids = walk_to(&mut tree, 1, 3, &["market", "status"]);
+        assert!(tree.open(3, file_qids[1], 1).is_err());
+        assert!(tree.write(3, file_qids[1], 0, b"nope").is_err());
         Ok(())
     }
 

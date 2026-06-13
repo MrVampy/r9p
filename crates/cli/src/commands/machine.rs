@@ -1,5 +1,5 @@
 use r9p::{
-    blocking::{OREAD, OWRITE},
+    blocking::{ORDWR, OREAD, OWRITE},
     codec,
     qid::Qid,
     qid::DMDIR,
@@ -10,7 +10,7 @@ use crate::commands::ls::read_dir_stats;
 use crate::commands::mutate::{remove_one, split_parent};
 use crate::errors::{cli_error, CliResult};
 use crate::format::{hex_decode, hex_encode};
-use crate::io::{connect_path, open_path, parse_offset};
+use crate::io::{connect_path, open_path, parse_offset, read_all, write_exact_count};
 use crate::target::{write_config_for_path, Config, Target};
 use crate::usage;
 
@@ -52,6 +52,27 @@ pub(crate) fn machine_write_cmd(config: Config, args: Vec<String>) -> CliResult<
     let count = client.write(fid, offset, &data)?;
     client.clunk(fid)?;
     println!("write\t{count}");
+    Ok(())
+}
+
+pub(crate) fn machine_rpc_hex_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
+    if args.len() != 2 {
+        usage();
+    }
+    let request = hex_decode(&args[1])?;
+    let target = Target {
+        config: write_config_for_path(config, &args[0]),
+        path: args[0].clone(),
+    };
+    let (mut client, fid) = open_path(&target, ORDWR)?;
+    let result = (|| {
+        write_exact_count(&mut client, fid, 0, &request)?;
+        read_all(&mut client, fid)
+    })();
+    let clunk = client.clunk(fid);
+    let response = result?;
+    clunk?;
+    println!("rpc\t{}\t{}", response.len(), hex_encode(&response));
     Ok(())
 }
 

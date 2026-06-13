@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     error::Error,
     fs,
     io::{self, Read, Write},
@@ -82,9 +83,11 @@ struct MachineTree {
     data_qid: Qid,
     ctl_qid: Qid,
     private_qid: Qid,
+    rpc_qid: Qid,
     created_qid: Option<Qid>,
     created_dir_qid: Option<Qid>,
     created_data: Vec<u8>,
+    rpc_responses: BTreeMap<Fid, Vec<u8>>,
     private_visible: bool,
     file: SharedFile,
 }
@@ -96,9 +99,11 @@ impl MachineTree {
             data_qid: Qid::file(2),
             ctl_qid: Qid::file(4),
             private_qid: Qid::file(3),
+            rpc_qid: Qid::file(5),
             created_qid: None,
             created_dir_qid: None,
             created_data: Vec::new(),
+            rpc_responses: BTreeMap::new(),
             private_visible: false,
             file,
         }
@@ -121,6 +126,7 @@ impl FileTree for MachineTree {
         match names {
             [name] if start == self.root && name == b"data" => Ok(vec![self.data_qid]),
             [name] if start == self.root && name == b"ctl" => Ok(vec![self.ctl_qid]),
+            [name] if start == self.root && name == b"rpc" => Ok(vec![self.rpc_qid]),
             [name] if start == self.root && name == b"private" && self.private_visible => {
                 Ok(vec![self.private_qid])
             }
@@ -146,7 +152,7 @@ impl FileTree for MachineTree {
         Ok(OpenFile { qid, iounit: 0 })
     }
 
-    fn read(&mut self, _fid: Fid, qid: Qid, offset: u64, count: u32) -> R9pResult<ReadData> {
+    fn read(&mut self, fid: Fid, qid: Qid, offset: u64, count: u32) -> R9pResult<ReadData> {
         if Some(qid) == self.created_dir_qid {
             return Ok(ReadData::Directory(Vec::new()));
         }
@@ -169,6 +175,13 @@ impl FileTree for MachineTree {
                 .min(data.len());
             return Ok(ReadData::Bytes(data[start..end].to_vec()));
         }
+        if qid == self.rpc_qid {
+            let response = self
+                .rpc_responses
+                .get(&fid)
+                .ok_or_else(|| R9pError::from("rpc read before write"))?;
+            return slice_bytes(response, offset, count);
+        }
         if qid != self.data_qid {
             return Ok(ReadData::Directory(Vec::new()));
         }
@@ -187,7 +200,7 @@ impl FileTree for MachineTree {
         Ok(ReadData::Bytes(data[start..end].to_vec()))
     }
 
-    fn write(&mut self, _fid: Fid, qid: Qid, offset: u64, data: &[u8]) -> R9pResult<u32> {
+    fn write(&mut self, fid: Fid, qid: Qid, offset: u64, data: &[u8]) -> R9pResult<u32> {
         if Some(qid) == self.created_qid {
             let start = usize::try_from(offset).map_err(|_| R9pError::from("offset too large"))?;
             let end = start
@@ -200,6 +213,15 @@ impl FileTree for MachineTree {
                 self.created_data.resize(end, 0);
             }
             self.created_data[start..end].copy_from_slice(data);
+            return u32::try_from(data.len()).map_err(|_| R9pError::from("write too large"));
+        }
+        if qid == self.rpc_qid {
+            if offset != 0 {
+                return Err(R9pError::from("rpc write offset must be zero"));
+            }
+            let mut response = b"rpc:".to_vec();
+            response.extend(data);
+            self.rpc_responses.insert(fid, response);
             return u32::try_from(data.len()).map_err(|_| R9pError::from("write too large"));
         }
         if qid != self.data_qid && qid != self.ctl_qid {
@@ -258,6 +280,8 @@ impl FileTree for MachineTree {
             let mut stat = Stat::new("private", qid, 0o600);
             stat.length = 4;
             Ok(stat)
+        } else if qid == self.rpc_qid {
+            Ok(Stat::new("rpc", qid, 0o600))
         } else if qid == self.data_qid || qid == self.ctl_qid {
             let name = if qid == self.ctl_qid { "ctl" } else { "data" };
             let mut stat = Stat::new(name, qid, 0o600);
@@ -300,6 +324,16 @@ impl FileTree for MachineTree {
     }
 }
 
+fn slice_bytes(data: &[u8], offset: u64, count: u32) -> R9pResult<ReadData> {
+    let start = usize::try_from(offset)
+        .map_err(|_| R9pError::from("read offset too large"))?
+        .min(data.len());
+    let end = start
+        .saturating_add(usize::try_from(count).unwrap_or(usize::MAX))
+        .min(data.len());
+    Ok(ReadData::Bytes(data[start..end].to_vec()))
+}
+
 #[test]
 fn machine_readfd_streams_raw_stdout() -> TestResult<()> {
     let payload = large_payload();
@@ -325,6 +359,17 @@ fn machine_cat_alias_reads_file() -> TestResult<()> {
     let output = run_machine(&address, &["cat", "/data"], None)?;
     assert_success(&output)?;
     assert_stdout(&output, "read\t6167656e740a\n")?;
+    join_server(handle)
+}
+
+#[test]
+fn machine_rpc_hex_writes_and_reads_same_fid() -> TestResult<()> {
+    let shared = SharedFile::new(Vec::new());
+    let (address, handle) = start_server(shared)?;
+
+    let output = run_machine(&address, &["rpc-hex", "/rpc", "70696e67"], None)?;
+    assert_success(&output)?;
+    assert_stdout(&output, "rpc\t8\t7270633a70696e67\n")?;
     join_server(handle)
 }
 

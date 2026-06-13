@@ -12,7 +12,7 @@ use commands::{
     con::con_cmd,
     git_export::git_export_cmd,
     ls::ls_cmd,
-    machine::{machine_list_cmd, machine_remove_cmd},
+    machine::{machine_list_cmd, machine_remove_cmd, machine_rpc_hex_cmd},
     mount::mount_cmd,
     mutate::{create_cmd, mkdir_cmd, rm_cmd},
     read_write::{
@@ -64,6 +64,7 @@ fn run() -> CliResult<()> {
         "write-from-trunc" if config.machine => write_from_trunc_cmd(config, args),
         "create-write-from" if config.machine => create_write_from_cmd(config, args),
         "script" if config.machine => machine_script_cmd(config, args),
+        "rpc-hex" if config.machine => machine_rpc_hex_cmd(config, args),
         "mount" => mount_cmd(config, args),
         "serve" => serve_cmd(config, args),
         "export" if args.first().is_some_and(|arg| arg == "git") => {
@@ -231,6 +232,7 @@ pub(crate) fn usage() -> ! {
     eprintln!("  write-from name offset local  machine mode");
     eprintln!("  write-from-trunc name local  machine mode");
     eprintln!("  create-write-from name perm mode offset local  machine mode");
+    eprintln!("  rpc-hex name request_hex  machine mode");
     eprintln!("  script file              machine mode");
     eprintln!("  script service file      machine mode without -a");
     eprintln!("  mount [--aname aname] [--uname uname] endpoint mountpoint");

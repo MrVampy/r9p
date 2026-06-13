@@ -1,5 +1,7 @@
 use std::{
     env,
+    net::{SocketAddr, TcpStream},
+    os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -7,9 +9,9 @@ use std::{
 };
 
 use crate::{
-    commands::serve::{export_with_config, parse_export_config},
+    commands::serve::{export_with_config, parse_export_config, BindTarget, ExportConfig},
     errors::{cli_error, CliResult},
-    export_descriptor::ExportDescriptor,
+    export_descriptor::{ExportDescriptor, ExportMode, Protocol},
     target::Config,
 };
 
@@ -20,7 +22,7 @@ pub(crate) fn git_export_cmd(global: Config, args: Vec<String>) -> CliResult<()>
     if let Some(action) = args.first().map(String::as_str) {
         match action {
             "ensure" => return git_export_ensure_cmd(global, args[1..].to_vec()),
-            "status" => return git_export_status_cmd(args[1..].to_vec()),
+            "status" => return git_export_status_cmd(global, args[1..].to_vec()),
             "stop" => return git_export_stop_cmd(args[1..].to_vec()),
             _ => {}
         }
@@ -74,8 +76,8 @@ struct GitExportLifecycleConfig {
 
 fn git_export_ensure_cmd(global: Config, args: Vec<String>) -> CliResult<()> {
     let (config, export_args) = parse_git_export_lifecycle_config(args)?;
-    if assert_git_export_current(&config).is_ok() {
-        println!("git export {} ready", config.unit);
+    if let Ok(descriptor) = assert_git_export_current(&global, &config) {
+        emit_lifecycle_status(&descriptor)?;
         return Ok(());
     }
     stop_git_export(&config);
@@ -91,18 +93,15 @@ fn git_export_ensure_cmd(global: Config, args: Vec<String>) -> CliResult<()> {
         let _ = std::fs::remove_file(descriptor_file);
     }
     start_git_export_systemd(&global, &config, &export_args)?;
-    wait_for_descriptor(&config)?;
-    println!("git export {} started", config.unit);
+    let descriptor = wait_for_descriptor(&global, &config)?;
+    emit_lifecycle_status(&descriptor)?;
     Ok(())
 }
 
-fn git_export_status_cmd(args: Vec<String>) -> CliResult<()> {
+fn git_export_status_cmd(global: Config, args: Vec<String>) -> CliResult<()> {
     let (config, _export_args) = parse_git_export_lifecycle_config(args)?;
-    assert_git_export_current(&config)?;
-    println!("git export {} ready", config.unit);
-    if let Some(descriptor_file) = &config.descriptor_file {
-        println!("descriptor {}", descriptor_file.display());
-    }
+    let descriptor = assert_git_export_current(&global, &config)?;
+    emit_lifecycle_status(&descriptor)?;
     Ok(())
 }
 
@@ -269,7 +268,10 @@ fn route_source_ip(route_output: &str) -> CliResult<String> {
     Err(cli_error("route output did not contain src address"))
 }
 
-fn assert_git_export_current(config: &GitExportLifecycleConfig) -> CliResult<()> {
+fn assert_git_export_current(
+    global: &Config,
+    config: &GitExportLifecycleConfig,
+) -> CliResult<ExportDescriptor> {
     let state = systemd_unit_property(&config.unit, "ActiveState")?;
     if state.trim() != "active" {
         return Err(cli_error(format!(
@@ -286,7 +288,145 @@ fn assert_git_export_current(config: &GitExportLifecycleConfig) -> CliResult<()>
     }
     assert_command_contains_args(&unit_command, &config.expected_args)?;
     let expected_revision = resolve_git_revision(&config.repo, &config.rev)?;
-    assert_descriptor_revision_current(&read_descriptor(config)?, &expected_revision)
+    let descriptor = current_descriptor(global, config, &expected_revision)?;
+    assert_descriptor_revision_current(&descriptor, &expected_revision)?;
+    assert_descriptor_endpoint_accepts(&descriptor)?;
+    Ok(descriptor)
+}
+
+fn current_descriptor(
+    global: &Config,
+    config: &GitExportLifecycleConfig,
+    expected_revision: &str,
+) -> CliResult<ExportDescriptor> {
+    match config.descriptor_file {
+        Some(_) => read_descriptor(config),
+        None => render_lifecycle_descriptor(global, config, expected_revision),
+    }
+}
+
+fn render_lifecycle_descriptor(
+    global: &Config,
+    config: &GitExportLifecycleConfig,
+    expected_revision: &str,
+) -> CliResult<ExportDescriptor> {
+    let command = parse_git_export_config(global.clone(), config.expected_args.clone())?;
+    let worktree = command
+        .git
+        .worktree
+        .clone()
+        .unwrap_or_else(|| default_worktree_path(&command.git.repo, expected_revision));
+    let mut export_args = command.export_args.clone();
+    export_args.push("--descriptor-field".to_string());
+    export_args.push(format!("git_revision={expected_revision}"));
+    export_args.push("--descriptor-field".to_string());
+    export_args.push(format!(
+        "git_bundle_path={}",
+        command.git.bundle_namespace_path
+    ));
+    export_args.push(worktree.display().to_string());
+    let export_config = parse_export_config(command.global, export_args)?;
+    let pid = systemd_unit_main_pid(&config.unit)?;
+    descriptor_from_export_config(&export_config, pid)
+}
+
+fn descriptor_from_export_config(config: &ExportConfig, pid: u32) -> CliResult<ExportDescriptor> {
+    let aname = if config.serve.aname.is_empty() {
+        "/".to_string()
+    } else {
+        config.serve.aname.clone()
+    };
+    let (endpoint_bind, transport_class) = descriptor_endpoint(&config.serve.bind)?;
+    Ok(ExportDescriptor {
+        endpoint_bind,
+        aname: aname.clone(),
+        uname: config.serve.uname.clone(),
+        exported_root: aname,
+        transport_class,
+        mode: ExportMode::ReadOnly,
+        auth: config.auth.clone(),
+        pid,
+        protocol: Protocol::NineP2000,
+        msize: config.serve.msize,
+        expires_at: None,
+        local_root_label: Some(config.serve.root.display().to_string()),
+        extra_fields: config.extra_fields.clone(),
+    })
+}
+
+fn descriptor_endpoint(
+    bind: &BindTarget,
+) -> CliResult<(String, crate::export_descriptor::TransportClass)> {
+    match bind {
+        BindTarget::Tcp(address) if address.port() == 0 => Err(cli_error(
+            "r9p_export_git_descriptor_stdout_requires_fixed_tcp_port",
+        )),
+        BindTarget::Tcp(address) => Ok((
+            address.to_string(),
+            crate::export_descriptor::TransportClass::Tcp,
+        )),
+        BindTarget::Unix(path) => Ok((
+            format!("unix:{}", path.display()),
+            crate::export_descriptor::TransportClass::Unix,
+        )),
+    }
+}
+
+fn systemd_unit_main_pid(unit: &str) -> CliResult<u32> {
+    let pid = systemd_unit_property(unit, "MainPID")?;
+    pid.parse::<u32>()
+        .map_err(|_| cli_error(format!("invalid systemd MainPID {unit}:{pid}")))
+        .and_then(|pid| {
+            if pid == 0 {
+                Err(cli_error(format!("systemd MainPID is zero for {unit}")))
+            } else {
+                Ok(pid)
+            }
+        })
+}
+
+fn assert_descriptor_endpoint_accepts(descriptor: &ExportDescriptor) -> CliResult<()> {
+    match descriptor.transport_class {
+        crate::export_descriptor::TransportClass::Tcp => {
+            let address = descriptor
+                .endpoint_bind
+                .parse::<SocketAddr>()
+                .map_err(|error| {
+                    cli_error(format!(
+                        "descriptor endpoint is not a tcp socket address:{}:{error}",
+                        descriptor.endpoint_bind
+                    ))
+                })?;
+            TcpStream::connect(address).map(|_| ()).map_err(|error| {
+                cli_error(format!(
+                    "connect descriptor endpoint {}: {error}",
+                    descriptor.endpoint_bind
+                ))
+            })
+        }
+        crate::export_descriptor::TransportClass::Unix => {
+            let path = descriptor
+                .endpoint_bind
+                .strip_prefix("unix:")
+                .ok_or_else(|| {
+                    cli_error(format!(
+                        "descriptor unix endpoint missing unix prefix:{}",
+                        descriptor.endpoint_bind
+                    ))
+                })?;
+            UnixStream::connect(path).map(|_| ()).map_err(|error| {
+                cli_error(format!(
+                    "connect descriptor endpoint {}: {error}",
+                    descriptor.endpoint_bind
+                ))
+            })
+        }
+    }
+}
+
+fn emit_lifecycle_status(descriptor: &ExportDescriptor) -> CliResult<()> {
+    print!("{}", descriptor.render()?);
+    Ok(())
 }
 
 fn assert_descriptor_revision_current(
@@ -397,10 +537,13 @@ fn start_git_export_systemd(
     Ok(())
 }
 
-fn wait_for_descriptor(config: &GitExportLifecycleConfig) -> CliResult<()> {
+fn wait_for_descriptor(
+    global: &Config,
+    config: &GitExportLifecycleConfig,
+) -> CliResult<ExportDescriptor> {
     for attempt in 0..=config.attempts {
-        match read_descriptor(config) {
-            Ok(_) => return Ok(()),
+        match assert_git_export_current(global, config) {
+            Ok(descriptor) => return Ok(descriptor),
             Err(error) if git_export_unit_terminated(config) && attempt > 0 => {
                 return Err(git_export_unit_failure(config, error));
             }
@@ -408,7 +551,10 @@ fn wait_for_descriptor(config: &GitExportLifecycleConfig) -> CliResult<()> {
             Err(_) => thread::sleep(Duration::from_millis(100)),
         }
     }
-    Ok(())
+    Err(cli_error(format!(
+        "r9p_export_git_descriptor_unavailable:{}",
+        config.unit
+    )))
 }
 
 fn git_export_unit_terminated(config: &GitExportLifecycleConfig) -> bool {
@@ -750,7 +896,7 @@ fn git_export_usage(code: i32) -> ! {
 
 fn git_export_lifecycle_usage(code: i32) -> ! {
     eprintln!(
-        "usage: r9p export git ensure|status|stop --unit name --descriptor-file path [--runtime-endpoint endpoint --default-port port] [regular export git options...]"
+        "usage: r9p export git ensure|status|stop --unit name [--descriptor-file path] [--runtime-endpoint endpoint --default-port port] [regular export git options...]"
     );
     std::process::exit(code);
 }
@@ -875,6 +1021,88 @@ mod tests {
                 "none".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn parses_git_export_lifecycle_without_descriptor_file() {
+        let (config, export_args) = parse_git_export_lifecycle_config(vec![
+            "--unit".to_string(),
+            "vault-runtime-r9p-source-export".to_string(),
+            "--repo".to_string(),
+            ".".to_string(),
+            "--rev".to_string(),
+            "HEAD".to_string(),
+            "--bind".to_string(),
+            "127.0.0.1:19572".to_string(),
+            "--auth".to_string(),
+            "none".to_string(),
+        ])
+        .expect("lifecycle config should parse");
+
+        assert_eq!(config.descriptor_file, None);
+        assert_eq!(
+            export_args,
+            vec![
+                "--repo".to_string(),
+                ".".to_string(),
+                "--rev".to_string(),
+                "HEAD".to_string(),
+                "--bind".to_string(),
+                "127.0.0.1:19572".to_string(),
+                "--auth".to_string(),
+                "none".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn renders_descriptor_from_lifecycle_export_config() {
+        let export_config = parse_export_config(
+            global(),
+            vec![
+                "--bind".to_string(),
+                "127.0.0.1:19572".to_string(),
+                "--auth".to_string(),
+                "none".to_string(),
+                "--descriptor-field".to_string(),
+                "git_revision=abc123".to_string(),
+                "--descriptor-field".to_string(),
+                "git_bundle_path=/.vault/source-export.bundle".to_string(),
+                "/tmp/source".to_string(),
+            ],
+        )
+        .expect("export config should parse");
+
+        let descriptor = descriptor_from_export_config(&export_config, 123)
+            .expect("descriptor should render from fixed bind");
+        let rendered = descriptor.render().expect("descriptor should render");
+
+        assert!(rendered.contains("format\tr9p-export.v1\n"));
+        assert!(rendered.contains("endpoint_bind\t127.0.0.1:19572\n"));
+        assert!(rendered.contains("pid\t123\n"));
+        assert!(rendered.contains("local_root_label\t/tmp/source\n"));
+        assert!(rendered.contains("git_revision\tabc123\n"));
+        assert!(rendered.contains("git_bundle_path\t/.vault/source-export.bundle\n"));
+    }
+
+    #[test]
+    fn descriptor_stdout_requires_fixed_tcp_port() {
+        let export_config = parse_export_config(
+            global(),
+            vec![
+                "--bind".to_string(),
+                "127.0.0.1:0".to_string(),
+                "--auth".to_string(),
+                "none".to_string(),
+                "/tmp/source".to_string(),
+            ],
+        )
+        .expect("export config should parse");
+
+        let error = descriptor_from_export_config(&export_config, 123)
+            .expect_err("ephemeral bind cannot render fileless descriptor")
+            .to_string();
+        assert!(error.contains("r9p_export_git_descriptor_stdout_requires_fixed_tcp_port"));
     }
 
     #[test]

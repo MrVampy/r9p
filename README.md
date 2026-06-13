@@ -62,6 +62,7 @@ r9p mount [--uname uname] [--aname aname] [--attr-timeout seconds] [--entry-time
 r9p serve [--bind address] root
 r9p export [--bind address] [--descriptor machine] [--descriptor-file path] [--auth boundary] [--descriptor-field key=value] root
 r9p export git [--repo path] [--rev rev] [--worktree path] [--bundle-path path] [--bundle-namespace-path path] [--bind address] [--max-fids count] [--descriptor-file path] [--auth boundary]
+r9p export git ensure|status|stop --unit name [--descriptor-file path]
 ```
 
 `-a` accepts `host:port`, `tcp!host!port`, bare hosts defaulting to port 564,
@@ -80,6 +81,11 @@ creates a Git bundle inside that worktree, and emits the normal
 command stays backend-neutral at the r9p layer: it serves bytes and descriptor
 metadata over 9P; consumers decide how to validate Git provenance or admit a
 candidate.
+
+The lifecycle form supervises that Git export through a user systemd unit.
+`ensure` and `status` print the descriptor document on stdout by default.
+`--descriptor-file` is an optional extra sink when a caller also wants a
+durable descriptor copy.
 
 `r9p mount` runs a bounded worker pool rather than spawning one OS thread per
 FUSE request. The defaults follow the conservative libfuse/Linux shape:

@@ -3,7 +3,7 @@ pub mod serve;
 
 use r9p::error::{Error, Result};
 use r9p::fid::Fid;
-use r9p::qid::{Qid, QTDIR, QTFILE};
+use r9p::qid::{Qid, DMDIR, QTDIR, QTFILE};
 use r9p::server::{FileTree, OpenFile, ReadData};
 use r9p::stat::Stat;
 use std::collections::{BTreeMap, VecDeque};
@@ -157,7 +157,7 @@ impl State {
         let node = self.node(id)?;
         let qid = self.qid_for(id)?;
         let (mode, length) = match &node.body {
-            Body::Dir(_) => (0o040555u32, 0u64),
+            Body::Dir(_) => (DMDIR | 0o555, 0u64),
             Body::File(bytes) => (0o444u32, bytes.len() as u64),
             Body::Log(log) => (0o444u32, log.end()),
             Body::IntakeNew(_) => (0o222u32, 0u64),
@@ -948,6 +948,37 @@ mod tests {
                 assert_eq!(stats.len(), 2);
             }
             ReadData::Bytes(_) => panic!("expected directory listing"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn root_directory_reports_dmdir_and_lists_top_level_children() -> Result<()> {
+        let front = Front::new();
+        front.set("manifest", b"m")?;
+        front.set("state", b"s")?;
+        front.register_rpc("queries")?;
+        front.append_event("events", b"e\n")?;
+        let mut tree = front.tree();
+        let root_qid = tree.attach(1, b"claude", b"/")?;
+        let stat = tree.stat(root_qid)?;
+        assert_ne!(stat.mode & DMDIR, 0);
+        assert_eq!(stat.name, b".".to_vec());
+        match tree.read(1, root_qid, 0, 4096)? {
+            ReadData::Directory(stats) => {
+                let mut names: Vec<Vec<u8>> = stats.iter().map(|stat| stat.name.clone()).collect();
+                names.sort();
+                assert_eq!(
+                    names,
+                    vec![
+                        b"events".to_vec(),
+                        b"manifest".to_vec(),
+                        b"queries".to_vec(),
+                        b"state".to_vec(),
+                    ]
+                );
+            }
+            ReadData::Bytes(_) => panic!("expected directory listing for root"),
         }
         Ok(())
     }

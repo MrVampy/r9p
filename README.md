@@ -85,7 +85,9 @@ candidate.
 The lifecycle form supervises that Git export through a user systemd unit.
 `ensure` and `status` print the descriptor document on stdout by default.
 `--descriptor-file` is an optional extra sink when a caller also wants a
-durable descriptor copy.
+durable descriptor copy. Lifecycle supervision records the resolved commit in
+the unit command, so a symbolic revision such as `HEAD` moving makes the next
+`ensure` refresh the export instead of describing stale served bytes.
 
 `r9p mount` runs a bounded worker pool rather than spawning one OS thread per
 FUSE request. The defaults follow the conservative libfuse/Linux shape:

@@ -80,6 +80,9 @@ fn git_export_ensure_cmd(global: Config, args: Vec<String>) -> CliResult<()> {
         emit_lifecycle_status(&descriptor)?;
         return Ok(());
     }
+    let expected_revision = resolve_git_revision(&config.repo, &config.rev)?;
+    let export_args =
+        lifecycle_export_args_for_revision(export_args, &config.repo, &expected_revision);
     stop_git_export(&config);
     if let Some(descriptor_file) = &config.descriptor_file {
         if let Some(parent) = descriptor_file.parent() {
@@ -286,9 +289,14 @@ fn assert_git_export_current(
             config.unit
         )));
     }
-    assert_command_contains_args(&unit_command, &config.expected_args)?;
     let expected_revision = resolve_git_revision(&config.repo, &config.rev)?;
-    let descriptor = current_descriptor(global, config, &expected_revision)?;
+    let expected_args = lifecycle_export_args_for_revision(
+        config.expected_args.clone(),
+        &config.repo,
+        &expected_revision,
+    );
+    assert_command_contains_args(&unit_command, &expected_args)?;
+    let descriptor = current_descriptor(global, config, &expected_args, &expected_revision)?;
     assert_descriptor_revision_current(&descriptor, &expected_revision)?;
     assert_descriptor_endpoint_accepts(&descriptor)?;
     Ok(descriptor)
@@ -297,20 +305,22 @@ fn assert_git_export_current(
 fn current_descriptor(
     global: &Config,
     config: &GitExportLifecycleConfig,
+    expected_args: &[String],
     expected_revision: &str,
 ) -> CliResult<ExportDescriptor> {
     match config.descriptor_file {
         Some(_) => read_descriptor(config),
-        None => render_lifecycle_descriptor(global, config, expected_revision),
+        None => render_lifecycle_descriptor(global, config, expected_args, expected_revision),
     }
 }
 
 fn render_lifecycle_descriptor(
     global: &Config,
     config: &GitExportLifecycleConfig,
+    expected_args: &[String],
     expected_revision: &str,
 ) -> CliResult<ExportDescriptor> {
-    let command = parse_git_export_config(global.clone(), config.expected_args.clone())?;
+    let command = parse_git_export_config(global.clone(), expected_args.to_vec())?;
     let worktree = command
         .git
         .worktree
@@ -328,6 +338,29 @@ fn render_lifecycle_descriptor(
     let export_config = parse_export_config(command.global, export_args)?;
     let pid = systemd_unit_main_pid(&config.unit)?;
     descriptor_from_export_config(&export_config, pid)
+}
+
+fn lifecycle_export_args_for_revision(
+    args: Vec<String>,
+    repo: &Path,
+    revision: &str,
+) -> Vec<String> {
+    let args = upsert_option_value(args, "--repo", repo.display().to_string());
+    upsert_option_value(args, "--rev", revision.to_string())
+}
+
+fn upsert_option_value(mut args: Vec<String>, option: &str, value: String) -> Vec<String> {
+    let mut index = 0_usize;
+    while index + 1 < args.len() {
+        if args[index] == option {
+            args[index + 1] = value;
+            return args;
+        }
+        index += 2;
+    }
+    args.push(option.to_string());
+    args.push(value);
+    args
 }
 
 fn descriptor_from_export_config(config: &ExportConfig, pid: u32) -> CliResult<ExportDescriptor> {
@@ -1051,6 +1084,62 @@ mod tests {
                 "127.0.0.1:19572".to_string(),
                 "--auth".to_string(),
                 "none".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn lifecycle_export_args_pin_symbolic_revision_to_commit() {
+        let args = lifecycle_export_args_for_revision(
+            vec![
+                "--repo".to_string(),
+                ".".to_string(),
+                "--rev".to_string(),
+                "HEAD".to_string(),
+                "--bind".to_string(),
+                "127.0.0.1:19572".to_string(),
+            ],
+            Path::new("."),
+            "abc123",
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "--repo".to_string(),
+                ".".to_string(),
+                "--rev".to_string(),
+                "abc123".to_string(),
+                "--bind".to_string(),
+                "127.0.0.1:19572".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn lifecycle_export_args_add_default_repo_and_revision() {
+        let args = lifecycle_export_args_for_revision(
+            vec![
+                "--bind".to_string(),
+                "127.0.0.1:19572".to_string(),
+                "--auth".to_string(),
+                "none".to_string(),
+            ],
+            Path::new("."),
+            "abc123",
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "--bind".to_string(),
+                "127.0.0.1:19572".to_string(),
+                "--auth".to_string(),
+                "none".to_string(),
+                "--repo".to_string(),
+                ".".to_string(),
+                "--rev".to_string(),
+                "abc123".to_string(),
             ]
         );
     }

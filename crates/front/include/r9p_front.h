@@ -2,10 +2,10 @@
 #define R9P_FRONT_H
 
 /*
- * r9p front C ABI, version 2.
+ * r9p front C ABI, version 3.
  *
  * Contract rules:
- * - r9p_front_abi_version() must return 2 before any other call is made;
+ * - r9p_front_abi_version() must return 3 before any other call is made;
  *   hosts reject a mismatch.
  * - r9p_front_new() returns an owned handle; every handle must be released
  *   exactly once with r9p_front_free(). Calls other than r9p_front_free()
@@ -24,6 +24,19 @@
  * - r9p_front_next_request stages the returned request by request id for
  *   r9p_front_request_copy. Call sequence per request: next_request,
  *   request_copy(request_id), complete_request.
+ * - Two host-side request shapes, both drained by the same
+ *   next_request/request_copy/complete_request loop:
+ *   - register_intake(prefix): a request LIFECYCLE. A client write to
+ *     <prefix>/new enqueues a request; complete_request publishes the
+ *     result file at <prefix>/<id>/result for a separate reader. Use for
+ *     multi-step requests with a durable per-request subtree.
+ *   - register_rpc(path): single-fid request/response (factotum rpc
+ *     shape). A client opens <path> O_RDWR, writes the request, and reads
+ *     the response on the SAME fid; the fid is the session.
+ *     complete_request delivers the response to that parked read. Use for
+ *     stateless query/response. A subsequent write on the same fid is a
+ *     fresh request; clunk discards a pending one. A read before a write,
+ *     or after the host abandons the request, errors.
  * - r9p_front_serve_tcp spawns serving threads; r9p_front_stop halts
  *   accepting. Push calls (set, append_event, complete_request) wake any
  *   blocked 9P readers; a blocked read returns empty at the front's wait
@@ -46,6 +59,8 @@ int32_t r9p_front_append_event(r9p_front *front, const char *path,
                                size_t bytes_len);
 int32_t r9p_front_register_intake(r9p_front *front, const char *prefix,
                                   size_t prefix_len);
+int32_t r9p_front_register_rpc(r9p_front *front, const char *path,
+                               size_t path_len);
 int32_t r9p_front_serve_tcp(r9p_front *front, const char *bind,
                             size_t bind_len, uint16_t *port_out);
 int32_t r9p_front_next_request(r9p_front *front, uint64_t timeout_ms,

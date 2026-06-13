@@ -1,4 +1,5 @@
 use crate::Front;
+use crate::ReadTarget;
 use r9p::codec;
 use r9p::error::{Error, Result};
 use r9p::fid::NOFID;
@@ -232,15 +233,19 @@ fn perform_request(
             offset,
             count,
         } => {
-            let (front, id) = {
+            let (front, target) = {
                 let tree = tree
                     .lock()
                     .map_err(|_| Error::from_static("front tree poisoned"))?;
                 (tree.front(), tree.read_target(*fid)?)
             };
-            front
-                .read_node(id, *offset, *count, cancel.as_deref())
-                .map(ServerCompletion::Read)
+            let read = match target {
+                ReadTarget::Node(id) => front.read_node(id, *offset, *count, cancel.as_deref()),
+                ReadTarget::Rpc(request_id) => {
+                    front.rpc_read(request_id, *offset, *count, cancel.as_deref())
+                }
+            };
+            read.map(ServerCompletion::Read)
         }
         ServerRequestKind::Write {
             fid,

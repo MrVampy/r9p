@@ -1,7 +1,7 @@
 use front::abi::{
     r9p_front_abi_version, r9p_front_append_event, r9p_front_complete_request, r9p_front_free,
-    r9p_front_new, r9p_front_next_request, r9p_front_register_intake, r9p_front_request_copy,
-    r9p_front_serve_tcp, r9p_front_set, r9p_front_stop,
+    r9p_front_new, r9p_front_next_request, r9p_front_register_intake, r9p_front_register_rpc,
+    r9p_front_request_copy, r9p_front_serve_tcp, r9p_front_set, r9p_front_stop,
 };
 use front::Front;
 use r9p::blocking::Client;
@@ -25,7 +25,7 @@ fn cbytes(value: &[u8]) -> (*const u8, usize) {
 
 #[test]
 fn abi_roundtrip_over_tcp() {
-    assert_eq!(r9p_front_abi_version(), 2);
+    assert_eq!(r9p_front_abi_version(), 3);
     let handle = r9p_front_new();
     let (path, path_len) = cstr("market/status");
     let (bytes, bytes_len) = cbytes(b"#M(\"state\" 'open)");
@@ -44,6 +44,8 @@ fn abi_roundtrip_over_tcp() {
         unsafe { r9p_front_register_intake(handle, intake, intake_len) },
         0
     );
+    let (rpc, rpc_len) = cstr("rpc");
+    assert_eq!(unsafe { r9p_front_register_rpc(handle, rpc, rpc_len) }, 0);
     let (bind, bind_len) = cstr("127.0.0.1:0");
     let mut port = 0u16;
     assert_eq!(
@@ -167,6 +169,44 @@ fn abi_roundtrip_over_tcp() {
     client.open(result_fid, 0).expect("open result");
     let result_read = client.read(result_fid, 0, 4096).expect("read result");
     assert_eq!(result_read, b"#M(\"hits\" (\"will-trump\" ))".to_vec());
+
+    let rpc_fid = client.walk_path("/rpc").expect("walk rpc");
+    client.open(rpc_fid, 2).expect("open rpc rdwr");
+    let rpc_query = b"#M(\"match\" \"World Cup\")";
+    let wrote = client
+        .write_once(rpc_fid, 0, rpc_query)
+        .expect("write rpc request");
+    assert_eq!(wrote as usize, rpc_query.len());
+    let mut rpc_request_id = 0u64;
+    let mut rpc_request_len = 0usize;
+    assert_eq!(
+        unsafe { r9p_front_next_request(handle, 1000, &mut rpc_request_id, &mut rpc_request_len) },
+        0
+    );
+    let mut rpc_buf = vec![0u8; rpc_request_len];
+    let copied = unsafe {
+        r9p_front_request_copy(handle, rpc_request_id, rpc_buf.as_mut_ptr(), rpc_buf.len())
+    };
+    assert_eq!(copied as usize, rpc_request_len);
+    assert_eq!(rpc_buf, rpc_query.to_vec());
+    let (rpc_result, rpc_result_len) = cbytes(b"#M(\"count\" 37)");
+    assert_eq!(
+        unsafe {
+            r9p_front_complete_request(
+                handle,
+                rpc,
+                rpc_len,
+                rpc_request_id,
+                rpc_result,
+                rpc_result_len,
+            )
+        },
+        0
+    );
+    let rpc_response = client
+        .read(rpc_fid, 0, 4096)
+        .expect("read rpc response on same fid");
+    assert_eq!(rpc_response, b"#M(\"count\" 37)".to_vec());
 
     assert_eq!(unsafe { r9p_front_stop(handle) }, 0);
     unsafe { r9p_front_free(handle) };

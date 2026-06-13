@@ -19,6 +19,7 @@ const ENOTDIR: &str = "not a directory";
 const ROOT_ID: u64 = 0;
 const OREAD: u8 = 0;
 const OWRITE: u8 = 1;
+const ORDWR: u8 = 2;
 const OTRUNC: u8 = 0x10;
 const ORCLOSE: u8 = 0x40;
 const OPEN_MODE_MASK: u8 = 0x03;
@@ -31,6 +32,7 @@ enum Body {
     File(Vec<u8>),
     Log(LogBody),
     IntakeNew(u64),
+    Rpc,
 }
 
 struct LogBody {
@@ -103,6 +105,7 @@ struct State {
     next_request_id: u64,
     intakes: BTreeMap<u64, Intake>,
     pending: VecDeque<IntakeRequest>,
+    rpc_responses: BTreeMap<u64, Option<Vec<u8>>>,
     wait_timeout: Duration,
     log_capacity: usize,
 }
@@ -129,6 +132,7 @@ impl State {
             next_request_id: 1,
             intakes: BTreeMap::new(),
             pending: VecDeque::new(),
+            rpc_responses: BTreeMap::new(),
             wait_timeout: Duration::from_secs(30),
             log_capacity: DEFAULT_LOG_CAPACITY,
         }
@@ -157,6 +161,7 @@ impl State {
             Body::File(bytes) => (0o444u32, bytes.len() as u64),
             Body::Log(log) => (0o444u32, log.end()),
             Body::IntakeNew(_) => (0o222u32, 0u64),
+            Body::Rpc => (0o600u32, 0u64),
         };
         Ok(Stat {
             type_: 0,
@@ -285,6 +290,7 @@ fn open_allowed(body: &Body, mode: u8) -> bool {
     match body {
         Body::Dir(_) | Body::File(_) | Body::Log(_) => mode & OPEN_MODE_MASK == OREAD,
         Body::IntakeNew(_) => mode & OPEN_MODE_MASK == OWRITE,
+        Body::Rpc => mode & OPEN_MODE_MASK == ORDWR,
     }
 }
 
@@ -351,6 +357,16 @@ impl Front {
         Ok(())
     }
 
+    pub fn register_rpc(&self, path: &str) -> Result<()> {
+        let mut state = self.lock()?;
+        let trimmed = path.trim_matches('/');
+        if trimmed.is_empty() {
+            return Err(Error::from_static(EPERM));
+        }
+        state.place(trimmed, Body::Rpc)?;
+        Ok(())
+    }
+
     pub fn next_request(&self, timeout: Duration) -> Result<Option<IntakeRequest>> {
         let deadline = Instant::now() + timeout;
         let mut state = self.lock()?;
@@ -372,9 +388,67 @@ impl Front {
     }
 
     pub fn complete_request(&self, prefix: &str, request_id: u64, bytes: &[u8]) -> Result<()> {
+        {
+            let mut state = self.lock()?;
+            if let Some(slot) = state.rpc_responses.get_mut(&request_id) {
+                *slot = Some(bytes.to_vec());
+                drop(state);
+                self.shared.1.notify_all();
+                return Ok(());
+            }
+        }
         let trimmed = prefix.trim_matches('/');
         let result_path = format!("{trimmed}/{request_id}/result");
         self.set(&result_path, bytes)
+    }
+
+    fn read_rpc(
+        &self,
+        mut state: std::sync::MutexGuard<'_, State>,
+        request_id: u64,
+        offset: u64,
+        count: u32,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<ReadData> {
+        let deadline = Instant::now() + state.wait_timeout;
+        loop {
+            if cancel.is_some_and(|cancel| cancel.load(Ordering::SeqCst)) {
+                return Err(Error::from_static("request flushed"));
+            }
+            match state.rpc_responses.get(&request_id) {
+                None => return Err(Error::from_static(ENOENT)),
+                Some(Some(bytes)) => {
+                    let start = usize::try_from(offset.min(bytes.len() as u64))
+                        .map_err(|_| Error::from_static(EPERM))?;
+                    let end = bytes.len().min(start.saturating_add(count as usize));
+                    return Ok(ReadData::Bytes(bytes[start..end].to_vec()));
+                }
+                Some(None) => {}
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(Error::from_static(
+                    "rpc request timed out awaiting response",
+                ));
+            }
+            let (next, _timeout_result) = self
+                .shared
+                .1
+                .wait_timeout(state, deadline - now)
+                .map_err(|_| Error::from_static("front state poisoned"))?;
+            state = next;
+        }
+    }
+
+    pub(crate) fn rpc_read(
+        &self,
+        request_id: u64,
+        offset: u64,
+        count: u32,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<ReadData> {
+        let state = self.lock()?;
+        self.read_rpc(state, request_id, offset, count, cancel)
     }
 
     fn read_log(
@@ -420,6 +494,7 @@ impl Front {
         FrontTree {
             front: self.clone(),
             fids: BTreeMap::new(),
+            rpc_inflight: BTreeMap::new(),
         }
     }
 
@@ -451,13 +526,20 @@ impl Front {
             }
             Body::Log(_) => self.read_log(state, id, offset, count, cancel),
             Body::IntakeNew(_) => Err(Error::from_static(EPERM)),
+            Body::Rpc => Err(Error::from_static(EPERM)),
         }
     }
+}
+
+pub(crate) enum ReadTarget {
+    Node(u64),
+    Rpc(u64),
 }
 
 pub struct FrontTree {
     front: Front,
     fids: BTreeMap<Fid, u64>,
+    rpc_inflight: BTreeMap<Fid, u64>,
 }
 
 impl FileTree for FrontTree {
@@ -514,8 +596,10 @@ impl FileTree for FrontTree {
     }
 
     fn read(&mut self, fid: Fid, _qid: Qid, offset: u64, count: u32) -> Result<ReadData> {
-        let id = self.read_target(fid)?;
-        self.front.read_node(id, offset, count, None)
+        match self.read_target(fid)? {
+            ReadTarget::Node(id) => self.front.read_node(id, offset, count, None),
+            ReadTarget::Rpc(request_id) => self.front.rpc_read(request_id, offset, count, None),
+        }
     }
 
     fn write(&mut self, fid: Fid, _qid: Qid, _offset: u64, data: &[u8]) -> Result<u32> {
@@ -524,6 +608,22 @@ impl FileTree for FrontTree {
             .fids
             .get(&fid)
             .ok_or_else(|| Error::from_static(EBADFID))?;
+        if matches!(state.node(id)?.body, Body::Rpc) {
+            if let Some(previous) = self.rpc_inflight.remove(&fid) {
+                state.rpc_responses.remove(&previous);
+            }
+            let request_id = state.next_request_id;
+            state.next_request_id = state.next_request_id.saturating_add(1);
+            state.rpc_responses.insert(request_id, None);
+            state.pending.push_back(IntakeRequest {
+                request_id,
+                bytes: data.to_vec(),
+            });
+            self.rpc_inflight.insert(fid, request_id);
+            drop(state);
+            self.front.shared.1.notify_all();
+            return u32::try_from(data.len()).map_err(|_| Error::from_static(EPERM));
+        }
         let intake_id = match state.node(id)?.body {
             Body::IntakeNew(intake_id) => intake_id,
             _ => return Err(Error::from_static(EPERM)),
@@ -559,16 +659,31 @@ impl FileTree for FrontTree {
 
     fn clunk(&mut self, fid: Fid, _qid: Qid) -> Result<()> {
         self.fids.remove(&fid);
+        if let Some(request_id) = self.rpc_inflight.remove(&fid) {
+            if let Ok(mut state) = self.front.lock() {
+                state.rpc_responses.remove(&request_id);
+            }
+        }
         Ok(())
     }
 }
 
 impl FrontTree {
-    pub(crate) fn read_target(&self, fid: Fid) -> Result<u64> {
-        self.fids
+    pub(crate) fn read_target(&self, fid: Fid) -> Result<ReadTarget> {
+        let id = *self
+            .fids
             .get(&fid)
-            .copied()
-            .ok_or_else(|| Error::from_static(EBADFID))
+            .ok_or_else(|| Error::from_static(EBADFID))?;
+        let state = self.front.lock()?;
+        if matches!(state.node(id)?.body, Body::Rpc) {
+            let request_id = self
+                .rpc_inflight
+                .get(&fid)
+                .copied()
+                .ok_or_else(|| Error::from_static("rpc read before write on this fid"))?;
+            return Ok(ReadTarget::Rpc(request_id));
+        }
+        Ok(ReadTarget::Node(id))
     }
 
     pub(crate) fn front(&self) -> Front {
@@ -834,6 +949,77 @@ mod tests {
             }
             ReadData::Bytes(_) => panic!("expected directory listing"),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn rpc_node_only_opens_read_write() -> Result<()> {
+        let front = Front::new();
+        front.register_rpc("queries")?;
+        let mut tree = front.tree();
+        tree.attach(1, b"claude", b"/")?;
+        let qids = walk_to(&mut tree, 1, 2, &["queries"]);
+        assert!(tree.open(2, qids[0], ORDWR).is_ok());
+        assert!(tree.open(2, qids[0], OREAD).is_err());
+        assert!(tree.open(2, qids[0], OWRITE).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn rpc_single_fid_request_response_roundtrip() -> Result<()> {
+        let front = Front::new();
+        front.register_rpc("queries")?;
+        let mut tree = front.tree();
+        tree.attach(1, b"claude", b"/")?;
+        let qids = walk_to(&mut tree, 1, 2, &["queries"]);
+        tree.open(2, qids[0], ORDWR)?;
+        let written = tree.write(2, qids[0], 0, b"find markets")?;
+        assert_eq!(written as usize, "find markets".len());
+        let request = front
+            .next_request(Duration::from_millis(200))?
+            .expect("a pending rpc request");
+        assert_eq!(request.bytes, b"find markets");
+        front.complete_request("queries", request.request_id, b"{\"hits\":2}")?;
+        let response = tree.read(2, qids[0], 0, 4096)?;
+        assert_eq!(response, ReadData::Bytes(b"{\"hits\":2}".to_vec()));
+        let tail = tree.read(2, qids[0], 6, 4096)?;
+        assert_eq!(tail, ReadData::Bytes(b"\":2}".to_vec()));
+        Ok(())
+    }
+
+    #[test]
+    fn rpc_read_before_write_is_an_error() -> Result<()> {
+        let front = Front::new();
+        front.register_rpc("queries")?;
+        let mut tree = front.tree();
+        tree.attach(1, b"claude", b"/")?;
+        let qids = walk_to(&mut tree, 1, 2, &["queries"]);
+        tree.open(2, qids[0], ORDWR)?;
+        assert!(tree.read(2, qids[0], 0, 4096).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn rpc_second_request_on_same_fid_replaces_the_first() -> Result<()> {
+        let front = Front::new();
+        front.register_rpc("queries")?;
+        let mut tree = front.tree();
+        tree.attach(1, b"claude", b"/")?;
+        let qids = walk_to(&mut tree, 1, 2, &["queries"]);
+        tree.open(2, qids[0], ORDWR)?;
+        let _ = tree.write(2, qids[0], 0, b"first")?;
+        let first = front
+            .next_request(Duration::from_millis(200))?
+            .expect("first request");
+        front.complete_request("queries", first.request_id, b"one")?;
+        let _ = tree.write(2, qids[0], 0, b"second")?;
+        let second = front
+            .next_request(Duration::from_millis(200))?
+            .expect("second request");
+        assert_eq!(second.bytes, b"second");
+        front.complete_request("queries", second.request_id, b"two")?;
+        let response = tree.read(2, qids[0], 0, 4096)?;
+        assert_eq!(response, ReadData::Bytes(b"two".to_vec()));
         Ok(())
     }
 }

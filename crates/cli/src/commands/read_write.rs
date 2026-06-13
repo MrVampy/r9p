@@ -1,4 +1,7 @@
-use r9p::blocking::{OREAD, OTRUNC, OWRITE};
+use std::io::Read;
+
+use r9p::blocking::{BoxedClient, ORDWR, OREAD, OTRUNC, OWRITE};
+use r9p::fid::Fid;
 
 use crate::commands::machine::machine_write_cmd;
 use crate::commands::mutate::split_parent;
@@ -109,6 +112,39 @@ fn machine_write_fd_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
     let count = result?;
     clunk?;
     println!("write\t{count}");
+    Ok(())
+}
+
+pub(crate) fn rpc_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
+    if args.is_empty() || args.len() > 2 {
+        usage();
+    }
+    let request = match args.get(1) {
+        Some(request) => request.clone().into_bytes(),
+        None => {
+            let mut buf = Vec::new();
+            std::io::stdin().read_to_end(&mut buf)?;
+            buf
+        }
+    };
+    let target = Target {
+        config: write_config_for_path(config, &args[0]),
+        path: args[0].clone(),
+    };
+    let (mut client, fid) = open_path(&target, ORDWR)?;
+    let result = rpc_exchange(&mut client, fid, &request);
+    let clunk = client.clunk(fid);
+    result?;
+    clunk?;
+    Ok(())
+}
+
+fn rpc_exchange(client: &mut BoxedClient, fid: Fid, request: &[u8]) -> CliResult<()> {
+    let count = client.write_once(fid, 0, request)?;
+    if count as usize != request.len() {
+        return Err(cli_error("rpc request exceeded a single 9P message"));
+    }
+    copy_fid_to_stdout(client, fid)?;
     Ok(())
 }
 

@@ -16,8 +16,8 @@ use commands::{
     mount::mount_cmd,
     mutate::{create_cmd, mkdir_cmd, rm_cmd},
     read_write::{
-        create_write_from_cmd, read_cmd, read_to_cmd, write_at_cmd, write_cmd, write_from_cmd,
-        write_from_trunc_cmd, ReadMode, WriteMode,
+        create_write_from_cmd, read_cmd, read_to_cmd, rpc_cmd, write_at_cmd, write_cmd,
+        write_from_cmd, write_from_trunc_cmd, ReadMode, WriteMode,
     },
     script::machine_script_cmd,
     serve::{export_cmd, serve_cmd},
@@ -74,6 +74,7 @@ fn run() -> CliResult<()> {
         "export" => export_cmd(config, args),
         "stat" => stat_cmd(config, args),
         "rdwr" => rdwr_cmd(config, args),
+        "rpc" => rpc_cmd(config, args),
         "ls" => ls_cmd(config, args),
         "list" if config.machine => machine_list_cmd(config, args),
         "rm" => rm_cmd(config, args),
@@ -221,6 +222,7 @@ pub(crate) fn usage() -> ! {
     eprintln!("  writefd name");
     eprintln!("  stat name");
     eprintln!("  rdwr name");
+    eprintln!("  rpc name [request]       write request, read response on the same fid");
     eprintln!("  ls [-ldnt] name...");
     eprintln!("  list name                machine mode");
     eprintln!("  read-to name local       machine mode");

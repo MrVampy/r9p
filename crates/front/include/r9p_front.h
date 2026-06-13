@@ -2,10 +2,10 @@
 #define R9P_FRONT_H
 
 /*
- * r9p front C ABI, version 3.
+ * r9p front C ABI, version 4.
  *
  * Contract rules:
- * - r9p_front_abi_version() must return 3 before any other call is made;
+ * - r9p_front_abi_version() must return 4 before any other call is made;
  *   hosts reject a mismatch.
  * - r9p_front_new() returns an owned handle; every handle must be released
  *   exactly once with r9p_front_free(). Calls other than r9p_front_free()
@@ -37,6 +37,13 @@
  *     stateless query/response. A subsequent write on the same fid is a
  *     fresh request; clunk discards a pending one. A read before a write,
  *     or after the host abandons the request, errors.
+ * - append_event(path) lazily creates a log node on first append.
+ *   register_log(path) instead declares an empty log up front, so an
+ *   advertised event-stream path is walkable and subscribable from
+ *   attach (before any event): a read at offset 0 blocks until the
+ *   first append (tail -f), stat reports end offset 0. Use when the
+ *   path is published in a manifest a consumer may walk before the
+ *   first event exists.
  * - r9p_front_serve_tcp spawns serving threads; r9p_front_stop halts
  *   accepting. Push calls (set, append_event, complete_request) wake any
  *   blocked 9P readers; a blocked read returns empty at the front's wait
@@ -60,6 +67,8 @@ int32_t r9p_front_append_event(r9p_front *front, const char *path,
 int32_t r9p_front_register_intake(r9p_front *front, const char *prefix,
                                   size_t prefix_len);
 int32_t r9p_front_register_rpc(r9p_front *front, const char *path,
+                               size_t path_len);
+int32_t r9p_front_register_log(r9p_front *front, const char *path,
                                size_t path_len);
 int32_t r9p_front_serve_tcp(r9p_front *front, const char *bind,
                             size_t bind_len, uint16_t *port_out);

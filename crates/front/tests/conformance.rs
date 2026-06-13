@@ -1,12 +1,14 @@
 use front::abi::{
     r9p_front_abi_version, r9p_front_append_event, r9p_front_complete_request, r9p_front_free,
-    r9p_front_new, r9p_front_next_request, r9p_front_register_intake, r9p_front_register_rpc,
-    r9p_front_request_copy, r9p_front_serve_tcp, r9p_front_set, r9p_front_stop,
+    r9p_front_new, r9p_front_next_request, r9p_front_register_intake, r9p_front_register_log,
+    r9p_front_register_rpc, r9p_front_request_copy, r9p_front_serve_tcp, r9p_front_set,
+    r9p_front_stop,
 };
 use front::Front;
 use r9p::blocking::Client;
 use r9p::fid::NOFID;
 use r9p::message::{RMessage, TMessage, NOTAG};
+use r9p::qid::DMDIR;
 use r9p::stat::decode_dir_entries;
 use r9p::{codec, Error};
 use std::ffi::c_char;
@@ -25,7 +27,7 @@ fn cbytes(value: &[u8]) -> (*const u8, usize) {
 
 #[test]
 fn abi_roundtrip_over_tcp() {
-    assert_eq!(r9p_front_abi_version(), 3);
+    assert_eq!(r9p_front_abi_version(), 4);
     let handle = r9p_front_new();
     let (path, path_len) = cstr("market/status");
     let (bytes, bytes_len) = cbytes(b"#M(\"state\" 'open)");
@@ -46,6 +48,11 @@ fn abi_roundtrip_over_tcp() {
     );
     let (rpc, rpc_len) = cstr("rpc");
     assert_eq!(unsafe { r9p_front_register_rpc(handle, rpc, rpc_len) }, 0);
+    let (stream, stream_len) = cstr("stream");
+    assert_eq!(
+        unsafe { r9p_front_register_log(handle, stream, stream_len) },
+        0
+    );
     let (bind, bind_len) = cstr("127.0.0.1:0");
     let mut port = 0u16;
     assert_eq!(
@@ -88,6 +95,13 @@ fn abi_roundtrip_over_tcp() {
     client.open(events_fid, 0).expect("open events");
     let seed_read = client.read(events_fid, 0, 4096).expect("read seed");
     assert_eq!(seed_read, b"seed\n".to_vec());
+
+    let stream_fid = client
+        .walk_path("/stream")
+        .expect("walk declared-empty log");
+    let stream_stat = client.stat(stream_fid).expect("stat declared-empty log");
+    assert_eq!(stream_stat.length, 0);
+    assert_eq!(stream_stat.mode & DMDIR, 0);
 
     let waker = unsafe { handle.as_ref() }.map(|_| ());
     assert!(waker.is_some());

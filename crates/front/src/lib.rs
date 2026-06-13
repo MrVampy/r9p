@@ -53,6 +53,14 @@ impl LogBody {
         }
     }
 
+    fn empty() -> Self {
+        Self {
+            entries: VecDeque::new(),
+            start: 0,
+            retained: 0,
+        }
+    }
+
     fn end(&self) -> u64 {
         self.start + self.retained as u64
     }
@@ -364,6 +372,16 @@ impl Front {
             return Err(Error::from_static(EPERM));
         }
         state.place(trimmed, Body::Rpc)?;
+        Ok(())
+    }
+
+    pub fn register_log(&self, path: &str) -> Result<()> {
+        let mut state = self.lock()?;
+        let trimmed = path.trim_matches('/');
+        if trimmed.is_empty() {
+            return Err(Error::from_static(EPERM));
+        }
+        state.place(trimmed, Body::Log(LogBody::empty()))?;
         Ok(())
     }
 
@@ -980,6 +998,24 @@ mod tests {
             }
             ReadData::Bytes(_) => panic!("expected directory listing for root"),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn register_log_declares_an_empty_walkable_log() -> Result<()> {
+        let front = Front::new();
+        front.register_log("events")?;
+        let mut tree = front.tree();
+        tree.attach(1, b"claude", b"/")?;
+        let qids = walk_to(&mut tree, 1, 2, &["events"]);
+        assert_eq!(qids.len(), 1);
+        let stat = tree.stat(qids[0])?;
+        assert_eq!(stat.length, 0);
+        assert_eq!(stat.mode & DMDIR, 0);
+        tree.open(2, qids[0], OREAD)?;
+        front.append_event("events", b"first\n")?;
+        let data = tree.read(2, qids[0], 0, 4096)?;
+        assert_eq!(data, ReadData::Bytes(b"first\n".to_vec()));
         Ok(())
     }
 

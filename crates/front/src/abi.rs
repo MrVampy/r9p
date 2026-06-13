@@ -7,7 +7,7 @@ use std::ffi::c_char;
 use std::sync::Mutex;
 use std::time::Duration;
 
-pub const ABI_VERSION: u32 = 3;
+pub const ABI_VERSION: u32 = 4;
 
 const OK: i32 = 0;
 const TIMEOUT: i32 = 1;
@@ -142,6 +142,24 @@ pub unsafe extern "C" fn r9p_front_register_rpc(
         return INVALID;
     };
     match abi.front.register_rpc(path) {
+        Ok(()) => OK,
+        Err(_) => INTERNAL,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn r9p_front_register_log(
+    handle: *mut FrontAbi,
+    path: *const c_char,
+    path_len: usize,
+) -> i32 {
+    let Some(abi) = (unsafe { handle.as_ref() }) else {
+        return INVALID;
+    };
+    let Some(path) = (unsafe { str_arg(path, path_len) }) else {
+        return INVALID;
+    };
+    match abi.front.register_log(path) {
         Ok(()) => OK,
         Err(_) => INTERNAL,
     }

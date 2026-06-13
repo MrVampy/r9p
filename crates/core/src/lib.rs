@@ -2,12 +2,14 @@ pub mod blocking;
 pub mod client;
 pub mod codec;
 pub mod error;
+pub mod export_descriptor;
 pub mod fid;
 pub mod flush;
 pub mod message;
 pub mod multiplex;
 pub mod qid;
 pub mod server;
+pub mod srv_publish;
 pub mod stat;
 
 pub use codec::Variant;

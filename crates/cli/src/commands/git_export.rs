@@ -622,7 +622,7 @@ fn read_descriptor(config: &GitExportLifecycleConfig) -> CliResult<ExportDescrip
             descriptor_file.display()
         ))
     })?;
-    ExportDescriptor::parse(&content)
+    Ok(ExportDescriptor::parse(&content)?)
 }
 
 fn parse_git_export_config(global: Config, args: Vec<String>) -> CliResult<GitExportCommand> {

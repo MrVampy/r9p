@@ -1,0 +1,613 @@
+use crate::{
+    blocking::{Client, OREAD, OWRITE},
+    export_descriptor::ExportDescriptor,
+    Error, Result,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct R9pExportPublication {
+    pub vault_endpoint_bind: String,
+    pub vault_uname: String,
+    pub vault_aname: String,
+    pub service_name: String,
+    pub descriptor: ExportDescriptor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishOutcome {
+    AlreadyReady,
+    Registered,
+    Replaced,
+}
+
+pub fn publish_r9p_export(publication: &R9pExportPublication) -> Result<PublishOutcome> {
+    validate_service_name(&publication.service_name)?;
+    let descriptor = publication.descriptor.render()?;
+    let _validated = ExportDescriptor::parse(&descriptor)?;
+    let mut client = Client::connect_tcp(
+        &publication.vault_endpoint_bind,
+        &publication.vault_uname,
+        &publication.vault_aname,
+        publication.descriptor.msize,
+    )?;
+    publish_with_client(publication, &descriptor, &mut client)
+}
+
+fn publish_with_client<S: std::io::Read + std::io::Write>(
+    publication: &R9pExportPublication,
+    descriptor: &str,
+    client: &mut Client<S>,
+) -> Result<PublishOutcome> {
+    let srv_path = srv_path(&publication.service_name);
+    match read_file(client, &srv_path) {
+        Ok(summary) if ready_summary_matches(&summary, publication)? => {
+            Ok(PublishOutcome::AlreadyReady)
+        }
+        Ok(_) => {
+            remove_path(client, &srv_path)?;
+            create_and_write(client, &publication.service_name, descriptor)?;
+            Ok(PublishOutcome::Replaced)
+        }
+        Err(error) if looks_missing(&error) => {
+            create_and_write(client, &publication.service_name, descriptor)?;
+            Ok(PublishOutcome::Registered)
+        }
+        Err(error) => Err(Error::from(format!("inspect {srv_path}: {error}"))),
+    }
+}
+
+pub fn ready_summary_matches(summary: &str, publication: &R9pExportPublication) -> Result<bool> {
+    let descriptor = &publication.descriptor;
+    let endpoint = format!(
+        "endpoint: inline:r9p-export:{}:{}:{}:{}\n",
+        publication.service_name,
+        descriptor.endpoint_bind,
+        descriptor.uname,
+        descriptor.vault_transport_class()?
+    );
+    Ok(
+        summary.contains(&format!("service: {}\n", publication.service_name))
+            && summary.contains("channel_kind: peer_namespace\n")
+            && summary.contains(&format!(
+                "channel: r9p-export:{}\n",
+                publication.service_name
+            ))
+            && summary.contains(&endpoint)
+            && summary.contains(&format!("aname: {}\n", descriptor.aname))
+            && summary.contains(&format!("exported_root: {}\n", descriptor.exported_root)),
+    )
+}
+
+fn create_and_write<S: std::io::Read + std::io::Write>(
+    client: &mut Client<S>,
+    service_name: &str,
+    descriptor: &str,
+) -> Result<()> {
+    let parent = client.walk_path("/runtime/srv")?;
+    let (fid, _) = client.create(parent, service_name.as_bytes(), 0o666, OWRITE)?;
+    let write_result = client.write(fid, 0, descriptor.as_bytes());
+    let clunk_result = client.clunk(fid);
+    write_result?;
+    clunk_result?;
+    Ok(())
+}
+
+fn read_file<S: std::io::Read + std::io::Write>(
+    client: &mut Client<S>,
+    path: &str,
+) -> Result<String> {
+    let fid = client.walk_path(path)?;
+    client.open(fid, OREAD)?;
+    let bytes = client.read(fid, 0, 8192);
+    let clunk_result = client.clunk(fid);
+    let bytes = bytes?;
+    clunk_result?;
+    String::from_utf8(bytes)
+        .map_err(|error| Error::from(format!("read {path} was not utf-8: {error}")))
+}
+
+fn remove_path<S: std::io::Read + std::io::Write>(
+    client: &mut Client<S>,
+    path: &str,
+) -> Result<()> {
+    let fid = client.walk_path(path)?;
+    client.remove(fid)
+}
+
+fn srv_path(service_name: &str) -> String {
+    format!("/runtime/srv/{service_name}")
+}
+
+fn validate_service_name(service_name: &str) -> Result<()> {
+    if service_name.is_empty() || service_name.contains('/') {
+        return Err(Error::from(format!(
+            "invalid srv service name {service_name}"
+        )));
+    }
+    Ok(())
+}
+
+fn looks_missing(error: &Error) -> bool {
+    let message = error.display_lossy().to_ascii_lowercase();
+    message.contains("partial walk")
+        || message.contains("not found")
+        || message.contains("not_found")
+        || message.contains("missing")
+        || message.contains("does not exist")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        codec,
+        export_descriptor::{AuthBoundary, ExportMode, Protocol, TransportClass},
+        message::TMessage,
+        qid::{Qid, DMDIR},
+        server::{FileTree, OpenFile, ReadData, Server},
+        stat::Stat,
+    };
+    use std::{
+        collections::BTreeMap,
+        io::{Read, Write},
+        net::{TcpListener, TcpStream},
+        sync::{Arc, Mutex},
+        thread,
+    };
+
+    #[test]
+    fn publishes_missing_srv_entry() {
+        let tree = SharedSrvTree::new();
+        let address = serve_tree(tree.clone());
+        let mut publication = publication(&address);
+        publication.vault_endpoint_bind = address;
+
+        let outcome = publish_r9p_export(&publication).expect("publish should succeed");
+
+        assert_eq!(outcome, PublishOutcome::Registered);
+        let descriptor = tree
+            .content("polymarket")
+            .expect("descriptor should be written");
+        assert!(descriptor.contains("format\tr9p-export.v1\n"));
+        assert!(descriptor.contains("endpoint_bind\t192.168.0.21:19590\n"));
+    }
+
+    #[test]
+    fn publish_is_idempotent_when_ready_summary_matches() {
+        let tree = SharedSrvTree::new();
+        tree.set_ready_summary("polymarket", ready_summary("192.168.0.21:19590"));
+        let address = serve_tree(tree.clone());
+        let mut publication = publication(&address);
+        publication.vault_endpoint_bind = address;
+
+        let outcome = publish_r9p_export(&publication).expect("publish should succeed");
+
+        assert_eq!(outcome, PublishOutcome::AlreadyReady);
+        assert_eq!(
+            tree.content("polymarket")
+                .expect("ready summary should remain"),
+            ready_summary("192.168.0.21:19590")
+        );
+    }
+
+    #[test]
+    fn publish_replaces_stale_ready_summary() {
+        let tree = SharedSrvTree::new();
+        tree.set_ready_summary("polymarket", ready_summary("192.168.0.21:19591"));
+        let address = serve_tree(tree.clone());
+        let mut publication = publication(&address);
+        publication.vault_endpoint_bind = address;
+
+        let outcome = publish_r9p_export(&publication).expect("publish should succeed");
+
+        assert_eq!(outcome, PublishOutcome::Replaced);
+        let descriptor = tree
+            .content("polymarket")
+            .expect("descriptor should be written");
+        assert!(descriptor.contains("endpoint_bind\t192.168.0.21:19590\n"));
+    }
+
+    #[test]
+    fn matching_summary_uses_vault_transport_class() {
+        let publication = publication("127.0.0.1:9564");
+        assert!(
+            ready_summary_matches(&ready_summary("192.168.0.21:19590"), &publication)
+                .expect("summary should compare")
+        );
+    }
+
+    fn publication(vault_endpoint_bind: &str) -> R9pExportPublication {
+        R9pExportPublication {
+            vault_endpoint_bind: vault_endpoint_bind.to_string(),
+            vault_uname: "codex".to_string(),
+            vault_aname: "/".to_string(),
+            service_name: "polymarket".to_string(),
+            descriptor: ExportDescriptor {
+                endpoint_bind: "192.168.0.21:19590".to_string(),
+                aname: "/".to_string(),
+                uname: "codex".to_string(),
+                exported_root: "/".to_string(),
+                transport_class: TransportClass::Tcp,
+                mode: ExportMode::ReadOnly,
+                auth: AuthBoundary::parse("wg:vault-runtime-lan").expect("auth should parse"),
+                pid: 1234,
+                protocol: Protocol::NineP2000,
+                msize: 65_536,
+                expires_at: None,
+                local_root_label: Some("polymarket-watcher".to_string()),
+                extra_fields: BTreeMap::new(),
+            },
+        }
+    }
+
+    fn ready_summary(endpoint: &str) -> String {
+        [
+            "service: polymarket",
+            "owner: codex.interface",
+            "channel_kind: peer_namespace",
+            "channel: r9p-export:polymarket",
+            &format!(
+                "endpoint: inline:r9p-export:polymarket:{endpoint}:codex:network_class:vault-runtime-lan"
+            ),
+            "aname: /",
+            "exported_root: /",
+            "created_at_ms: 1",
+            "attached_at_ms: 2",
+            "",
+        ]
+        .join("\n")
+    }
+
+    #[derive(Clone)]
+    struct SharedSrvTree {
+        inner: Arc<Mutex<SrvTree>>,
+    }
+
+    impl SharedSrvTree {
+        fn new() -> Self {
+            Self {
+                inner: Arc::new(Mutex::new(SrvTree::new())),
+            }
+        }
+
+        fn set_ready_summary(&self, name: &str, content: String) {
+            self.inner
+                .lock()
+                .expect("tree lock")
+                .set_file(name.as_bytes(), content.into_bytes());
+        }
+
+        fn content(&self, name: &str) -> Option<String> {
+            self.inner
+                .lock()
+                .expect("tree lock")
+                .file_content(name.as_bytes())
+                .map(|bytes| String::from_utf8(bytes).expect("utf-8 content"))
+        }
+    }
+
+    impl FileTree for SharedSrvTree {
+        fn attach(&mut self, _fid: u32, _uname: &[u8], _aname: &[u8]) -> Result<Qid> {
+            Ok(Qid::dir(ROOT))
+        }
+
+        fn walk(
+            &mut self,
+            _fid: u32,
+            _newfid: u32,
+            start: Qid,
+            names: &[Vec<u8>],
+        ) -> Result<Vec<Qid>> {
+            self.inner
+                .lock()
+                .expect("tree lock")
+                .walk(start.path, names)
+        }
+
+        fn open(&mut self, _fid: u32, qid: Qid, _mode: u8) -> Result<OpenFile> {
+            Ok(OpenFile { qid, iounit: 0 })
+        }
+
+        fn read(&mut self, _fid: u32, qid: Qid, offset: u64, count: u32) -> Result<ReadData> {
+            self.inner
+                .lock()
+                .expect("tree lock")
+                .read(qid.path, offset, count)
+        }
+
+        fn stat(&mut self, qid: Qid) -> Result<Stat> {
+            self.inner.lock().expect("tree lock").stat(qid.path)
+        }
+
+        fn create(
+            &mut self,
+            _fid: u32,
+            qid: Qid,
+            name: &[u8],
+            _perm: u32,
+            _mode: u8,
+        ) -> Result<OpenFile> {
+            self.inner.lock().expect("tree lock").create(qid.path, name)
+        }
+
+        fn write(&mut self, _fid: u32, qid: Qid, offset: u64, data: &[u8]) -> Result<u32> {
+            self.inner
+                .lock()
+                .expect("tree lock")
+                .write(qid.path, offset, data)
+        }
+
+        fn remove(&mut self, _fid: u32, qid: Qid) -> Result<()> {
+            self.inner.lock().expect("tree lock").remove(qid.path)
+        }
+    }
+
+    const ROOT: u64 = 1;
+    const RUNTIME: u64 = 2;
+    const SRV: u64 = 3;
+
+    struct SrvTree {
+        nodes: BTreeMap<u64, TestNode>,
+        next_id: u64,
+    }
+
+    struct TestNode {
+        name: Vec<u8>,
+        parent: u64,
+        body: TestBody,
+    }
+
+    enum TestBody {
+        Dir(BTreeMap<Vec<u8>, u64>),
+        File(Vec<u8>),
+    }
+
+    impl SrvTree {
+        fn new() -> Self {
+            let mut nodes = BTreeMap::new();
+            nodes.insert(
+                ROOT,
+                TestNode {
+                    name: b".".to_vec(),
+                    parent: ROOT,
+                    body: TestBody::Dir(BTreeMap::from([(b"runtime".to_vec(), RUNTIME)])),
+                },
+            );
+            nodes.insert(
+                RUNTIME,
+                TestNode {
+                    name: b"runtime".to_vec(),
+                    parent: ROOT,
+                    body: TestBody::Dir(BTreeMap::from([(b"srv".to_vec(), SRV)])),
+                },
+            );
+            nodes.insert(
+                SRV,
+                TestNode {
+                    name: b"srv".to_vec(),
+                    parent: RUNTIME,
+                    body: TestBody::Dir(BTreeMap::new()),
+                },
+            );
+            Self { nodes, next_id: 4 }
+        }
+
+        fn walk(&self, start: u64, names: &[Vec<u8>]) -> Result<Vec<Qid>> {
+            let mut current = start;
+            let mut qids = Vec::new();
+            for name in names {
+                if name == b"." {
+                    qids.push(self.qid(current)?);
+                    continue;
+                }
+                if name == b".." {
+                    current = self.node(current)?.parent;
+                    qids.push(self.qid(current)?);
+                    continue;
+                }
+                let node = self.node(current)?;
+                let TestBody::Dir(children) = &node.body else {
+                    break;
+                };
+                let Some(next) = children.get(name).copied() else {
+                    break;
+                };
+                current = next;
+                qids.push(self.qid(current)?);
+            }
+            Ok(qids)
+        }
+
+        fn create(&mut self, parent: u64, name: &[u8]) -> Result<OpenFile> {
+            let parent_node = self
+                .nodes
+                .get_mut(&parent)
+                .ok_or_else(|| Error::from("missing parent"))?;
+            let TestBody::Dir(children) = &mut parent_node.body else {
+                return Err(Error::from("not a directory"));
+            };
+            if children.contains_key(name) {
+                return Err(Error::from("file exists"));
+            }
+            let id = self.next_id;
+            self.next_id += 1;
+            children.insert(name.to_vec(), id);
+            self.nodes.insert(
+                id,
+                TestNode {
+                    name: name.to_vec(),
+                    parent,
+                    body: TestBody::File(Vec::new()),
+                },
+            );
+            Ok(OpenFile {
+                qid: Qid::file(id),
+                iounit: 0,
+            })
+        }
+
+        fn set_file(&mut self, name: &[u8], content: Vec<u8>) {
+            if let Some(id) = self.child(SRV, name) {
+                if let Some(TestNode {
+                    body: TestBody::File(bytes),
+                    ..
+                }) = self.nodes.get_mut(&id)
+                {
+                    *bytes = content;
+                    return;
+                }
+            }
+            let id = self.next_id;
+            self.next_id += 1;
+            if let Some(TestNode {
+                body: TestBody::Dir(children),
+                ..
+            }) = self.nodes.get_mut(&SRV)
+            {
+                children.insert(name.to_vec(), id);
+            }
+            self.nodes.insert(
+                id,
+                TestNode {
+                    name: name.to_vec(),
+                    parent: SRV,
+                    body: TestBody::File(content),
+                },
+            );
+        }
+
+        fn file_content(&self, name: &[u8]) -> Option<Vec<u8>> {
+            let id = self.child(SRV, name)?;
+            match &self.nodes.get(&id)?.body {
+                TestBody::File(bytes) => Some(bytes.clone()),
+                TestBody::Dir(_) => None,
+            }
+        }
+
+        fn read(&self, id: u64, offset: u64, count: u32) -> Result<ReadData> {
+            match &self.node(id)?.body {
+                TestBody::File(bytes) => {
+                    let offset = usize::try_from(offset).unwrap_or(usize::MAX);
+                    let count = usize::try_from(count).unwrap_or(usize::MAX);
+                    let end = offset.saturating_add(count).min(bytes.len());
+                    Ok(ReadData::Bytes(if offset >= bytes.len() {
+                        Vec::new()
+                    } else {
+                        bytes[offset..end].to_vec()
+                    }))
+                }
+                TestBody::Dir(children) => Ok(ReadData::Directory(
+                    children
+                        .values()
+                        .filter_map(|id| self.stat(*id).ok())
+                        .collect(),
+                )),
+            }
+        }
+
+        fn write(&mut self, id: u64, offset: u64, data: &[u8]) -> Result<u32> {
+            let node = self
+                .nodes
+                .get_mut(&id)
+                .ok_or_else(|| Error::from("missing file"))?;
+            let TestBody::File(bytes) = &mut node.body else {
+                return Err(Error::from("not a file"));
+            };
+            let offset = usize::try_from(offset).map_err(|_| Error::from("offset overflow"))?;
+            if bytes.len() < offset {
+                bytes.resize(offset, 0);
+            }
+            if bytes.len() < offset + data.len() {
+                bytes.resize(offset + data.len(), 0);
+            }
+            bytes[offset..offset + data.len()].copy_from_slice(data);
+            u32::try_from(data.len()).map_err(|_| Error::from("write too large"))
+        }
+
+        fn remove(&mut self, id: u64) -> Result<()> {
+            if id == ROOT || id == RUNTIME || id == SRV {
+                return Err(Error::from("cannot remove directory"));
+            }
+            let parent = self.node(id)?.parent;
+            let name = self.node(id)?.name.clone();
+            if let Some(TestNode {
+                body: TestBody::Dir(children),
+                ..
+            }) = self.nodes.get_mut(&parent)
+            {
+                children.remove(&name);
+            }
+            self.nodes.remove(&id);
+            Ok(())
+        }
+
+        fn stat(&self, id: u64) -> Result<Stat> {
+            let node = self.node(id)?;
+            match &node.body {
+                TestBody::Dir(_) => Ok(Stat::new(node.name.clone(), Qid::dir(id), DMDIR | 0o555)),
+                TestBody::File(bytes) => {
+                    let mut stat = Stat::new(node.name.clone(), Qid::file(id), 0o666);
+                    stat.length = bytes.len() as u64;
+                    Ok(stat)
+                }
+            }
+        }
+
+        fn qid(&self, id: u64) -> Result<Qid> {
+            match self.node(id)?.body {
+                TestBody::Dir(_) => Ok(Qid::dir(id)),
+                TestBody::File(_) => Ok(Qid::file(id)),
+            }
+        }
+
+        fn node(&self, id: u64) -> Result<&TestNode> {
+            self.nodes
+                .get(&id)
+                .ok_or_else(|| Error::from("file does not exist"))
+        }
+
+        fn child(&self, parent: u64, name: &[u8]) -> Option<u64> {
+            let TestBody::Dir(children) = &self.nodes.get(&parent)?.body else {
+                return None;
+            };
+            children.get(name).copied()
+        }
+    }
+
+    fn serve_tree(tree: SharedSrvTree) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let address = listener.local_addr().expect("local addr").to_string();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept test client");
+            serve_connection(tree, &mut stream).expect("serve connection");
+        });
+        address
+    }
+
+    fn serve_connection(tree: SharedSrvTree, stream: &mut TcpStream) -> Result<()> {
+        let mut server = Server::new(tree);
+        loop {
+            let mut prefix = [0_u8; 4];
+            if stream.read_exact(&mut prefix).is_err() {
+                return Ok(());
+            }
+            let size = u32::from_le_bytes(prefix);
+            let rest_len = usize::try_from(size - 4).map_err(|_| Error::from("frame too large"))?;
+            let mut frame = Vec::with_capacity(size as usize);
+            frame.extend(prefix);
+            frame.resize(size as usize, 0);
+            stream
+                .read_exact(&mut frame[4..4 + rest_len])
+                .map_err(|error| Error::from(format!("read request: {error}")))?;
+            let request = codec::decode_tmessage(&frame)?;
+            let reply = match request {
+                TMessage::Version { .. } => server.handle(request),
+                _ => server.handle(request),
+            };
+            let encoded = codec::encode_rmessage(&reply)?;
+            stream
+                .write_all(&encoded)
+                .map_err(|error| Error::from(format!("write reply: {error}")))?;
+        }
+    }
+}

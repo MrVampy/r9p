@@ -1,8 +1,8 @@
 use front::abi::{
     r9p_front_abi_version, r9p_front_append_event, r9p_front_complete_request, r9p_front_free,
-    r9p_front_new, r9p_front_next_request, r9p_front_register_intake, r9p_front_register_log,
-    r9p_front_register_rpc, r9p_front_request_copy, r9p_front_serve_tcp, r9p_front_set,
-    r9p_front_stop,
+    r9p_front_last_error, r9p_front_new, r9p_front_next_request, r9p_front_publish_r9p_export,
+    r9p_front_register_intake, r9p_front_register_log, r9p_front_register_rpc,
+    r9p_front_request_copy, r9p_front_serve_tcp, r9p_front_set, r9p_front_stop,
 };
 use front::Front;
 use r9p::blocking::Client;
@@ -27,7 +27,7 @@ fn cbytes(value: &[u8]) -> (*const u8, usize) {
 
 #[test]
 fn abi_roundtrip_over_tcp() {
-    assert_eq!(r9p_front_abi_version(), 4);
+    assert_eq!(r9p_front_abi_version(), 5);
     let handle = r9p_front_new();
     let (path, path_len) = cstr("market/status");
     let (bytes, bytes_len) = cbytes(b"#M(\"state\" 'open)");
@@ -223,6 +223,64 @@ fn abi_roundtrip_over_tcp() {
     assert_eq!(rpc_response, b"#M(\"count\" 37)".to_vec());
 
     assert_eq!(unsafe { r9p_front_stop(handle) }, 0);
+    unsafe { r9p_front_free(handle) };
+}
+
+#[test]
+fn abi_publish_reports_last_error() {
+    assert_eq!(r9p_front_abi_version(), 5);
+    let handle = r9p_front_new();
+    let (vault_bind, vault_bind_len) = cstr("127.0.0.1:1");
+    let (vault_uname, vault_uname_len) = cstr("codex");
+    let (vault_aname, vault_aname_len) = cstr("/");
+    let (service, service_len) = cstr("demo");
+    let (export_bind, export_bind_len) = cstr("127.0.0.1:19590");
+    let (export_uname, export_uname_len) = cstr("codex");
+    let (export_aname, export_aname_len) = cstr("/");
+    let (root, root_len) = cstr("/");
+    let (transport, transport_len) = cstr("bad-transport");
+    let (auth, auth_len) = cstr("none");
+    let (protocol, protocol_len) = cstr("9P2000");
+    let (label, label_len) = cstr("demo");
+    let status = unsafe {
+        r9p_front_publish_r9p_export(
+            handle,
+            vault_bind,
+            vault_bind_len,
+            vault_uname,
+            vault_uname_len,
+            vault_aname,
+            vault_aname_len,
+            service,
+            service_len,
+            export_bind,
+            export_bind_len,
+            export_uname,
+            export_uname_len,
+            export_aname,
+            export_aname_len,
+            root,
+            root_len,
+            transport,
+            transport_len,
+            auth,
+            auth_len,
+            protocol,
+            protocol_len,
+            label,
+            label_len,
+            1234,
+            65_536,
+        )
+    };
+    assert_eq!(status, -2);
+    let len = unsafe { r9p_front_last_error(handle, std::ptr::null_mut(), 0) };
+    assert!(len > 0);
+    let mut buf = vec![0u8; usize::try_from(len).expect("last error length")];
+    let copied = unsafe { r9p_front_last_error(handle, buf.as_mut_ptr(), buf.len()) };
+    assert_eq!(copied, len);
+    let message = String::from_utf8(buf).expect("last error should be utf-8");
+    assert!(message.contains("unknown transport_class bad-transport"));
     unsafe { r9p_front_free(handle) };
 }
 

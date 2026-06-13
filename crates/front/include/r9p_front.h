@@ -2,10 +2,10 @@
 #define R9P_FRONT_H
 
 /*
- * r9p front C ABI, version 4.
+ * r9p front C ABI, version 5.
  *
  * Contract rules:
- * - r9p_front_abi_version() must return 4 before any other call is made;
+ * - r9p_front_abi_version() must return 5 before any other call is made;
  *   hosts reject a mismatch.
  * - r9p_front_new() returns an owned handle; every handle must be released
  *   exactly once with r9p_front_free(). Calls other than r9p_front_free()
@@ -21,6 +21,9 @@
  * - Return codes: 0 ok, 1 timeout (next_request only), -1 invalid
  *   argument, -2 internal failure. r9p_front_request_copy returns the
  *   copied byte count, or a negative code.
+ * - r9p_front_last_error copies the most recent internal failure text into
+ *   caller memory and returns the full byte length. Passing cap=0 is a
+ *   length query. The bytes are not NUL-terminated.
  * - r9p_front_next_request stages the returned request by request id for
  *   r9p_front_request_copy. Call sequence per request: next_request,
  *   request_copy(request_id), complete_request.
@@ -48,6 +51,13 @@
  *   accepting. Push calls (set, append_event, complete_request) wake any
  *   blocked 9P readers; a blocked read returns empty at the front's wait
  *   timeout (default 30s).
+ * - r9p_front_publish_r9p_export is the generic r9p/Vault service
+ *   rendezvous helper for embedded hosts. It renders r9p-export.v1 from
+ *   the supplied fields, connects to the Vault 9P endpoint, and publishes
+ *   the descriptor through /runtime/srv/<service>. If a matching ready
+ *   handle already exists it returns ok; if a stale handle exists it is
+ *   removed and recreated through the same namespace surface. Authorization
+ *   failures are returned as internal failure details via last_error.
  */
 
 #include <stddef.h>
@@ -80,5 +90,19 @@ int32_t r9p_front_complete_request(r9p_front *front, const char *prefix,
                                    size_t prefix_len, uint64_t request_id,
                                    const uint8_t *bytes, size_t bytes_len);
 int32_t r9p_front_stop(r9p_front *front);
+int32_t r9p_front_publish_r9p_export(
+    r9p_front *front, const char *vault_endpoint_bind,
+    size_t vault_endpoint_bind_len, const char *vault_uname,
+    size_t vault_uname_len, const char *vault_aname, size_t vault_aname_len,
+    const char *service_name, size_t service_name_len,
+    const char *export_endpoint_bind, size_t export_endpoint_bind_len,
+    const char *export_uname, size_t export_uname_len,
+    const char *export_aname, size_t export_aname_len,
+    const char *exported_root, size_t exported_root_len,
+    const char *transport_class, size_t transport_class_len,
+    const char *auth, size_t auth_len, const char *protocol,
+    size_t protocol_len, const char *local_root_label,
+    size_t local_root_label_len, uint32_t pid, uint32_t msize);
+intptr_t r9p_front_last_error(r9p_front *front, uint8_t *buf, size_t cap);
 
 #endif

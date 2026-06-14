@@ -3,6 +3,16 @@ use crate::{
     export_descriptor::ExportDescriptor,
     Error, Result,
 };
+use std::{
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Condvar, Mutex,
+    },
+    thread::{self, JoinHandle},
+    time::Duration,
+};
+
+pub const DEFAULT_MAINTAIN_RECONCILE_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct R9pExportPublication {
@@ -20,6 +30,53 @@ pub enum PublishOutcome {
     Replaced,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct R9pExportMaintenanceConfig {
+    pub reconcile_interval: Duration,
+}
+
+impl Default for R9pExportMaintenanceConfig {
+    fn default() -> Self {
+        Self {
+            reconcile_interval: DEFAULT_MAINTAIN_RECONCILE_INTERVAL,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaintenanceSnapshot {
+    pub success_count: u64,
+    pub failure_count: u64,
+    pub last_success: Option<PublishOutcome>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug)]
+struct MaintenanceStatus {
+    success_count: AtomicU64,
+    failure_count: AtomicU64,
+    last_success: Mutex<Option<PublishOutcome>>,
+    last_error: Mutex<Option<String>>,
+}
+
+pub struct R9pExportMaintainer {
+    signal: Arc<MaintenanceSignal>,
+    join: Mutex<Option<JoinHandle<()>>>,
+    status: Arc<MaintenanceStatus>,
+}
+
+#[derive(Debug)]
+struct MaintenanceSignal {
+    state: Mutex<MaintenanceSignalState>,
+    condvar: Condvar,
+}
+
+#[derive(Debug)]
+struct MaintenanceSignalState {
+    stop: bool,
+    pending: bool,
+}
+
 pub fn publish_r9p_export(publication: &R9pExportPublication) -> Result<PublishOutcome> {
     validate_service_name(&publication.service_name)?;
     let descriptor = publication.descriptor.render()?;
@@ -31,6 +88,156 @@ pub fn publish_r9p_export(publication: &R9pExportPublication) -> Result<PublishO
         publication.descriptor.msize,
     )?;
     publish_with_client(publication, &descriptor, &mut client)
+}
+
+pub fn maintain_r9p_export(
+    publication: R9pExportPublication,
+    config: R9pExportMaintenanceConfig,
+) -> Result<R9pExportMaintainer> {
+    if config.reconcile_interval.is_zero() {
+        return Err(Error::from(
+            "r9p export maintenance reconcile interval must be non-zero",
+        ));
+    }
+    let first_outcome = publish_r9p_export(&publication)?;
+    let status = Arc::new(MaintenanceStatus::new(first_outcome));
+    let signal = Arc::new(MaintenanceSignal {
+        state: Mutex::new(MaintenanceSignalState {
+            stop: false,
+            pending: false,
+        }),
+        condvar: Condvar::new(),
+    });
+    let thread_status = Arc::clone(&status);
+    let thread_signal = Arc::clone(&signal);
+    let join = thread::Builder::new()
+        .name(format!(
+            "r9p-srv-publish-{}",
+            publication.service_name.replace('/', "_")
+        ))
+        .spawn(move || maintain_loop(publication, config, thread_signal, thread_status))
+        .map_err(|error| Error::from(format!("spawn r9p export maintainer: {error}")))?;
+    Ok(R9pExportMaintainer {
+        signal,
+        join: Mutex::new(Some(join)),
+        status,
+    })
+}
+
+impl R9pExportMaintainer {
+    pub fn reconcile_now(&self) {
+        if let Ok(mut state) = self.signal.state.lock() {
+            state.pending = true;
+            self.signal.condvar.notify_all();
+        }
+    }
+
+    pub fn status(&self) -> MaintenanceSnapshot {
+        self.status.snapshot()
+    }
+
+    pub fn shutdown(&self) {
+        if let Ok(mut state) = self.signal.state.lock() {
+            state.stop = true;
+            state.pending = true;
+            self.signal.condvar.notify_all();
+        }
+        if let Ok(mut join) = self.join.lock() {
+            if let Some(join) = join.take() {
+                let _ = join.join();
+            }
+        }
+    }
+}
+
+impl Drop for R9pExportMaintainer {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+impl MaintenanceStatus {
+    fn new(first_outcome: PublishOutcome) -> Self {
+        Self {
+            success_count: AtomicU64::new(1),
+            failure_count: AtomicU64::new(0),
+            last_success: Mutex::new(Some(first_outcome)),
+            last_error: Mutex::new(None),
+        }
+    }
+
+    fn record_success(&self, outcome: PublishOutcome) {
+        self.success_count.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut last_success) = self.last_success.lock() {
+            *last_success = Some(outcome);
+        }
+        if let Ok(mut last_error) = self.last_error.lock() {
+            *last_error = None;
+        }
+    }
+
+    fn record_failure(&self, error: &Error) {
+        self.failure_count.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut last_error) = self.last_error.lock() {
+            *last_error = Some(error.display_lossy().to_string());
+        }
+    }
+
+    fn snapshot(&self) -> MaintenanceSnapshot {
+        MaintenanceSnapshot {
+            success_count: self.success_count.load(Ordering::Relaxed),
+            failure_count: self.failure_count.load(Ordering::Relaxed),
+            last_success: self
+                .last_success
+                .lock()
+                .ok()
+                .and_then(|last_success| *last_success),
+            last_error: self
+                .last_error
+                .lock()
+                .ok()
+                .and_then(|last_error| last_error.clone()),
+        }
+    }
+}
+
+fn maintain_loop(
+    publication: R9pExportPublication,
+    config: R9pExportMaintenanceConfig,
+    signal: Arc<MaintenanceSignal>,
+    status: Arc<MaintenanceStatus>,
+) {
+    while wait_for_reconcile(&signal, config.reconcile_interval) {
+        match publish_r9p_export(&publication) {
+            Ok(outcome) => status.record_success(outcome),
+            Err(error) => status.record_failure(&error),
+        }
+    }
+}
+
+fn wait_for_reconcile(signal: &MaintenanceSignal, interval: Duration) -> bool {
+    let mut state = match signal.state.lock() {
+        Ok(state) => state,
+        Err(_) => return false,
+    };
+    if state.stop {
+        return false;
+    }
+    if state.pending {
+        state.pending = false;
+        return true;
+    }
+    let result = signal
+        .condvar
+        .wait_timeout_while(state, interval, |state| !state.stop && !state.pending);
+    state = match result {
+        Ok((state, _)) => state,
+        Err(_) => return false,
+    };
+    if state.pending {
+        state.pending = false;
+    }
+    !state.stop
 }
 
 fn publish_with_client<S: std::io::Read + std::io::Write>(
@@ -216,6 +423,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn maintainer_republishes_disappeared_srv_entry() {
+        let tree = SharedSrvTree::new();
+        let address = serve_tree(tree.clone());
+        let mut publication = publication(&address);
+        publication.vault_endpoint_bind = address;
+
+        let maintainer = maintain_r9p_export(
+            publication,
+            R9pExportMaintenanceConfig {
+                reconcile_interval: Duration::from_secs(60),
+            },
+        )
+        .expect("maintainer should start");
+        tree.remove_file("polymarket");
+        maintainer.reconcile_now();
+
+        wait_for_descriptor(&tree, "polymarket");
+        let status = maintainer.status();
+        assert!(status.success_count >= 2);
+        assert_eq!(status.last_error, None);
+        maintainer.shutdown();
+    }
+
     fn publication(vault_endpoint_bind: &str) -> R9pExportPublication {
         R9pExportPublication {
             vault_endpoint_bind: vault_endpoint_bind.to_string(),
@@ -283,6 +514,13 @@ mod tests {
                 .expect("tree lock")
                 .file_content(name.as_bytes())
                 .map(|bytes| String::from_utf8(bytes).expect("utf-8 content"))
+        }
+
+        fn remove_file(&self, name: &str) {
+            self.inner
+                .lock()
+                .expect("tree lock")
+                .remove_file(name.as_bytes());
         }
     }
 
@@ -541,6 +779,12 @@ mod tests {
             Ok(())
         }
 
+        fn remove_file(&mut self, name: &[u8]) {
+            if let Some(id) = self.child(SRV, name) {
+                let _ = self.remove(id);
+            }
+        }
+
         fn stat(&self, id: u64) -> Result<Stat> {
             let node = self.node(id)?;
             match &node.body {
@@ -578,10 +822,30 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
         let address = listener.local_addr().expect("local addr").to_string();
         thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept test client");
-            serve_connection(tree, &mut stream).expect("serve connection");
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let connection_tree = tree.clone();
+                thread::spawn(move || {
+                    let _ = serve_connection(connection_tree, &mut stream);
+                });
+            }
         });
         address
+    }
+
+    fn wait_for_descriptor(tree: &SharedSrvTree, name: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if tree
+                .content(name)
+                .map(|content| content.contains("format\tr9p-export.v1\n"))
+                .unwrap_or(false)
+            {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("descriptor was not republished");
     }
 
     fn serve_connection(tree: SharedSrvTree, stream: &mut TcpStream) -> Result<()> {

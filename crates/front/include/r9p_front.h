@@ -2,10 +2,10 @@
 #define R9P_FRONT_H
 
 /*
- * r9p front C ABI, version 5.
+ * r9p front C ABI, version 6.
  *
  * Contract rules:
- * - r9p_front_abi_version() must return 5 before any other call is made;
+ * - r9p_front_abi_version() must return 6 before any other call is made;
  *   hosts reject a mismatch.
  * - r9p_front_new() returns an owned handle; every handle must be released
  *   exactly once with r9p_front_free(). Calls other than r9p_front_free()
@@ -58,6 +58,13 @@
  *   handle already exists it returns ok; if a stale handle exists it is
  *   removed and recreated through the same namespace surface. Authorization
  *   failures are returned as internal failure details via last_error.
+ * - r9p_front_maintain_r9p_export performs the same initial publication,
+ *   then keeps a cancellable maintainer owned by the front handle. The
+ *   maintainer periodically reconciles the namespace rendezvous through
+ *   /runtime/srv and can be nudged immediately with
+ *   r9p_front_reconcile_r9p_exports. reconcile_interval_ms=0 selects the
+ *   library default. r9p_front_stop/free stop all maintainers before
+ *   releasing the handle.
  */
 
 #include <stddef.h>
@@ -103,6 +110,21 @@ int32_t r9p_front_publish_r9p_export(
     const char *auth, size_t auth_len, const char *protocol,
     size_t protocol_len, const char *local_root_label,
     size_t local_root_label_len, uint32_t pid, uint32_t msize);
+int32_t r9p_front_maintain_r9p_export(
+    r9p_front *front, const char *vault_endpoint_bind,
+    size_t vault_endpoint_bind_len, const char *vault_uname,
+    size_t vault_uname_len, const char *vault_aname, size_t vault_aname_len,
+    const char *service_name, size_t service_name_len,
+    const char *export_endpoint_bind, size_t export_endpoint_bind_len,
+    const char *export_uname, size_t export_uname_len,
+    const char *export_aname, size_t export_aname_len,
+    const char *exported_root, size_t exported_root_len,
+    const char *transport_class, size_t transport_class_len,
+    const char *auth, size_t auth_len, const char *protocol,
+    size_t protocol_len, const char *local_root_label,
+    size_t local_root_label_len, uint32_t pid, uint32_t msize,
+    uint32_t reconcile_interval_ms);
+int32_t r9p_front_reconcile_r9p_exports(r9p_front *front);
 intptr_t r9p_front_last_error(r9p_front *front, uint8_t *buf, size_t cap);
 
 #endif

@@ -63,6 +63,40 @@ const lib = Deno.dlopen("../../../target/debug/libfront.so", {
     ],
     result: "i32",
   },
+  r9p_front_maintain_r9p_export: {
+    parameters: [
+      "pointer",
+      "buffer",
+      "usize",
+      "buffer",
+      "usize",
+      "buffer",
+      "usize",
+      "buffer",
+      "usize",
+      "buffer",
+      "usize",
+      "buffer",
+      "usize",
+      "buffer",
+      "usize",
+      "buffer",
+      "usize",
+      "buffer",
+      "usize",
+      "buffer",
+      "usize",
+      "buffer",
+      "usize",
+      "buffer",
+      "usize",
+      "u32",
+      "u32",
+      "u32",
+    ],
+    result: "i32",
+  },
+  r9p_front_reconcile_r9p_exports: { parameters: ["pointer"], result: "i32" },
   r9p_front_last_error: { parameters: ["pointer", "buffer", "usize"], result: "isize" },
   r9p_front_stop: { parameters: ["pointer"], result: "i32" },
 });
@@ -73,7 +107,7 @@ const str = (value: string): [Uint8Array, number] => {
   return [bytes, bytes.length];
 };
 
-if (lib.symbols.r9p_front_abi_version() !== 5) {
+if (lib.symbols.r9p_front_abi_version() !== 6) {
   throw new Error("abi version mismatch");
 }
 const front = lib.symbols.r9p_front_new();

@@ -5,13 +5,16 @@ use crate::Front;
 use r9p::export_descriptor::{
     AuthBoundary, ExportDescriptor, ExportMode, Protocol, TransportClass,
 };
-use r9p::srv_publish::{publish_r9p_export, R9pExportPublication};
+use r9p::srv_publish::{
+    maintain_r9p_export, publish_r9p_export, R9pExportMaintainer, R9pExportMaintenanceConfig,
+    R9pExportPublication,
+};
 use std::collections::BTreeMap;
 use std::ffi::c_char;
 use std::sync::Mutex;
 use std::time::Duration;
 
-pub const ABI_VERSION: u32 = 5;
+pub const ABI_VERSION: u32 = 6;
 
 const OK: i32 = 0;
 const TIMEOUT: i32 = 1;
@@ -21,6 +24,7 @@ const INTERNAL: i32 = -2;
 pub struct FrontAbi {
     front: Front,
     serves: Mutex<Vec<ServeHandle>>,
+    publications: Mutex<Vec<R9pExportMaintainer>>,
     staged_requests: Mutex<BTreeMap<u64, Vec<u8>>>,
     last_error: Mutex<Vec<u8>>,
 }
@@ -73,6 +77,7 @@ pub extern "C" fn r9p_front_new() -> *mut FrontAbi {
     Box::into_raw(Box::new(FrontAbi {
         front: Front::new(),
         serves: Mutex::new(Vec::new()),
+        publications: Mutex::new(Vec::new()),
         staged_requests: Mutex::new(BTreeMap::new()),
         last_error: Mutex::new(Vec::new()),
     }))
@@ -84,6 +89,12 @@ pub unsafe extern "C" fn r9p_front_free(handle: *mut FrontAbi) {
         return;
     }
     let abi = unsafe { Box::from_raw(handle) };
+    if let Ok(mut publications) = abi.publications.lock() {
+        for publication in publications.drain(..) {
+            publication.shutdown();
+        }
+        drop(publications);
+    }
     if let Ok(serves) = abi.serves.lock() {
         for serve in serves.iter() {
             serve.shutdown();
@@ -336,6 +347,9 @@ pub unsafe extern "C" fn r9p_front_stop(handle: *mut FrontAbi) -> i32 {
     let Some(abi) = (unsafe { handle.as_ref() }) else {
         return INVALID;
     };
+    if let Err(error) = stop_publications(abi) {
+        return set_last_error(abi, error);
+    }
     match abi.serves.lock() {
         Ok(serves) => {
             for serve in serves.iter() {
@@ -345,6 +359,18 @@ pub unsafe extern "C" fn r9p_front_stop(handle: *mut FrontAbi) -> i32 {
             OK
         }
         Err(error) => set_last_error(abi, error),
+    }
+}
+
+fn stop_publications(abi: &FrontAbi) -> Result<(), String> {
+    match abi.publications.lock() {
+        Ok(mut publications) => {
+            for publication in publications.drain(..) {
+                publication.shutdown();
+            }
+            Ok(())
+        }
+        Err(error) => Err(error.to_string()),
     }
 }
 
@@ -381,6 +407,195 @@ pub unsafe extern "C" fn r9p_front_publish_r9p_export(
     let Some(abi) = (unsafe { handle.as_ref() }) else {
         return INVALID;
     };
+    let publication = match unsafe {
+        publication_from_args(PublicationRawArgs {
+            vault_endpoint_bind,
+            vault_endpoint_bind_len,
+            vault_uname,
+            vault_uname_len,
+            vault_aname,
+            vault_aname_len,
+            service_name,
+            service_name_len,
+            export_endpoint_bind,
+            export_endpoint_bind_len,
+            export_uname,
+            export_uname_len,
+            export_aname,
+            export_aname_len,
+            exported_root,
+            exported_root_len,
+            transport_class,
+            transport_class_len,
+            auth,
+            auth_len,
+            protocol,
+            protocol_len,
+            local_root_label,
+            local_root_label_len,
+            pid,
+            msize,
+        })
+    } {
+        Ok(publication) => publication,
+        Err(PublicationArgError::Invalid) => return INVALID,
+        Err(PublicationArgError::Build(error)) => return set_last_error(abi, error),
+    };
+    match publish_r9p_export(&publication) {
+        Ok(_) => {
+            clear_last_error(abi);
+            OK
+        }
+        Err(error) => set_last_error(abi, error),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn r9p_front_maintain_r9p_export(
+    handle: *mut FrontAbi,
+    vault_endpoint_bind: *const c_char,
+    vault_endpoint_bind_len: usize,
+    vault_uname: *const c_char,
+    vault_uname_len: usize,
+    vault_aname: *const c_char,
+    vault_aname_len: usize,
+    service_name: *const c_char,
+    service_name_len: usize,
+    export_endpoint_bind: *const c_char,
+    export_endpoint_bind_len: usize,
+    export_uname: *const c_char,
+    export_uname_len: usize,
+    export_aname: *const c_char,
+    export_aname_len: usize,
+    exported_root: *const c_char,
+    exported_root_len: usize,
+    transport_class: *const c_char,
+    transport_class_len: usize,
+    auth: *const c_char,
+    auth_len: usize,
+    protocol: *const c_char,
+    protocol_len: usize,
+    local_root_label: *const c_char,
+    local_root_label_len: usize,
+    pid: u32,
+    msize: u32,
+    reconcile_interval_ms: u32,
+) -> i32 {
+    let Some(abi) = (unsafe { handle.as_ref() }) else {
+        return INVALID;
+    };
+    let publication = match unsafe {
+        publication_from_args(PublicationRawArgs {
+            vault_endpoint_bind,
+            vault_endpoint_bind_len,
+            vault_uname,
+            vault_uname_len,
+            vault_aname,
+            vault_aname_len,
+            service_name,
+            service_name_len,
+            export_endpoint_bind,
+            export_endpoint_bind_len,
+            export_uname,
+            export_uname_len,
+            export_aname,
+            export_aname_len,
+            exported_root,
+            exported_root_len,
+            transport_class,
+            transport_class_len,
+            auth,
+            auth_len,
+            protocol,
+            protocol_len,
+            local_root_label,
+            local_root_label_len,
+            pid,
+            msize,
+        })
+    } {
+        Ok(publication) => publication,
+        Err(PublicationArgError::Invalid) => return INVALID,
+        Err(PublicationArgError::Build(error)) => return set_last_error(abi, error),
+    };
+    let interval = if reconcile_interval_ms == 0 {
+        R9pExportMaintenanceConfig::default().reconcile_interval
+    } else {
+        Duration::from_millis(u64::from(reconcile_interval_ms))
+    };
+    let maintainer = match maintain_r9p_export(
+        publication,
+        R9pExportMaintenanceConfig {
+            reconcile_interval: interval,
+        },
+    ) {
+        Ok(maintainer) => maintainer,
+        Err(error) => return set_last_error(abi, error),
+    };
+    match abi.publications.lock() {
+        Ok(mut publications) => {
+            publications.push(maintainer);
+            clear_last_error(abi);
+            OK
+        }
+        Err(error) => set_last_error(abi, error),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn r9p_front_reconcile_r9p_exports(handle: *mut FrontAbi) -> i32 {
+    let Some(abi) = (unsafe { handle.as_ref() }) else {
+        return INVALID;
+    };
+    match abi.publications.lock() {
+        Ok(publications) => {
+            for publication in publications.iter() {
+                publication.reconcile_now();
+            }
+            clear_last_error(abi);
+            OK
+        }
+        Err(error) => set_last_error(abi, error),
+    }
+}
+
+enum PublicationArgError {
+    Invalid,
+    Build(r9p::Error),
+}
+
+struct PublicationRawArgs {
+    vault_endpoint_bind: *const c_char,
+    vault_endpoint_bind_len: usize,
+    vault_uname: *const c_char,
+    vault_uname_len: usize,
+    vault_aname: *const c_char,
+    vault_aname_len: usize,
+    service_name: *const c_char,
+    service_name_len: usize,
+    export_endpoint_bind: *const c_char,
+    export_endpoint_bind_len: usize,
+    export_uname: *const c_char,
+    export_uname_len: usize,
+    export_aname: *const c_char,
+    export_aname_len: usize,
+    exported_root: *const c_char,
+    exported_root_len: usize,
+    transport_class: *const c_char,
+    transport_class_len: usize,
+    auth: *const c_char,
+    auth_len: usize,
+    protocol: *const c_char,
+    protocol_len: usize,
+    local_root_label: *const c_char,
+    local_root_label_len: usize,
+    pid: u32,
+    msize: u32,
+}
+
+unsafe fn publication_from_args(
+    args: PublicationRawArgs,
+) -> std::result::Result<R9pExportPublication, PublicationArgError> {
     let (
         Some(vault_endpoint_bind),
         Some(vault_uname),
@@ -395,63 +610,47 @@ pub unsafe extern "C" fn r9p_front_publish_r9p_export(
         Some(protocol),
         Some(local_root_label),
     ) = (
-        unsafe { str_arg(vault_endpoint_bind, vault_endpoint_bind_len) },
-        unsafe { str_arg(vault_uname, vault_uname_len) },
-        unsafe { str_arg(vault_aname, vault_aname_len) },
-        unsafe { str_arg(service_name, service_name_len) },
-        unsafe { str_arg(export_endpoint_bind, export_endpoint_bind_len) },
-        unsafe { str_arg(export_uname, export_uname_len) },
-        unsafe { str_arg(export_aname, export_aname_len) },
-        unsafe { str_arg(exported_root, exported_root_len) },
-        unsafe { str_arg(transport_class, transport_class_len) },
-        unsafe { str_arg(auth, auth_len) },
-        unsafe { str_arg(protocol, protocol_len) },
-        unsafe { optional_str_arg(local_root_label, local_root_label_len) },
+        unsafe { str_arg(args.vault_endpoint_bind, args.vault_endpoint_bind_len) },
+        unsafe { str_arg(args.vault_uname, args.vault_uname_len) },
+        unsafe { str_arg(args.vault_aname, args.vault_aname_len) },
+        unsafe { str_arg(args.service_name, args.service_name_len) },
+        unsafe { str_arg(args.export_endpoint_bind, args.export_endpoint_bind_len) },
+        unsafe { str_arg(args.export_uname, args.export_uname_len) },
+        unsafe { str_arg(args.export_aname, args.export_aname_len) },
+        unsafe { str_arg(args.exported_root, args.exported_root_len) },
+        unsafe { str_arg(args.transport_class, args.transport_class_len) },
+        unsafe { str_arg(args.auth, args.auth_len) },
+        unsafe { str_arg(args.protocol, args.protocol_len) },
+        unsafe { optional_str_arg(args.local_root_label, args.local_root_label_len) },
     )
     else {
-        return INVALID;
+        return Err(PublicationArgError::Invalid);
     };
-    let transport_class = match TransportClass::parse(transport_class) {
-        Ok(value) => value,
-        Err(error) => return set_last_error(abi, error),
-    };
-    let auth = match AuthBoundary::parse(auth) {
-        Ok(value) => value,
-        Err(error) => return set_last_error(abi, error),
-    };
-    let protocol = match Protocol::parse(protocol) {
-        Ok(value) => value,
-        Err(error) => return set_last_error(abi, error),
-    };
-    let descriptor = ExportDescriptor {
-        endpoint_bind: export_endpoint_bind.to_string(),
-        aname: export_aname.to_string(),
-        uname: export_uname.to_string(),
-        exported_root: exported_root.to_string(),
-        transport_class,
-        mode: ExportMode::ReadOnly,
-        auth,
-        pid,
-        protocol,
-        msize,
-        expires_at: None,
-        local_root_label: local_root_label.map(str::to_string),
-        extra_fields: BTreeMap::new(),
-    };
-    let publication = R9pExportPublication {
+    let transport_class =
+        TransportClass::parse(transport_class).map_err(PublicationArgError::Build)?;
+    let auth = AuthBoundary::parse(auth).map_err(PublicationArgError::Build)?;
+    let protocol = Protocol::parse(protocol).map_err(PublicationArgError::Build)?;
+    Ok(R9pExportPublication {
         vault_endpoint_bind: vault_endpoint_bind.to_string(),
         vault_uname: vault_uname.to_string(),
         vault_aname: vault_aname.to_string(),
         service_name: service_name.to_string(),
-        descriptor,
-    };
-    match publish_r9p_export(&publication) {
-        Ok(_) => {
-            clear_last_error(abi);
-            OK
-        }
-        Err(error) => set_last_error(abi, error),
-    }
+        descriptor: ExportDescriptor {
+            endpoint_bind: export_endpoint_bind.to_string(),
+            aname: export_aname.to_string(),
+            uname: export_uname.to_string(),
+            exported_root: exported_root.to_string(),
+            transport_class,
+            mode: ExportMode::ReadOnly,
+            auth,
+            pid: args.pid,
+            protocol,
+            msize: args.msize,
+            expires_at: None,
+            local_root_label: local_root_label.map(str::to_string),
+            extra_fields: BTreeMap::new(),
+        },
+    })
 }
 
 #[no_mangle]

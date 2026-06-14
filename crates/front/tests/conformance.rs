@@ -436,6 +436,112 @@ fn flush_interrupts_blocked_log_read() {
     serve.shutdown();
 }
 
+#[test]
+fn clunk_interrupts_blocked_log_read() {
+    let front = Front::new();
+    front
+        .append_event("market/events", b"seed\n")
+        .expect("seed events");
+    let serve = front.serve_tcp("127.0.0.1:0").expect("serve front");
+    let mut stream = TcpStream::connect(serve.addr()).expect("connect front");
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .expect("set read timeout");
+
+    write_tmessage(
+        &mut stream,
+        &TMessage::Version {
+            tag: NOTAG,
+            msize: 8192,
+            version: b"9P2000".to_vec(),
+        },
+    )
+    .expect("write version");
+    assert!(matches!(
+        read_rmessage(&mut stream).expect("read version"),
+        RMessage::Version { .. }
+    ));
+    write_tmessage(
+        &mut stream,
+        &TMessage::Attach {
+            tag: 1,
+            fid: 1,
+            afid: NOFID,
+            uname: b"codex".to_vec(),
+            aname: b"/".to_vec(),
+        },
+    )
+    .expect("write attach");
+    assert!(matches!(
+        read_rmessage(&mut stream).expect("read attach"),
+        RMessage::Attach { tag: 1, .. }
+    ));
+    write_tmessage(
+        &mut stream,
+        &TMessage::Walk {
+            tag: 2,
+            fid: 1,
+            newfid: 2,
+            wnames: vec![b"market".to_vec(), b"events".to_vec()],
+        },
+    )
+    .expect("write walk");
+    assert!(matches!(
+        read_rmessage(&mut stream).expect("read walk"),
+        RMessage::Walk { tag: 2, .. }
+    ));
+    write_tmessage(
+        &mut stream,
+        &TMessage::Open {
+            tag: 3,
+            fid: 2,
+            mode: 0,
+        },
+    )
+    .expect("write open");
+    assert!(matches!(
+        read_rmessage(&mut stream).expect("read open"),
+        RMessage::Open { tag: 3, .. }
+    ));
+
+    write_tmessage(
+        &mut stream,
+        &TMessage::Read {
+            tag: 4,
+            fid: 2,
+            offset: 5,
+            count: 4096,
+        },
+    )
+    .expect("write blocking read");
+    thread::sleep(Duration::from_millis(50));
+    write_tmessage(&mut stream, &TMessage::Clunk { tag: 5, fid: 2 }).expect("write clunk");
+
+    let mut saw_read_cancel = false;
+    let mut saw_clunk = false;
+    for _ in 0..2 {
+        match read_rmessage(&mut stream).expect("read clunk/read cancellation") {
+            RMessage::Error { tag: 4, ename } => {
+                assert_eq!(ename, b"request flushed".to_vec());
+                saw_read_cancel = true;
+            }
+            RMessage::Clunk { tag: 5 } => {
+                saw_clunk = true;
+            }
+            other => panic!("unexpected response after clunking blocked read: {other:?}"),
+        }
+    }
+    assert!(saw_read_cancel);
+    assert!(saw_clunk);
+
+    front
+        .append_event("market/events", b"after-clunk\n")
+        .expect("append after clunk");
+    assert!(read_rmessage(&mut stream).is_err());
+
+    serve.shutdown();
+}
+
 fn write_tmessage(stream: &mut TcpStream, message: &TMessage) -> Result<(), Error> {
     let frame = codec::encode_tmessage(message)?;
     stream

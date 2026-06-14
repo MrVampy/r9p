@@ -2,7 +2,7 @@ use crate::Front;
 use crate::ReadTarget;
 use r9p::codec;
 use r9p::error::{Error, Result};
-use r9p::fid::NOFID;
+use r9p::fid::{Fid, NOFID};
 use r9p::flush::{FlushOutcome, RequestKey};
 use r9p::message::{RMessage, TMessage};
 use r9p::server::{
@@ -86,11 +86,15 @@ fn serve_connection(front: &Front, stream: TcpStream, stop: Arc<AtomicBool>) -> 
     let cancels = Arc::new(Mutex::new(BTreeMap::new()));
     loop {
         if stop.load(Ordering::SeqCst) {
+            cancel_all_requests(front, &cancels)?;
             return Ok(());
         }
         let message = match read_tmessage(&mut reader) {
             Ok(message) => message,
-            Err(_) => return Ok(()),
+            Err(_) => {
+                cancel_all_requests(front, &cancels)?;
+                return Ok(());
+            }
         };
         let event = {
             let mut server = server
@@ -108,10 +112,17 @@ fn serve_connection(front: &Front, stream: TcpStream, stop: Arc<AtomicBool>) -> 
             }
             ServerEvent::Dispatch(request) if request_is_async(&request) => {
                 let cancel = Arc::new(AtomicBool::new(false));
+                let fid = request_fid(&request);
                 cancels
                     .lock()
                     .map_err(|_| Error::from_static("front cancel map poisoned"))?
-                    .insert(request.key, Arc::clone(&cancel));
+                    .insert(
+                        request.key,
+                        PendingCancel {
+                            fid,
+                            cancel: Arc::clone(&cancel),
+                        },
+                    );
                 let server = Arc::clone(&server);
                 let writer = Arc::clone(&writer);
                 let tree = Arc::clone(&tree);
@@ -132,6 +143,9 @@ fn serve_connection(front: &Front, stream: TcpStream, stop: Arc<AtomicBool>) -> 
                 });
             }
             ServerEvent::Dispatch(request) => {
+                if let ServerRequestKind::Clunk { fid, .. } = &request.kind {
+                    cancel_fid_requests(front, &cancels, *fid)?;
+                }
                 let completion = perform_request(&tree, &request, None);
                 let reply = {
                     let mut server = server
@@ -147,24 +161,76 @@ fn serve_connection(front: &Front, stream: TcpStream, stop: Arc<AtomicBool>) -> 
     }
 }
 
-type CancelMap = Arc<Mutex<BTreeMap<RequestKey, Arc<AtomicBool>>>>;
+struct PendingCancel {
+    fid: Fid,
+    cancel: Arc<AtomicBool>,
+}
+
+type CancelMap = Arc<Mutex<BTreeMap<RequestKey, PendingCancel>>>;
 
 fn cancel_request(front: &Front, cancels: &CancelMap, outcome: FlushOutcome) -> Result<()> {
     if let FlushOutcome::Cancelled(key) = outcome {
-        if let Some(cancel) = cancels
+        if let Some(pending) = cancels
             .lock()
             .map_err(|_| Error::from_static("front cancel map poisoned"))?
             .remove(&key)
         {
-            cancel.store(true, Ordering::SeqCst);
+            pending.cancel.store(true, Ordering::SeqCst);
             front.wake_readers();
         }
     }
     Ok(())
 }
 
+fn cancel_fid_requests(front: &Front, cancels: &CancelMap, fid: Fid) -> Result<()> {
+    let mut cancelled = false;
+    {
+        let mut cancels = cancels
+            .lock()
+            .map_err(|_| Error::from_static("front cancel map poisoned"))?;
+        let keys: Vec<RequestKey> = cancels
+            .iter()
+            .filter_map(|(key, pending)| (pending.fid == fid).then_some(*key))
+            .collect();
+        for key in keys {
+            if let Some(pending) = cancels.remove(&key) {
+                pending.cancel.store(true, Ordering::SeqCst);
+                cancelled = true;
+            }
+        }
+    }
+    if cancelled {
+        front.wake_readers();
+    }
+    Ok(())
+}
+
+fn cancel_all_requests(front: &Front, cancels: &CancelMap) -> Result<()> {
+    let cancelled = {
+        let mut cancels = cancels
+            .lock()
+            .map_err(|_| Error::from_static("front cancel map poisoned"))?;
+        let cancelled = !cancels.is_empty();
+        for (_, pending) in std::mem::take(&mut *cancels) {
+            pending.cancel.store(true, Ordering::SeqCst);
+        }
+        cancelled
+    };
+    if cancelled {
+        front.wake_readers();
+    }
+    Ok(())
+}
+
 fn request_is_async(request: &ServerRequest) -> bool {
     matches!(request.kind, ServerRequestKind::Read { .. })
+}
+
+fn request_fid(request: &ServerRequest) -> Fid {
+    match &request.kind {
+        ServerRequestKind::Read { fid, .. } => *fid,
+        _ => 0,
+    }
 }
 
 fn perform_request(

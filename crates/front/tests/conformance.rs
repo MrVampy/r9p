@@ -2,8 +2,8 @@ use front::abi::{
     r9p_front_abi_version, r9p_front_append_event, r9p_front_complete_request, r9p_front_free,
     r9p_front_last_error, r9p_front_maintain_r9p_export, r9p_front_new, r9p_front_next_request,
     r9p_front_publish_r9p_export, r9p_front_reconcile_r9p_exports, r9p_front_register_intake,
-    r9p_front_register_log, r9p_front_register_rpc, r9p_front_request_copy, r9p_front_serve_tcp,
-    r9p_front_set, r9p_front_stop,
+    r9p_front_register_log, r9p_front_register_rpc, r9p_front_request_copy,
+    r9p_front_request_prefix_copy, r9p_front_serve_tcp, r9p_front_set, r9p_front_stop,
 };
 use front::Front;
 use r9p::blocking::Client;
@@ -26,9 +26,19 @@ fn cbytes(value: &[u8]) -> (*const u8, usize) {
     (value.as_ptr(), value.len())
 }
 
+fn request_prefix(handle: *mut front::abi::FrontAbi, request_id: u64) -> String {
+    let len = unsafe { r9p_front_request_prefix_copy(handle, request_id, std::ptr::null_mut(), 0) };
+    assert!(len >= 0);
+    let mut buf = vec![0u8; len as usize];
+    let copied =
+        unsafe { r9p_front_request_prefix_copy(handle, request_id, buf.as_mut_ptr(), buf.len()) };
+    assert_eq!(copied, len);
+    String::from_utf8(buf).expect("prefix utf8")
+}
+
 #[test]
 fn abi_roundtrip_over_tcp() {
-    assert_eq!(r9p_front_abi_version(), 7);
+    assert_eq!(r9p_front_abi_version(), 8);
     let handle = r9p_front_new();
     let (path, path_len) = cstr("market/status");
     let (bytes, bytes_len) = cbytes(b"#M(\"state\" 'open)");
@@ -149,6 +159,8 @@ fn abi_roundtrip_over_tcp() {
         0
     );
     assert_eq!(request_id, 2);
+    assert_eq!(request_prefix(handle, first_request_id), "queries");
+    assert_eq!(request_prefix(handle, request_id), "queries");
     let mut second_buf = vec![0u8; request_len];
     let copied = unsafe {
         r9p_front_request_copy(
@@ -198,6 +210,7 @@ fn abi_roundtrip_over_tcp() {
         unsafe { r9p_front_next_request(handle, 1000, &mut rpc_request_id, &mut rpc_request_len) },
         0
     );
+    assert_eq!(request_prefix(handle, rpc_request_id), "rpc");
     let mut rpc_buf = vec![0u8; rpc_request_len];
     let copied = unsafe {
         r9p_front_request_copy(handle, rpc_request_id, rpc_buf.as_mut_ptr(), rpc_buf.len())
@@ -229,7 +242,7 @@ fn abi_roundtrip_over_tcp() {
 
 #[test]
 fn abi_publish_reports_last_error() {
-    assert_eq!(r9p_front_abi_version(), 7);
+    assert_eq!(r9p_front_abi_version(), 8);
     let handle = r9p_front_new();
     let (vault_bind, vault_bind_len) = cstr("127.0.0.1:1");
     let (vault_uname, vault_uname_len) = cstr("codex");
@@ -287,7 +300,7 @@ fn abi_publish_reports_last_error() {
 
 #[test]
 fn abi_reconcile_without_maintainers_is_ok() {
-    assert_eq!(r9p_front_abi_version(), 7);
+    assert_eq!(r9p_front_abi_version(), 8);
     let handle = r9p_front_new();
     assert_eq!(unsafe { r9p_front_reconcile_r9p_exports(handle) }, 0);
     unsafe { r9p_front_free(handle) };
@@ -295,7 +308,7 @@ fn abi_reconcile_without_maintainers_is_ok() {
 
 #[test]
 fn abi_maintain_reports_initial_publish_error() {
-    assert_eq!(r9p_front_abi_version(), 7);
+    assert_eq!(r9p_front_abi_version(), 8);
     let handle = r9p_front_new();
     let (vault_bind, vault_bind_len) = cstr("127.0.0.1:1");
     let (vault_uname, vault_uname_len) = cstr("codex");

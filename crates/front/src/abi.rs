@@ -14,7 +14,7 @@ use std::ffi::c_char;
 use std::sync::Mutex;
 use std::time::Duration;
 
-pub const ABI_VERSION: u32 = 7;
+pub const ABI_VERSION: u32 = 8;
 
 const OK: i32 = 0;
 const TIMEOUT: i32 = 1;
@@ -25,8 +25,13 @@ pub struct FrontAbi {
     front: Front,
     serves: Mutex<Vec<ServeHandle>>,
     publications: Mutex<Vec<R9pExportMaintainer>>,
-    staged_requests: Mutex<BTreeMap<u64, Vec<u8>>>,
+    staged_requests: Mutex<BTreeMap<u64, StagedRequest>>,
     last_error: Mutex<Vec<u8>>,
+}
+
+struct StagedRequest {
+    prefix: Vec<u8>,
+    bytes: Vec<u8>,
 }
 
 unsafe fn str_arg<'a>(ptr: *const c_char, len: usize) -> Option<&'a str> {
@@ -267,7 +272,13 @@ pub unsafe extern "C" fn r9p_front_next_request(
             let request_len = request.bytes.len();
             match abi.staged_requests.lock() {
                 Ok(mut requests) => {
-                    requests.insert(request_id, request.bytes);
+                    requests.insert(
+                        request_id,
+                        StagedRequest {
+                            prefix: request.prefix.into_bytes(),
+                            bytes: request.bytes,
+                        },
+                    );
                 }
                 Err(_) => return INTERNAL,
             }
@@ -302,15 +313,46 @@ pub unsafe extern "C" fn r9p_front_request_copy(
     let Some(request) = requests.get(&request_id) else {
         return INVALID as isize;
     };
-    if request.len() > cap {
+    if request.bytes.len() > cap {
         return INVALID as isize;
     }
     unsafe {
-        std::ptr::copy_nonoverlapping(request.as_ptr(), buf, request.len());
+        std::ptr::copy_nonoverlapping(request.bytes.as_ptr(), buf, request.bytes.len());
     }
-    let len = request.len();
+    let len = request.bytes.len();
     requests.remove(&request_id);
     len as isize
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn r9p_front_request_prefix_copy(
+    handle: *mut FrontAbi,
+    request_id: u64,
+    buf: *mut u8,
+    cap: usize,
+) -> isize {
+    let Some(abi) = (unsafe { handle.as_ref() }) else {
+        return INVALID as isize;
+    };
+    let Ok(requests) = abi.staged_requests.lock() else {
+        return INTERNAL as isize;
+    };
+    let Some(request) = requests.get(&request_id) else {
+        return INVALID as isize;
+    };
+    if cap == 0 {
+        return request.prefix.len() as isize;
+    }
+    if buf.is_null() {
+        return INVALID as isize;
+    }
+    if request.prefix.len() > cap {
+        return INVALID as isize;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(request.prefix.as_ptr(), buf, request.prefix.len());
+    }
+    request.prefix.len() as isize
 }
 
 #[no_mangle]

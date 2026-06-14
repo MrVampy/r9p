@@ -27,6 +27,10 @@ const lib = Deno.dlopen("../../../target/debug/libfront.so", {
     parameters: ["pointer", "u64", "buffer", "usize"],
     result: "isize",
   },
+  r9p_front_request_prefix_copy: {
+    parameters: ["pointer", "u64", "buffer", "usize"],
+    result: "isize",
+  },
   r9p_front_complete_request: {
     parameters: ["pointer", "buffer", "usize", "u64", "buffer", "usize"],
     result: "i32",
@@ -107,7 +111,7 @@ const str = (value: string): [Uint8Array, number] => {
   return [bytes, bytes.length];
 };
 
-if (lib.symbols.r9p_front_abi_version() !== 7) {
+if (lib.symbols.r9p_front_abi_version() !== 8) {
   throw new Error("abi version mismatch");
 }
 const front = lib.symbols.r9p_front_new();
@@ -131,11 +135,17 @@ while (true) {
   if (status === 0) {
     const requestId = new DataView(idOut.buffer).getBigUint64(0, true);
     const len = Number(new DataView(lenOut.buffer).getBigUint64(0, true));
+    const prefixLen = Number(
+      lib.symbols.r9p_front_request_prefix_copy(front, requestId, new Uint8Array(0), 0),
+    );
+    const prefixBuf = new Uint8Array(prefixLen);
+    lib.symbols.r9p_front_request_prefix_copy(front, requestId, prefixBuf, prefixBuf.length);
     const buf = new Uint8Array(len);
     lib.symbols.r9p_front_request_copy(front, requestId, buf, len);
-    console.log(`query ${requestId}: ${new TextDecoder().decode(buf)}`);
+    const prefix = new TextDecoder().decode(prefixBuf);
+    console.log(`${prefix} ${requestId}: ${new TextDecoder().decode(buf)}`);
     const [result, resultLen] = str('#M("hits" ())');
-    lib.symbols.r9p_front_complete_request(front, intake, intakeLen, requestId, result, resultLen);
+    lib.symbols.r9p_front_complete_request(front, prefixBuf, prefixBuf.length, requestId, result, resultLen);
   }
   tick += 1;
   const [eventsPath, eventsPathLen] = str("market/events");

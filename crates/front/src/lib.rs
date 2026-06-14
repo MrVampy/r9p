@@ -32,7 +32,7 @@ enum Body {
     File(Vec<u8>),
     Log(LogBody),
     IntakeNew(u64),
-    Rpc,
+    Rpc(String),
 }
 
 struct LogBody {
@@ -97,6 +97,7 @@ impl LogBody {
 
 pub struct IntakeRequest {
     pub request_id: u64,
+    pub prefix: String,
     pub bytes: Vec<u8>,
 }
 
@@ -169,7 +170,7 @@ impl State {
             Body::File(bytes) => (0o444u32, bytes.len() as u64),
             Body::Log(log) => (0o444u32, log.end()),
             Body::IntakeNew(_) => (0o222u32, 0u64),
-            Body::Rpc => (0o600u32, 0u64),
+            Body::Rpc(_) => (0o600u32, 0u64),
         };
         Ok(Stat {
             type_: 0,
@@ -298,7 +299,7 @@ fn open_allowed(body: &Body, mode: u8) -> bool {
     match body {
         Body::Dir(_) | Body::File(_) | Body::Log(_) => mode & OPEN_MODE_MASK == OREAD,
         Body::IntakeNew(_) => mode & OPEN_MODE_MASK == OWRITE,
-        Body::Rpc => mode & OPEN_MODE_MASK == ORDWR,
+        Body::Rpc(_) => mode & OPEN_MODE_MASK == ORDWR,
     }
 }
 
@@ -371,7 +372,7 @@ impl Front {
         if trimmed.is_empty() {
             return Err(Error::from_static(EPERM));
         }
-        state.place(trimmed, Body::Rpc)?;
+        state.place(trimmed, Body::Rpc(trimmed.to_string()))?;
         Ok(())
     }
 
@@ -558,7 +559,7 @@ impl Front {
             }
             Body::Log(_) => self.read_log(state, id, offset, count, cancel),
             Body::IntakeNew(_) => Err(Error::from_static(EPERM)),
-            Body::Rpc => Err(Error::from_static(EPERM)),
+            Body::Rpc(_) => Err(Error::from_static(EPERM)),
         }
     }
 }
@@ -640,7 +641,8 @@ impl FileTree for FrontTree {
             .fids
             .get(&fid)
             .ok_or_else(|| Error::from_static(EBADFID))?;
-        if matches!(state.node(id)?.body, Body::Rpc) {
+        if let Body::Rpc(prefix) = &state.node(id)?.body {
+            let prefix = prefix.clone();
             if let Some(previous) = self.rpc_inflight.remove(&fid) {
                 state.rpc_responses.remove(&previous);
             }
@@ -649,6 +651,7 @@ impl FileTree for FrontTree {
             state.rpc_responses.insert(request_id, None);
             state.pending.push_back(IntakeRequest {
                 request_id,
+                prefix,
                 bytes: data.to_vec(),
             });
             self.rpc_inflight.insert(fid, request_id);
@@ -678,6 +681,7 @@ impl FileTree for FrontTree {
         )?;
         state.pending.push_back(IntakeRequest {
             request_id,
+            prefix,
             bytes: data.to_vec(),
         });
         drop(state);
@@ -707,7 +711,7 @@ impl FrontTree {
             .get(&fid)
             .ok_or_else(|| Error::from_static(EBADFID))?;
         let state = self.front.lock()?;
-        if matches!(state.node(id)?.body, Body::Rpc) {
+        if matches!(state.node(id)?.body, Body::Rpc(_)) {
             let request_id = self
                 .rpc_inflight
                 .get(&fid)
@@ -891,6 +895,7 @@ mod tests {
             .next_request(Duration::from_millis(200))?
             .expect("pending request");
         assert_eq!(request.request_id, 1);
+        assert_eq!(request.prefix, "queries");
         assert_eq!(request.bytes, b"#M(\"kind\" \"search\")".to_vec());
         front.complete_request("queries", request.request_id, b"#M(\"hits\" ())")?;
         let qids = walk_to(&mut tree, 1, 3, &["queries", "1", "result"]);
@@ -915,6 +920,7 @@ mod tests {
         tree.write(2, qids[1], 0, b"blocked wait wakes")?;
         let request = worker.join().expect("worker joins")?;
         assert_eq!(request.request_id, 1);
+        assert_eq!(request.prefix, "queries");
         assert_eq!(request.bytes, b"blocked wait wakes");
         Ok(())
     }
@@ -1077,12 +1083,39 @@ mod tests {
         let request = front
             .next_request(Duration::from_millis(200))?
             .expect("a pending rpc request");
+        assert_eq!(request.prefix, "queries");
         assert_eq!(request.bytes, b"find markets");
         front.complete_request("queries", request.request_id, b"{\"hits\":2}")?;
         let response = tree.read(2, qids[0], 0, 4096)?;
         assert_eq!(response, ReadData::Bytes(b"{\"hits\":2}".to_vec()));
         let tail = tree.read(2, qids[0], 6, 4096)?;
         assert_eq!(tail, ReadData::Bytes(b"\":2}".to_vec()));
+        Ok(())
+    }
+
+    #[test]
+    fn rpc_request_carries_the_registered_path() -> Result<()> {
+        let front = Front::new();
+        front.register_rpc("queries")?;
+        front.register_rpc("candidates")?;
+        let mut tree = front.tree();
+        tree.attach(1, b"claude", b"/")?;
+        let query_qids = walk_to(&mut tree, 1, 2, &["queries"]);
+        tree.open(2, query_qids[0], ORDWR)?;
+        tree.write(2, query_qids[0], 0, b"browse")?;
+        let candidate_qids = walk_to(&mut tree, 1, 3, &["candidates"]);
+        tree.open(3, candidate_qids[0], ORDWR)?;
+        tree.write(3, candidate_qids[0], 0, b"scan")?;
+        let first = front
+            .next_request(Duration::from_millis(200))?
+            .expect("first request");
+        let second = front
+            .next_request(Duration::from_millis(200))?
+            .expect("second request");
+        assert_eq!(first.prefix, "queries");
+        assert_eq!(first.bytes, b"browse");
+        assert_eq!(second.prefix, "candidates");
+        assert_eq!(second.bytes, b"scan");
         Ok(())
     }
 
@@ -1115,6 +1148,7 @@ mod tests {
         let second = front
             .next_request(Duration::from_millis(200))?
             .expect("second request");
+        assert_eq!(second.prefix, "queries");
         assert_eq!(second.bytes, b"second");
         front.complete_request("queries", second.request_id, b"two")?;
         let response = tree.read(2, qids[0], 0, 4096)?;

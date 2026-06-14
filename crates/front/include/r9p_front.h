@@ -2,10 +2,10 @@
 #define R9P_FRONT_H
 
 /*
- * r9p front C ABI, version 7.
+ * r9p front C ABI, version 8.
  *
  * Contract rules:
- * - r9p_front_abi_version() must return 7 before any other call is made;
+ * - r9p_front_abi_version() must return 8 before any other call is made;
  *   hosts reject a mismatch.
  * - r9p_front_new() returns an owned handle; every handle must be released
  *   exactly once with r9p_front_free(). Calls other than r9p_front_free()
@@ -25,8 +25,13 @@
  *   caller memory and returns the full byte length. Passing cap=0 is a
  *   length query. The bytes are not NUL-terminated.
  * - r9p_front_next_request stages the returned request by request id for
- *   r9p_front_request_copy. Call sequence per request: next_request,
- *   request_copy(request_id), complete_request.
+ *   r9p_front_request_prefix_copy and r9p_front_request_copy. Call sequence
+ *   per request: next_request, request_prefix_copy(request_id),
+ *   request_copy(request_id), complete_request. The prefix is the value to
+ *   pass to complete_request: the intake prefix for register_intake, or the
+ *   registered RPC path for register_rpc. request_prefix_copy with cap=0
+ *   returns the required length without copying. request_copy consumes the
+ *   staged request bytes, so copy the prefix first.
  * - Two host-side request shapes, both drained by the same
  *   next_request/request_copy/complete_request loop:
  *   - register_intake(prefix): a request LIFECYCLE. A client write to
@@ -95,6 +100,8 @@ int32_t r9p_front_next_request(r9p_front *front, uint64_t timeout_ms,
                                uint64_t *id_out, size_t *len_out);
 intptr_t r9p_front_request_copy(r9p_front *front, uint64_t request_id,
                                 uint8_t *buf, size_t cap);
+intptr_t r9p_front_request_prefix_copy(r9p_front *front, uint64_t request_id,
+                                       uint8_t *buf, size_t cap);
 int32_t r9p_front_complete_request(r9p_front *front, const char *prefix,
                                    size_t prefix_len, uint64_t request_id,
                                    const uint8_t *bytes, size_t bytes_len);

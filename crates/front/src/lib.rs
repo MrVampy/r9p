@@ -405,6 +405,20 @@ impl Front {
         }
     }
 
+    pub fn next_request_blocking(&self) -> Result<IntakeRequest> {
+        let mut state = self.lock()?;
+        loop {
+            if let Some(request) = state.pending.pop_front() {
+                return Ok(request);
+            }
+            state = self
+                .shared
+                .1
+                .wait(state)
+                .map_err(|_| Error::from_static("front state poisoned"))?;
+        }
+    }
+
     pub fn complete_request(&self, prefix: &str, request_id: u64, bytes: &[u8]) -> Result<()> {
         {
             let mut state = self.lock()?;
@@ -712,6 +726,7 @@ impl FrontTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread;
 
     fn walk_to(tree: &mut FrontTree, fid: Fid, newfid: Fid, path: &[&str]) -> Vec<Qid> {
         let names: Vec<Vec<u8>> = path.iter().map(|name| name.as_bytes().to_vec()).collect();
@@ -884,6 +899,23 @@ mod tests {
         let created = walk_to(&mut tree, 1, 4, &["queries", "created"]);
         let marker = tree.read(4, created[1], 0, 64)?;
         assert_eq!(marker, ReadData::Bytes(b"1".to_vec()));
+        Ok(())
+    }
+
+    #[test]
+    fn intake_blocking_request_wait_wakes_on_write() -> Result<()> {
+        let front = Front::new();
+        front.register_intake("queries")?;
+        let worker_front = front.clone();
+        let worker = thread::spawn(move || worker_front.next_request_blocking());
+        let mut tree = front.tree();
+        tree.attach(1, b"claude", b"/")?;
+        let qids = walk_to(&mut tree, 1, 2, &["queries", "new"]);
+        tree.open(2, qids[1], 1)?;
+        tree.write(2, qids[1], 0, b"blocked wait wakes")?;
+        let request = worker.join().expect("worker joins")?;
+        assert_eq!(request.request_id, 1);
+        assert_eq!(request.bytes, b"blocked wait wakes");
         Ok(())
     }
 

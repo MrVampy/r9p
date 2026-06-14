@@ -28,7 +28,7 @@ fn cbytes(value: &[u8]) -> (*const u8, usize) {
 
 #[test]
 fn abi_roundtrip_over_tcp() {
-    assert_eq!(r9p_front_abi_version(), 6);
+    assert_eq!(r9p_front_abi_version(), 7);
     let handle = r9p_front_new();
     let (path, path_len) = cstr("market/status");
     let (bytes, bytes_len) = cbytes(b"#M(\"state\" 'open)");
@@ -229,7 +229,7 @@ fn abi_roundtrip_over_tcp() {
 
 #[test]
 fn abi_publish_reports_last_error() {
-    assert_eq!(r9p_front_abi_version(), 6);
+    assert_eq!(r9p_front_abi_version(), 7);
     let handle = r9p_front_new();
     let (vault_bind, vault_bind_len) = cstr("127.0.0.1:1");
     let (vault_uname, vault_uname_len) = cstr("codex");
@@ -287,7 +287,7 @@ fn abi_publish_reports_last_error() {
 
 #[test]
 fn abi_reconcile_without_maintainers_is_ok() {
-    assert_eq!(r9p_front_abi_version(), 6);
+    assert_eq!(r9p_front_abi_version(), 7);
     let handle = r9p_front_new();
     assert_eq!(unsafe { r9p_front_reconcile_r9p_exports(handle) }, 0);
     unsafe { r9p_front_free(handle) };
@@ -295,7 +295,7 @@ fn abi_reconcile_without_maintainers_is_ok() {
 
 #[test]
 fn abi_maintain_reports_initial_publish_error() {
-    assert_eq!(r9p_front_abi_version(), 6);
+    assert_eq!(r9p_front_abi_version(), 7);
     let handle = r9p_front_new();
     let (vault_bind, vault_bind_len) = cstr("127.0.0.1:1");
     let (vault_uname, vault_uname_len) = cstr("codex");

@@ -4,6 +4,7 @@ use crate::{
     Error, Result,
 };
 use std::{
+    net::{Shutdown, TcpStream},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Condvar, Mutex,
@@ -12,7 +13,7 @@ use std::{
     time::Duration,
 };
 
-pub const DEFAULT_MAINTAIN_RECONCILE_INTERVAL: Duration = Duration::from_millis(250);
+pub const DEFAULT_MAINTAIN_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct R9pExportPublication {
@@ -32,13 +33,13 @@ pub enum PublishOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct R9pExportMaintenanceConfig {
-    pub reconcile_interval: Duration,
+    pub retry_interval: Duration,
 }
 
 impl Default for R9pExportMaintenanceConfig {
     fn default() -> Self {
         Self {
-            reconcile_interval: DEFAULT_MAINTAIN_RECONCILE_INTERVAL,
+            retry_interval: DEFAULT_MAINTAIN_RETRY_INTERVAL,
         }
     }
 }
@@ -75,6 +76,7 @@ struct MaintenanceSignal {
 struct MaintenanceSignalState {
     stop: bool,
     pending: bool,
+    active_wait: Option<TcpStream>,
 }
 
 pub fn publish_r9p_export(publication: &R9pExportPublication) -> Result<PublishOutcome> {
@@ -94,9 +96,9 @@ pub fn maintain_r9p_export(
     publication: R9pExportPublication,
     config: R9pExportMaintenanceConfig,
 ) -> Result<R9pExportMaintainer> {
-    if config.reconcile_interval.is_zero() {
+    if config.retry_interval.is_zero() {
         return Err(Error::from(
-            "r9p export maintenance reconcile interval must be non-zero",
+            "r9p export maintenance retry interval must be non-zero",
         ));
     }
     let first_outcome = publish_r9p_export(&publication)?;
@@ -105,6 +107,7 @@ pub fn maintain_r9p_export(
         state: Mutex::new(MaintenanceSignalState {
             stop: false,
             pending: false,
+            active_wait: None,
         }),
         condvar: Condvar::new(),
     });
@@ -128,6 +131,7 @@ impl R9pExportMaintainer {
     pub fn reconcile_now(&self) {
         if let Ok(mut state) = self.signal.state.lock() {
             state.pending = true;
+            interrupt_active_wait(&state);
             self.signal.condvar.notify_all();
         }
     }
@@ -140,6 +144,7 @@ impl R9pExportMaintainer {
         if let Ok(mut state) = self.signal.state.lock() {
             state.stop = true;
             state.pending = true;
+            interrupt_active_wait(&state);
             self.signal.condvar.notify_all();
         }
         if let Ok(mut join) = self.join.lock() {
@@ -207,15 +212,41 @@ fn maintain_loop(
     signal: Arc<MaintenanceSignal>,
     status: Arc<MaintenanceStatus>,
 ) {
-    while wait_for_reconcile(&signal, config.reconcile_interval) {
+    loop {
+        if stop_requested(&signal) {
+            break;
+        }
         match publish_r9p_export(&publication) {
-            Ok(outcome) => status.record_success(outcome),
-            Err(error) => status.record_failure(&error),
+            Ok(outcome) => {
+                status.record_success(outcome);
+                match wait_for_srv_change(&publication, &signal) {
+                    MaintenanceWait::Changed | MaintenanceWait::Interrupted => {}
+                    MaintenanceWait::Failed(error) => {
+                        status.record_failure(&error);
+                        if !wait_for_retry(&signal, config.retry_interval) {
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                status.record_failure(&error);
+                if !wait_for_retry(&signal, config.retry_interval) {
+                    break;
+                }
+            }
         }
     }
 }
 
-fn wait_for_reconcile(signal: &MaintenanceSignal, interval: Duration) -> bool {
+#[derive(Debug)]
+enum MaintenanceWait {
+    Changed,
+    Interrupted,
+    Failed(Error),
+}
+
+fn wait_for_retry(signal: &MaintenanceSignal, interval: Duration) -> bool {
     let mut state = match signal.state.lock() {
         Ok(state) => state,
         Err(_) => return false,
@@ -238,6 +269,121 @@ fn wait_for_reconcile(signal: &MaintenanceSignal, interval: Duration) -> bool {
         state.pending = false;
     }
     !state.stop
+}
+
+fn wait_for_srv_change(
+    publication: &R9pExportPublication,
+    signal: &MaintenanceSignal,
+) -> MaintenanceWait {
+    let (mut client, interrupt_stream) = match connect_interruptible_client(publication) {
+        Ok(client) => client,
+        Err(error) => return MaintenanceWait::Failed(error),
+    };
+    if !activate_wait(signal, interrupt_stream) {
+        return MaintenanceWait::Interrupted;
+    }
+    let result = wait_for_srv_change_with_client(publication, &mut client);
+    clear_active_wait(signal);
+    if stop_requested(signal) || consume_pending(signal) {
+        return MaintenanceWait::Interrupted;
+    }
+    match result {
+        Ok(()) => MaintenanceWait::Changed,
+        Err(error) => MaintenanceWait::Failed(error),
+    }
+}
+
+fn wait_for_srv_change_with_client<S: std::io::Read + std::io::Write>(
+    publication: &R9pExportPublication,
+    client: &mut Client<S>,
+) -> Result<()> {
+    let state_path = srv_wait_state_path(&publication.service_name);
+    let state = read_file(client, &state_path)?;
+    let Some(token) = field_value(&state, "state_token") else {
+        return Err(Error::from(format!(
+            "srv wait state missing state_token: {state_path}"
+        )));
+    };
+    let Some(state_name) = field_value(&state, "state") else {
+        return Err(Error::from(format!(
+            "srv wait state missing state: {state_path}"
+        )));
+    };
+    if state_name != "ready" {
+        return Ok(());
+    }
+    let wait_path = srv_wait_changed_after_path(&publication.service_name, &token);
+    let _ = read_file(client, &wait_path)?;
+    Ok(())
+}
+
+fn connect_interruptible_client(
+    publication: &R9pExportPublication,
+) -> Result<(Client<TcpStream>, TcpStream)> {
+    let stream = TcpStream::connect(&publication.vault_endpoint_bind).map_err(|error| {
+        Error::from(format!(
+            "connect {}: {error}",
+            publication.vault_endpoint_bind
+        ))
+    })?;
+    stream
+        .set_nodelay(true)
+        .map_err(|error| Error::from(format!("set TCP_NODELAY: {error}")))?;
+    let interrupt_stream = stream
+        .try_clone()
+        .map_err(|error| Error::from(format!("clone wait stream: {error}")))?;
+    let client = Client::connect(
+        stream,
+        &publication.vault_uname,
+        &publication.vault_aname,
+        publication.descriptor.msize,
+    )?;
+    Ok((client, interrupt_stream))
+}
+
+fn activate_wait(signal: &MaintenanceSignal, stream: TcpStream) -> bool {
+    let mut state = match signal.state.lock() {
+        Ok(state) => state,
+        Err(_) => {
+            let _ = stream.shutdown(Shutdown::Both);
+            return false;
+        }
+    };
+    if state.stop || state.pending {
+        let _ = stream.shutdown(Shutdown::Both);
+        return false;
+    }
+    state.active_wait = Some(stream);
+    true
+}
+
+fn clear_active_wait(signal: &MaintenanceSignal) {
+    if let Ok(mut state) = signal.state.lock() {
+        state.active_wait = None;
+    }
+}
+
+fn consume_pending(signal: &MaintenanceSignal) -> bool {
+    let mut state = match signal.state.lock() {
+        Ok(state) => state,
+        Err(_) => return false,
+    };
+    if state.pending {
+        state.pending = false;
+        true
+    } else {
+        false
+    }
+}
+
+fn stop_requested(signal: &MaintenanceSignal) -> bool {
+    signal.state.lock().map(|state| state.stop).unwrap_or(true)
+}
+
+fn interrupt_active_wait(state: &MaintenanceSignalState) {
+    if let Some(stream) = &state.active_wait {
+        let _ = stream.shutdown(Shutdown::Both);
+    }
 }
 
 fn publish_with_client<S: std::io::Read + std::io::Write>(
@@ -323,6 +469,21 @@ fn remove_path<S: std::io::Read + std::io::Write>(
 
 fn srv_path(service_name: &str) -> String {
     format!("/runtime/srv/{service_name}")
+}
+
+fn srv_wait_state_path(service_name: &str) -> String {
+    format!("/runtime/srv-wait/{service_name}/state")
+}
+
+fn srv_wait_changed_after_path(service_name: &str, token: &str) -> String {
+    format!("/runtime/srv-wait/{service_name}/changed-after/{token}")
+}
+
+fn field_value(report: &str, field: &str) -> Option<String> {
+    let prefix = format!("{field}: ");
+    report
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix).map(str::to_string))
 }
 
 fn validate_service_name(service_name: &str) -> Result<()> {
@@ -433,7 +594,7 @@ mod tests {
         let maintainer = maintain_r9p_export(
             publication,
             R9pExportMaintenanceConfig {
-                reconcile_interval: Duration::from_secs(60),
+                retry_interval: Duration::from_secs(60),
             },
         )
         .expect("maintainer should start");

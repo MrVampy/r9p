@@ -14,7 +14,7 @@ use std::ffi::c_char;
 use std::sync::Mutex;
 use std::time::Duration;
 
-pub const ABI_VERSION: u32 = 6;
+pub const ABI_VERSION: u32 = 7;
 
 const OK: i32 = 0;
 const TIMEOUT: i32 = 1;
@@ -479,7 +479,7 @@ pub unsafe extern "C" fn r9p_front_maintain_r9p_export(
     local_root_label_len: usize,
     pid: u32,
     msize: u32,
-    reconcile_interval_ms: u32,
+    retry_interval_ms: u32,
 ) -> i32 {
     let Some(abi) = (unsafe { handle.as_ref() }) else {
         return INVALID;
@@ -518,15 +518,15 @@ pub unsafe extern "C" fn r9p_front_maintain_r9p_export(
         Err(PublicationArgError::Invalid) => return INVALID,
         Err(PublicationArgError::Build(error)) => return set_last_error(abi, error),
     };
-    let interval = if reconcile_interval_ms == 0 {
-        R9pExportMaintenanceConfig::default().reconcile_interval
+    let interval = if retry_interval_ms == 0 {
+        R9pExportMaintenanceConfig::default().retry_interval
     } else {
-        Duration::from_millis(u64::from(reconcile_interval_ms))
+        Duration::from_millis(u64::from(retry_interval_ms))
     };
     let maintainer = match maintain_r9p_export(
         publication,
         R9pExportMaintenanceConfig {
-            reconcile_interval: interval,
+            retry_interval: interval,
         },
     ) {
         Ok(maintainer) => maintainer,

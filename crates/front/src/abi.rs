@@ -14,7 +14,7 @@ use std::ffi::c_char;
 use std::sync::Mutex;
 use std::time::Duration;
 
-pub const ABI_VERSION: u32 = 8;
+pub const ABI_VERSION: u32 = 9;
 
 const OK: i32 = 0;
 const TIMEOUT: i32 = 1;
@@ -445,6 +445,10 @@ pub unsafe extern "C" fn r9p_front_publish_r9p_export(
     local_root_label_len: usize,
     pid: u32,
     msize: u32,
+    service_unit: *const c_char,
+    service_unit_len: usize,
+    host_firewall_admission: *const c_char,
+    host_firewall_admission_len: usize,
 ) -> i32 {
     let Some(abi) = (unsafe { handle.as_ref() }) else {
         return INVALID;
@@ -477,6 +481,10 @@ pub unsafe extern "C" fn r9p_front_publish_r9p_export(
             local_root_label_len,
             pid,
             msize,
+            service_unit,
+            service_unit_len,
+            host_firewall_admission,
+            host_firewall_admission_len,
         })
     } {
         Ok(publication) => publication,
@@ -522,6 +530,10 @@ pub unsafe extern "C" fn r9p_front_maintain_r9p_export(
     pid: u32,
     msize: u32,
     retry_interval_ms: u32,
+    service_unit: *const c_char,
+    service_unit_len: usize,
+    host_firewall_admission: *const c_char,
+    host_firewall_admission_len: usize,
 ) -> i32 {
     let Some(abi) = (unsafe { handle.as_ref() }) else {
         return INVALID;
@@ -554,6 +566,10 @@ pub unsafe extern "C" fn r9p_front_maintain_r9p_export(
             local_root_label_len,
             pid,
             msize,
+            service_unit,
+            service_unit_len,
+            host_firewall_admission,
+            host_firewall_admission_len,
         })
     } {
         Ok(publication) => publication,
@@ -633,6 +649,10 @@ struct PublicationRawArgs {
     local_root_label_len: usize,
     pid: u32,
     msize: u32,
+    service_unit: *const c_char,
+    service_unit_len: usize,
+    host_firewall_admission: *const c_char,
+    host_firewall_admission_len: usize,
 }
 
 unsafe fn publication_from_args(
@@ -651,6 +671,8 @@ unsafe fn publication_from_args(
         Some(auth),
         Some(protocol),
         Some(local_root_label),
+        Some(service_unit),
+        Some(host_firewall_admission),
     ) = (
         unsafe { str_arg(args.vault_endpoint_bind, args.vault_endpoint_bind_len) },
         unsafe { str_arg(args.vault_uname, args.vault_uname_len) },
@@ -664,6 +686,13 @@ unsafe fn publication_from_args(
         unsafe { str_arg(args.auth, args.auth_len) },
         unsafe { str_arg(args.protocol, args.protocol_len) },
         unsafe { optional_str_arg(args.local_root_label, args.local_root_label_len) },
+        unsafe { optional_str_arg(args.service_unit, args.service_unit_len) },
+        unsafe {
+            optional_str_arg(
+                args.host_firewall_admission,
+                args.host_firewall_admission_len,
+            )
+        },
     )
     else {
         return Err(PublicationArgError::Invalid);
@@ -672,6 +701,26 @@ unsafe fn publication_from_args(
         TransportClass::parse(transport_class).map_err(PublicationArgError::Build)?;
     let auth = AuthBoundary::parse(auth).map_err(PublicationArgError::Build)?;
     let protocol = Protocol::parse(protocol).map_err(PublicationArgError::Build)?;
+    let mut extra_fields = BTreeMap::new();
+    match (service_unit, host_firewall_admission) {
+        (Some(service_unit), host_firewall_admission) => {
+            extra_fields.insert("service_unit".to_string(), service_unit.to_string());
+            extra_fields.insert(
+                "host_firewall_admission".to_string(),
+                host_firewall_admission
+                    .map(str::to_string)
+                    .unwrap_or_else(|| {
+                        derive_host_firewall_admission(transport_class, export_endpoint_bind)
+                    }),
+            );
+        }
+        (None, None) => {}
+        (None, Some(_)) => {
+            return Err(PublicationArgError::Build(r9p::Error::from(
+                "host_firewall_admission requires service_unit",
+            )));
+        }
+    }
     Ok(R9pExportPublication {
         vault_endpoint_bind: vault_endpoint_bind.to_string(),
         vault_uname: vault_uname.to_string(),
@@ -690,9 +739,19 @@ unsafe fn publication_from_args(
             msize: args.msize,
             expires_at: None,
             local_root_label: local_root_label.map(str::to_string),
-            extra_fields: BTreeMap::new(),
+            extra_fields,
         },
     })
+}
+
+fn derive_host_firewall_admission(
+    transport_class: TransportClass,
+    export_endpoint_bind: &str,
+) -> String {
+    match transport_class {
+        TransportClass::Tcp => format!("tcp:{export_endpoint_bind}"),
+        TransportClass::Unix => format!("unix:{export_endpoint_bind}"),
+    }
 }
 
 #[no_mangle]

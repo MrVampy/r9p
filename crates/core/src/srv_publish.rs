@@ -546,6 +546,31 @@ mod tests {
     }
 
     #[test]
+    fn publication_descriptor_can_carry_host_ownership() {
+        let tree = SharedSrvTree::new();
+        let address = serve_tree(tree.clone());
+        let mut publication = publication(&address);
+        publication.vault_endpoint_bind = address;
+        publication.descriptor.extra_fields.insert(
+            "service_unit".to_string(),
+            "vault-polymarket-watcher.service".to_string(),
+        );
+        publication.descriptor.extra_fields.insert(
+            "host_firewall_admission".to_string(),
+            "tcp:192.168.0.21:19590".to_string(),
+        );
+
+        let outcome = publish_r9p_export(&publication).expect("publish should succeed");
+
+        assert_eq!(outcome, PublishOutcome::Registered);
+        let descriptor = tree
+            .content("polymarket")
+            .expect("descriptor should be written");
+        assert!(descriptor.contains("service_unit\tvault-polymarket-watcher.service\n"));
+        assert!(descriptor.contains("host_firewall_admission\ttcp:192.168.0.21:19590\n"));
+    }
+
+    #[test]
     fn publish_is_idempotent_when_ready_summary_matches() {
         let tree = SharedSrvTree::new();
         tree.set_ready_summary("polymarket", ready_summary("192.168.0.21:19590"));

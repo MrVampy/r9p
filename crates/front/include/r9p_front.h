@@ -2,10 +2,10 @@
 #define R9P_FRONT_H
 
 /*
- * r9p front C ABI, version 8.
+ * r9p front C ABI, version 9.
  *
  * Contract rules:
- * - r9p_front_abi_version() must return 8 before any other call is made;
+ * - r9p_front_abi_version() must return 9 before any other call is made;
  *   hosts reject a mismatch.
  * - r9p_front_new() returns an owned handle; every handle must be released
  *   exactly once with r9p_front_free(). Calls other than r9p_front_free()
@@ -61,8 +61,11 @@
  *   the supplied fields, connects to the Vault 9P endpoint, and publishes
  *   the descriptor through /runtime/srv/<service>. If a matching ready
  *   handle already exists it returns ok; if a stale handle exists it is
- *   removed and recreated through the same namespace surface. Authorization
- *   failures are returned as internal failure details via last_error.
+ *   updated through the same namespace surface without removing the srv file.
+ *   Passing service_unit declares host process ownership; when
+ *   host_firewall_admission is empty, TCP exports derive
+ *   tcp:<export_endpoint_bind>. Authorization failures are returned as
+ *   internal failure details via last_error.
  * - r9p_front_maintain_r9p_export performs the same initial publication,
  *   then keeps a cancellable maintainer owned by the front handle. The
  *   maintainer waits on /runtime/srv-wait/<service>/changed-after/<token>
@@ -118,7 +121,9 @@ int32_t r9p_front_publish_r9p_export(
     const char *transport_class, size_t transport_class_len,
     const char *auth, size_t auth_len, const char *protocol,
     size_t protocol_len, const char *local_root_label,
-    size_t local_root_label_len, uint32_t pid, uint32_t msize);
+    size_t local_root_label_len, uint32_t pid, uint32_t msize,
+    const char *service_unit, size_t service_unit_len,
+    const char *host_firewall_admission, size_t host_firewall_admission_len);
 int32_t r9p_front_maintain_r9p_export(
     r9p_front *front, const char *vault_endpoint_bind,
     size_t vault_endpoint_bind_len, const char *vault_uname,
@@ -132,7 +137,9 @@ int32_t r9p_front_maintain_r9p_export(
     const char *auth, size_t auth_len, const char *protocol,
     size_t protocol_len, const char *local_root_label,
     size_t local_root_label_len, uint32_t pid, uint32_t msize,
-    uint32_t retry_interval_ms);
+    uint32_t retry_interval_ms, const char *service_unit,
+    size_t service_unit_len, const char *host_firewall_admission,
+    size_t host_firewall_admission_len);
 int32_t r9p_front_reconcile_r9p_exports(r9p_front *front);
 intptr_t r9p_front_last_error(r9p_front *front, uint8_t *buf, size_t cap);
 

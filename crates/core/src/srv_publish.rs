@@ -28,7 +28,7 @@ pub struct R9pExportPublication {
 pub enum PublishOutcome {
     AlreadyReady,
     Registered,
-    Replaced,
+    Updated,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -397,9 +397,8 @@ fn publish_with_client<S: std::io::Read + std::io::Write>(
             Ok(PublishOutcome::AlreadyReady)
         }
         Ok(_) => {
-            remove_path(client, &srv_path)?;
-            create_and_write(client, &publication.service_name, descriptor)?;
-            Ok(PublishOutcome::Replaced)
+            write_existing(client, &srv_path, descriptor)?;
+            Ok(PublishOutcome::Updated)
         }
         Err(error) if looks_missing(&error) => {
             create_and_write(client, &publication.service_name, descriptor)?;
@@ -445,6 +444,20 @@ fn create_and_write<S: std::io::Read + std::io::Write>(
     Ok(())
 }
 
+fn write_existing<S: std::io::Read + std::io::Write>(
+    client: &mut Client<S>,
+    path: &str,
+    descriptor: &str,
+) -> Result<()> {
+    let fid = client.walk_path(path)?;
+    client.open(fid, OWRITE)?;
+    let write_result = client.write(fid, 0, descriptor.as_bytes());
+    let clunk_result = client.clunk(fid);
+    write_result?;
+    clunk_result?;
+    Ok(())
+}
+
 fn read_file<S: std::io::Read + std::io::Write>(
     client: &mut Client<S>,
     path: &str,
@@ -457,14 +470,6 @@ fn read_file<S: std::io::Read + std::io::Write>(
     clunk_result?;
     String::from_utf8(bytes)
         .map_err(|error| Error::from(format!("read {path} was not utf-8: {error}")))
-}
-
-fn remove_path<S: std::io::Read + std::io::Write>(
-    client: &mut Client<S>,
-    path: &str,
-) -> Result<()> {
-    let fid = client.walk_path(path)?;
-    client.remove(fid)
 }
 
 fn srv_path(service_name: &str) -> String {
@@ -559,16 +564,18 @@ mod tests {
     }
 
     #[test]
-    fn publish_replaces_stale_ready_summary() {
+    fn publish_updates_stale_ready_summary_in_place() {
         let tree = SharedSrvTree::new();
         tree.set_ready_summary("polymarket", ready_summary("192.168.0.21:19591"));
+        let before_id = tree.file_id("polymarket").expect("ready file id");
         let address = serve_tree(tree.clone());
         let mut publication = publication(&address);
         publication.vault_endpoint_bind = address;
 
         let outcome = publish_r9p_export(&publication).expect("publish should succeed");
 
-        assert_eq!(outcome, PublishOutcome::Replaced);
+        assert_eq!(outcome, PublishOutcome::Updated);
+        assert_eq!(tree.file_id("polymarket"), Some(before_id));
         let descriptor = tree
             .content("polymarket")
             .expect("descriptor should be written");
@@ -675,6 +682,13 @@ mod tests {
                 .expect("tree lock")
                 .file_content(name.as_bytes())
                 .map(|bytes| String::from_utf8(bytes).expect("utf-8 content"))
+        }
+
+        fn file_id(&self, name: &str) -> Option<u64> {
+            self.inner
+                .lock()
+                .expect("tree lock")
+                .file_id(name.as_bytes())
         }
 
         fn remove_file(&self, name: &str) {
@@ -881,6 +895,10 @@ mod tests {
                 TestBody::File(bytes) => Some(bytes.clone()),
                 TestBody::Dir(_) => None,
             }
+        }
+
+        fn file_id(&self, name: &[u8]) -> Option<u64> {
+            self.child(SRV, name)
         }
 
         fn read(&self, id: u64, offset: u64, count: u32) -> Result<ReadData> {

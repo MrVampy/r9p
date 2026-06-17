@@ -33,6 +33,7 @@ enum Body {
     Log(LogBody),
     IntakeNew(u64),
     Rpc(String),
+    WriteRelay(String),
 }
 
 struct LogBody {
@@ -101,6 +102,11 @@ pub struct IntakeRequest {
     pub bytes: Vec<u8>,
 }
 
+enum WriteRelayReply {
+    Accepted(u32),
+    Rejected(String),
+}
+
 struct Node {
     name: Vec<u8>,
     parent: u64,
@@ -115,6 +121,9 @@ struct State {
     intakes: BTreeMap<u64, Intake>,
     pending: VecDeque<IntakeRequest>,
     rpc_responses: BTreeMap<u64, Option<Vec<u8>>>,
+    write_relay_responses: BTreeMap<u64, Option<WriteRelayReply>>,
+    principal_roots_required: bool,
+    principal_roots: BTreeMap<Vec<u8>, u64>,
     wait_timeout: Duration,
     log_capacity: usize,
 }
@@ -142,6 +151,9 @@ impl State {
             intakes: BTreeMap::new(),
             pending: VecDeque::new(),
             rpc_responses: BTreeMap::new(),
+            write_relay_responses: BTreeMap::new(),
+            principal_roots_required: false,
+            principal_roots: BTreeMap::new(),
             wait_timeout: Duration::from_secs(30),
             log_capacity: DEFAULT_LOG_CAPACITY,
         }
@@ -171,6 +183,7 @@ impl State {
             Body::Log(log) => (0o444u32, log.end()),
             Body::IntakeNew(_) => (0o222u32, 0u64),
             Body::Rpc(_) => (0o600u32, 0u64),
+            Body::WriteRelay(_) => (0o222u32, 0u64),
         };
         Ok(Stat {
             type_: 0,
@@ -279,6 +292,42 @@ impl State {
             }
         }
     }
+
+    fn lookup_path(&self, path: &str) -> Result<u64> {
+        let trimmed = path.trim_matches('/');
+        if trimmed.is_empty() {
+            return Ok(ROOT_ID);
+        }
+        let mut current = ROOT_ID;
+        for segment in split_path(trimmed)? {
+            let node = self.node(current)?;
+            let child = match &node.body {
+                Body::Dir(children) => children.get(segment.as_slice()).copied(),
+                _ => return Err(Error::from_static(ENOTDIR)),
+            };
+            current = child.ok_or_else(|| Error::from_static(ENOENT))?;
+        }
+        Ok(current)
+    }
+
+    fn is_intake_prefix(&self, prefix: &str) -> bool {
+        self.intakes.values().any(|intake| intake.prefix == prefix)
+    }
+
+    fn remove_pending_request(&mut self, request_id: u64) {
+        self.pending
+            .retain(|request| request.request_id != request_id);
+    }
+
+    fn attach_root_for(&self, uname: &[u8]) -> Result<u64> {
+        if !self.principal_roots_required {
+            return Ok(ROOT_ID);
+        }
+        self.principal_roots
+            .get(uname)
+            .copied()
+            .ok_or_else(|| Error::from_static("principal root unavailable"))
+    }
 }
 
 fn split_path(path: &str) -> Result<Vec<Vec<u8>>> {
@@ -298,7 +347,7 @@ fn open_allowed(body: &Body, mode: u8) -> bool {
     }
     match body {
         Body::Dir(_) | Body::File(_) | Body::Log(_) => mode & OPEN_MODE_MASK == OREAD,
-        Body::IntakeNew(_) => mode & OPEN_MODE_MASK == OWRITE,
+        Body::IntakeNew(_) | Body::WriteRelay(_) => mode & OPEN_MODE_MASK == OWRITE,
         Body::Rpc(_) => mode & OPEN_MODE_MASK == ORDWR,
     }
 }
@@ -376,6 +425,16 @@ impl Front {
         Ok(())
     }
 
+    pub fn register_write_relay(&self, path: &str) -> Result<()> {
+        let mut state = self.lock()?;
+        let trimmed = path.trim_matches('/');
+        if trimmed.is_empty() {
+            return Err(Error::from_static(EPERM));
+        }
+        state.place(trimmed, Body::WriteRelay(trimmed.to_string()))?;
+        Ok(())
+    }
+
     pub fn register_log(&self, path: &str) -> Result<()> {
         let mut state = self.lock()?;
         let trimmed = path.trim_matches('/');
@@ -383,6 +442,22 @@ impl Front {
             return Err(Error::from_static(EPERM));
         }
         state.place(trimmed, Body::Log(LogBody::empty()))?;
+        Ok(())
+    }
+
+    pub fn set_principal_root(&self, principal: &str, root_path: &str) -> Result<()> {
+        if principal.is_empty() {
+            return Err(Error::from_static(EPERM));
+        }
+        let mut state = self.lock()?;
+        let root = state.lookup_path(root_path)?;
+        if !matches!(state.node(root)?.body, Body::Dir(_)) {
+            return Err(Error::from_static(ENOTDIR));
+        }
+        state.principal_roots_required = true;
+        state
+            .principal_roots
+            .insert(principal.as_bytes().to_vec(), root);
         Ok(())
     }
 
@@ -421,6 +496,7 @@ impl Front {
     }
 
     pub fn complete_request(&self, prefix: &str, request_id: u64, bytes: &[u8]) -> Result<()> {
+        let trimmed = prefix.trim_matches('/');
         {
             let mut state = self.lock()?;
             if let Some(slot) = state.rpc_responses.get_mut(&request_id) {
@@ -429,10 +505,46 @@ impl Front {
                 self.shared.1.notify_all();
                 return Ok(());
             }
+            if !state.is_intake_prefix(trimmed) {
+                return Err(Error::from_static(ENOENT));
+            }
         }
-        let trimmed = prefix.trim_matches('/');
         let result_path = format!("{trimmed}/{request_id}/result");
         self.set(&result_path, bytes)
+    }
+
+    pub fn complete_write(&self, prefix: &str, request_id: u64, count: u32) -> Result<()> {
+        self.complete_write_result(prefix, request_id, WriteRelayReply::Accepted(count))
+    }
+
+    pub fn reject_write(&self, prefix: &str, request_id: u64, message: &str) -> Result<()> {
+        self.complete_write_result(
+            prefix,
+            request_id,
+            WriteRelayReply::Rejected(message.to_string()),
+        )
+    }
+
+    fn complete_write_result(
+        &self,
+        prefix: &str,
+        request_id: u64,
+        reply: WriteRelayReply,
+    ) -> Result<()> {
+        let mut state = self.lock()?;
+        let relay_id = state.lookup_path(prefix)?;
+        if !matches!(state.node(relay_id)?.body, Body::WriteRelay(_)) {
+            return Err(Error::from_static(ENOENT));
+        }
+        match state.write_relay_responses.get_mut(&request_id) {
+            Some(slot) => {
+                *slot = Some(reply);
+                drop(state);
+                self.shared.1.notify_all();
+                Ok(())
+            }
+            None => Err(Error::from_static(ENOENT)),
+        }
     }
 
     fn read_rpc(
@@ -482,6 +594,50 @@ impl Front {
     ) -> Result<ReadData> {
         let state = self.lock()?;
         self.read_rpc(state, request_id, offset, count, cancel)
+    }
+
+    fn wait_write_relay(
+        &self,
+        mut state: std::sync::MutexGuard<'_, State>,
+        request_id: u64,
+        data_len: usize,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<u32> {
+        let deadline = Instant::now() + state.wait_timeout;
+        loop {
+            if cancel.is_some_and(|cancel| cancel.load(Ordering::SeqCst)) {
+                state.write_relay_responses.remove(&request_id);
+                state.remove_pending_request(request_id);
+                return Err(Error::from_static("request flushed"));
+            }
+            match state.write_relay_responses.remove(&request_id) {
+                None => return Err(Error::from_static(ENOENT)),
+                Some(Some(WriteRelayReply::Accepted(count))) => {
+                    if usize::try_from(count).map_or(true, |count| count > data_len) {
+                        return Err(Error::from_static(EPERM));
+                    }
+                    return Ok(count);
+                }
+                Some(Some(WriteRelayReply::Rejected(message))) => {
+                    return Err(Error::from(message));
+                }
+                Some(None) => {
+                    state.write_relay_responses.insert(request_id, None);
+                }
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                state.write_relay_responses.remove(&request_id);
+                state.remove_pending_request(request_id);
+                return Err(Error::from_static("write relay unavailable"));
+            }
+            let (next, _timeout_result) = self
+                .shared
+                .1
+                .wait_timeout(state, deadline - now)
+                .map_err(|_| Error::from_static("front state poisoned"))?;
+            state = next;
+        }
     }
 
     fn read_log(
@@ -560,6 +716,7 @@ impl Front {
             Body::Log(_) => self.read_log(state, id, offset, count, cancel),
             Body::IntakeNew(_) => Err(Error::from_static(EPERM)),
             Body::Rpc(_) => Err(Error::from_static(EPERM)),
+            Body::WriteRelay(_) => Err(Error::from_static(EPERM)),
         }
     }
 }
@@ -571,28 +728,40 @@ pub(crate) enum ReadTarget {
 
 pub struct FrontTree {
     front: Front,
-    fids: BTreeMap<Fid, u64>,
+    fids: BTreeMap<Fid, FidBinding>,
     rpc_inflight: BTreeMap<Fid, u64>,
 }
 
+#[derive(Clone, Copy)]
+struct FidBinding {
+    node: u64,
+    root: u64,
+}
+
 impl FileTree for FrontTree {
-    fn attach(&mut self, fid: Fid, _uname: &[u8], _aname: &[u8]) -> Result<Qid> {
+    fn attach(&mut self, fid: Fid, uname: &[u8], _aname: &[u8]) -> Result<Qid> {
         let state = self.front.lock()?;
-        let qid = state.qid_for(ROOT_ID)?;
-        self.fids.insert(fid, ROOT_ID);
+        let root = state.attach_root_for(uname)?;
+        let qid = state.qid_for(root)?;
+        self.fids.insert(fid, FidBinding { node: root, root });
         Ok(qid)
     }
 
     fn walk(&mut self, fid: Fid, newfid: Fid, _start: Qid, names: &[Vec<u8>]) -> Result<Vec<Qid>> {
         let state = self.front.lock()?;
-        let mut current = *self
+        let binding = *self
             .fids
             .get(&fid)
             .ok_or_else(|| Error::from_static(EBADFID))?;
+        let mut current = binding.node;
         let mut qids = Vec::with_capacity(names.len());
         for name in names {
             let child = if name.as_slice() == b".." {
-                Some(state.node(current)?.parent)
+                if current == binding.root {
+                    Some(current)
+                } else {
+                    Some(state.node(current)?.parent)
+                }
             } else {
                 match &state.node(current)?.body {
                     Body::Dir(children) => children.get(name.as_slice()).copied(),
@@ -608,17 +777,24 @@ impl FileTree for FrontTree {
             }
         }
         if qids.len() == names.len() {
-            self.fids.insert(newfid, current);
+            self.fids.insert(
+                newfid,
+                FidBinding {
+                    node: current,
+                    root: binding.root,
+                },
+            );
         }
         Ok(qids)
     }
 
     fn open(&mut self, fid: Fid, qid: Qid, mode: u8) -> Result<OpenFile> {
         let state = self.front.lock()?;
-        let id = *self
+        let id = self
             .fids
             .get(&fid)
-            .ok_or_else(|| Error::from_static(EBADFID))?;
+            .ok_or_else(|| Error::from_static(EBADFID))?
+            .node;
         if state.qid_for(id)?.path != qid.path {
             return Err(Error::from_static(EBADFID));
         }
@@ -637,10 +813,11 @@ impl FileTree for FrontTree {
 
     fn write(&mut self, fid: Fid, _qid: Qid, _offset: u64, data: &[u8]) -> Result<u32> {
         let mut state = self.front.lock()?;
-        let id = *self
+        let id = self
             .fids
             .get(&fid)
-            .ok_or_else(|| Error::from_static(EBADFID))?;
+            .ok_or_else(|| Error::from_static(EBADFID))?
+            .node;
         if let Body::Rpc(prefix) = &state.node(id)?.body {
             let prefix = prefix.clone();
             if let Some(previous) = self.rpc_inflight.remove(&fid) {
@@ -658,6 +835,23 @@ impl FileTree for FrontTree {
             drop(state);
             self.front.shared.1.notify_all();
             return u32::try_from(data.len()).map_err(|_| Error::from_static(EPERM));
+        }
+        if let Body::WriteRelay(prefix) = &state.node(id)?.body {
+            let prefix = prefix.clone();
+            let request_id = state.next_request_id;
+            state.next_request_id = state.next_request_id.saturating_add(1);
+            state.write_relay_responses.insert(request_id, None);
+            state.pending.push_back(IntakeRequest {
+                request_id,
+                prefix,
+                bytes: data.to_vec(),
+            });
+            drop(state);
+            self.front.shared.1.notify_all();
+            let state = self.front.lock()?;
+            return self
+                .front
+                .wait_write_relay(state, request_id, data.len(), None);
         }
         let intake_id = match state.node(id)?.body {
             Body::IntakeNew(intake_id) => intake_id,
@@ -706,10 +900,11 @@ impl FileTree for FrontTree {
 
 impl FrontTree {
     pub(crate) fn read_target(&self, fid: Fid) -> Result<ReadTarget> {
-        let id = *self
+        let id = self
             .fids
             .get(&fid)
-            .ok_or_else(|| Error::from_static(EBADFID))?;
+            .ok_or_else(|| Error::from_static(EBADFID))?
+            .node;
         let state = self.front.lock()?;
         if matches!(state.node(id)?.body, Body::Rpc(_)) {
             let request_id = self
@@ -727,10 +922,23 @@ impl FrontTree {
     }
 }
 
+impl Drop for FrontTree {
+    fn drop(&mut self) {
+        if self.rpc_inflight.is_empty() {
+            return;
+        }
+        if let Ok(mut state) = self.front.lock() {
+            for (_, request_id) in std::mem::take(&mut self.rpc_inflight) {
+                state.rpc_responses.remove(&request_id);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread;
+    use std::{sync::mpsc, thread};
 
     fn walk_to(tree: &mut FrontTree, fid: Fid, newfid: Fid, path: &[&str]) -> Vec<Qid> {
         let names: Vec<Vec<u8>> = path.iter().map(|name| name.as_bytes().to_vec()).collect();
@@ -1036,6 +1244,146 @@ mod tests {
             }
             ReadData::Bytes(_) => panic!("expected directory listing for root"),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn pushed_principal_roots_select_views_and_fail_closed() -> Result<()> {
+        let front = Front::new();
+        front.set("views/alice/status", b"alice-visible")?;
+        front.set("views/bob/status", b"bob-visible")?;
+        front.set_principal_root("alice", "views/alice")?;
+
+        let mut alice = front.tree();
+        alice.attach(1, b"alice", b"/")?;
+        let status = walk_to(&mut alice, 1, 2, &["status"]);
+        assert_eq!(status.len(), 1);
+        let data = alice.read(2, status[0], 0, 4096)?;
+        assert_eq!(data, ReadData::Bytes(b"alice-visible".to_vec()));
+
+        let escape = walk_to(&mut alice, 1, 3, &["..", "bob", "status"]);
+        assert_eq!(escape.len(), 1);
+
+        let mut bob = front.tree();
+        let error = bob
+            .attach(1, b"bob", b"/")
+            .expect_err("principal without pushed root must fail closed");
+        assert_eq!(error.message(), b"principal root unavailable");
+        Ok(())
+    }
+
+    #[test]
+    fn write_relay_returns_count_after_brain_accepts() -> Result<()> {
+        let front = Front::new();
+        front.register_write_relay("control")?;
+        front.set_wait_timeout(Duration::from_secs(5))?;
+        let writer_front = front.clone();
+        let (done_tx, done_rx) = mpsc::channel();
+        let writer = thread::spawn(move || {
+            let mut tree = writer_front.tree();
+            tree.attach(1, b"alice", b"/")?;
+            let qids = walk_to(&mut tree, 1, 2, &["control"]);
+            tree.open(2, qids[0], OWRITE)?;
+            let result = tree.write(2, qids[0], 0, b"#M(\"command\" \"restart\")");
+            done_tx.send(result).expect("send writer result");
+            Ok::<(), Error>(())
+        });
+
+        let request = front
+            .next_request(Duration::from_millis(200))?
+            .expect("write relay request");
+        assert_eq!(request.prefix, "control");
+        assert_eq!(request.bytes, b"#M(\"command\" \"restart\")");
+        assert!(done_rx.recv_timeout(Duration::from_millis(50)).is_err());
+
+        front.complete_write(
+            "control",
+            request.request_id,
+            u32::try_from(request.bytes.len()).expect("request length"),
+        )?;
+        let wrote = done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("writer should finish")?;
+        assert_eq!(wrote as usize, request.bytes.len());
+        writer.join().expect("writer join")?;
+        Ok(())
+    }
+
+    #[test]
+    fn write_relay_reports_unavailable_when_brain_is_absent() -> Result<()> {
+        let front = Front::new();
+        front.register_write_relay("control")?;
+        front.set_wait_timeout(Duration::from_millis(20))?;
+        let mut tree = front.tree();
+        tree.attach(1, b"alice", b"/")?;
+        let qids = walk_to(&mut tree, 1, 2, &["control"]);
+        tree.open(2, qids[0], OWRITE)?;
+        let error = tree
+            .write(2, qids[0], 0, b"#M(\"command\" \"restart\")")
+            .expect_err("write relay without brain must fail");
+        assert_eq!(error.message(), b"write relay unavailable");
+        assert!(front.next_request(Duration::from_millis(0))?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn write_relay_can_return_brain_denial() -> Result<()> {
+        let front = Front::new();
+        front.register_write_relay("control")?;
+        front.set_wait_timeout(Duration::from_secs(5))?;
+        let writer_front = front.clone();
+        let (done_tx, done_rx) = mpsc::channel();
+        let writer = thread::spawn(move || {
+            let mut tree = writer_front.tree();
+            tree.attach(1, b"alice", b"/")?;
+            let qids = walk_to(&mut tree, 1, 2, &["control"]);
+            tree.open(2, qids[0], OWRITE)?;
+            let result = tree.write(2, qids[0], 0, b"#M(\"command\" \"restart\")");
+            done_tx.send(result).expect("send writer result");
+            Ok::<(), Error>(())
+        });
+
+        let request = front
+            .next_request(Duration::from_millis(200))?
+            .expect("write relay request");
+        front.reject_write("control", request.request_id, "authority denied")?;
+        let error = done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("writer should finish")
+            .expect_err("brain denial should reach writer");
+        assert_eq!(error.message(), b"authority denied");
+        writer.join().expect("writer join")?;
+        Ok(())
+    }
+
+    #[test]
+    fn dropping_tree_abandons_pending_rpc_response() -> Result<()> {
+        let front = Front::new();
+        front.register_rpc("queries")?;
+        let mut tree = front.tree();
+        tree.attach(1, b"alice", b"/")?;
+        let qids = walk_to(&mut tree, 1, 2, &["queries"]);
+        tree.open(2, qids[0], ORDWR)?;
+        tree.write(2, qids[0], 0, b"find markets")?;
+        let request = front
+            .next_request(Duration::from_millis(200))?
+            .expect("rpc request");
+        drop(tree);
+
+        let error = front
+            .complete_request("queries", request.request_id, b"late")
+            .expect_err("closed rpc request must not become an intake result");
+        assert_eq!(error.message(), ENOENT.as_bytes());
+
+        let mut verifier = front.tree();
+        verifier.attach(1, b"alice", b"/")?;
+        let qids = walk_to(
+            &mut verifier,
+            1,
+            2,
+            &["queries", &request.request_id.to_string(), "result"],
+        );
+        assert!(qids.len() < 3);
         Ok(())
     }
 

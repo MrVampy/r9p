@@ -202,6 +202,27 @@ pub unsafe extern "C" fn r9p_front_register_rpc(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn r9p_front_register_write_relay(
+    handle: *mut FrontAbi,
+    path: *const c_char,
+    path_len: usize,
+) -> i32 {
+    let Some(abi) = (unsafe { handle.as_ref() }) else {
+        return INVALID;
+    };
+    let Some(path) = (unsafe { str_arg(path, path_len) }) else {
+        return INVALID;
+    };
+    match abi.front.register_write_relay(path) {
+        Ok(()) => {
+            clear_last_error(abi);
+            OK
+        }
+        Err(error) => set_last_error(abi, error),
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn r9p_front_register_log(
     handle: *mut FrontAbi,
     path: *const c_char,
@@ -214,6 +235,33 @@ pub unsafe extern "C" fn r9p_front_register_log(
         return INVALID;
     };
     match abi.front.register_log(path) {
+        Ok(()) => {
+            clear_last_error(abi);
+            OK
+        }
+        Err(error) => set_last_error(abi, error),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn r9p_front_set_principal_root(
+    handle: *mut FrontAbi,
+    principal: *const c_char,
+    principal_len: usize,
+    root_path: *const c_char,
+    root_path_len: usize,
+) -> i32 {
+    let Some(abi) = (unsafe { handle.as_ref() }) else {
+        return INVALID;
+    };
+    let (Some(principal), Some(root_path)) =
+        (unsafe { str_arg(principal, principal_len) }, unsafe {
+            str_arg(root_path, root_path_len)
+        })
+    else {
+        return INVALID;
+    };
+    match abi.front.set_principal_root(principal, root_path) {
         Ok(()) => {
             clear_last_error(abi);
             OK
@@ -376,6 +424,61 @@ pub unsafe extern "C" fn r9p_front_complete_request(
         requests.remove(&request_id);
     }
     match abi.front.complete_request(prefix, request_id, bytes) {
+        Ok(()) => {
+            clear_last_error(abi);
+            OK
+        }
+        Err(error) => set_last_error(abi, error),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn r9p_front_complete_write(
+    handle: *mut FrontAbi,
+    prefix: *const c_char,
+    prefix_len: usize,
+    request_id: u64,
+    count: u32,
+) -> i32 {
+    let Some(abi) = (unsafe { handle.as_ref() }) else {
+        return INVALID;
+    };
+    let Some(prefix) = (unsafe { str_arg(prefix, prefix_len) }) else {
+        return INVALID;
+    };
+    if let Ok(mut requests) = abi.staged_requests.lock() {
+        requests.remove(&request_id);
+    }
+    match abi.front.complete_write(prefix, request_id, count) {
+        Ok(()) => {
+            clear_last_error(abi);
+            OK
+        }
+        Err(error) => set_last_error(abi, error),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn r9p_front_reject_write(
+    handle: *mut FrontAbi,
+    prefix: *const c_char,
+    prefix_len: usize,
+    request_id: u64,
+    message: *const c_char,
+    message_len: usize,
+) -> i32 {
+    let Some(abi) = (unsafe { handle.as_ref() }) else {
+        return INVALID;
+    };
+    let (Some(prefix), Some(message)) = (unsafe { str_arg(prefix, prefix_len) }, unsafe {
+        str_arg(message, message_len)
+    }) else {
+        return INVALID;
+    };
+    if let Ok(mut requests) = abi.staged_requests.lock() {
+        requests.remove(&request_id);
+    }
+    match abi.front.reject_write(prefix, request_id, message) {
         Ok(()) => {
             clear_last_error(abi);
             OK

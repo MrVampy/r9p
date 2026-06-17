@@ -1,12 +1,14 @@
 use front::abi::{
-    r9p_front_abi_version, r9p_front_append_event, r9p_front_complete_request, r9p_front_free,
-    r9p_front_last_error, r9p_front_maintain_r9p_export, r9p_front_new, r9p_front_next_request,
-    r9p_front_publish_r9p_export, r9p_front_reconcile_r9p_exports, r9p_front_register_intake,
-    r9p_front_register_log, r9p_front_register_rpc, r9p_front_request_copy,
-    r9p_front_request_prefix_copy, r9p_front_serve_tcp, r9p_front_set, r9p_front_stop,
+    r9p_front_abi_version, r9p_front_append_event, r9p_front_complete_request,
+    r9p_front_complete_write, r9p_front_free, r9p_front_last_error, r9p_front_maintain_r9p_export,
+    r9p_front_new, r9p_front_next_request, r9p_front_publish_r9p_export,
+    r9p_front_reconcile_r9p_exports, r9p_front_register_intake, r9p_front_register_log,
+    r9p_front_register_rpc, r9p_front_register_write_relay, r9p_front_request_copy,
+    r9p_front_request_prefix_copy, r9p_front_serve_tcp, r9p_front_set,
+    r9p_front_set_principal_root, r9p_front_stop,
 };
 use front::Front;
-use r9p::blocking::Client;
+use r9p::blocking::{Client, OWRITE};
 use r9p::fid::NOFID;
 use r9p::message::{RMessage, TMessage, NOTAG};
 use r9p::qid::DMDIR;
@@ -309,6 +311,205 @@ fn abi_reconcile_without_maintainers_is_ok() {
     let handle = r9p_front_new();
     assert_eq!(unsafe { r9p_front_reconcile_r9p_exports(handle) }, 0);
     unsafe { r9p_front_free(handle) };
+}
+
+#[test]
+fn abi_door_rehearsal_principal_root_and_write_relay() {
+    assert_eq!(r9p_front_abi_version(), 9);
+    let handle = r9p_front_new();
+    let (status_path, status_path_len) = cstr("views/alice/status");
+    let (status_body, status_body_len) = cbytes(b"#M(\"served_state\" \"fresh\")");
+    assert_eq!(
+        unsafe {
+            r9p_front_set(
+                handle,
+                status_path,
+                status_path_len,
+                status_body,
+                status_body_len,
+            )
+        },
+        0
+    );
+    let (principal, principal_len) = cstr("alice");
+    let (root_path, root_path_len) = cstr("views/alice");
+    assert_eq!(
+        unsafe {
+            r9p_front_set_principal_root(handle, principal, principal_len, root_path, root_path_len)
+        },
+        0
+    );
+    let (control, control_len) = cstr("views/alice/control");
+    assert_eq!(
+        unsafe { r9p_front_register_write_relay(handle, control, control_len) },
+        0
+    );
+    let (bind, bind_len) = cstr("127.0.0.1:0");
+    let mut port = 0u16;
+    assert_eq!(
+        unsafe { r9p_front_serve_tcp(handle, bind, bind_len, &mut port) },
+        0
+    );
+    let address = format!("127.0.0.1:{port}");
+
+    let mut alice = Client::connect_tcp(&address, "alice", "/", 65536).expect("connect alice");
+    let status_fid = alice.walk_path("/status").expect("walk status");
+    alice.open(status_fid, 0).expect("open status");
+    assert_eq!(
+        alice.read(status_fid, 0, 4096).expect("read status"),
+        b"#M(\"served_state\" \"fresh\")".to_vec()
+    );
+    assert!(Client::connect_tcp(&address, "bob", "/", 65536).is_err());
+
+    let brain_handle = handle as usize;
+    let brain = thread::spawn(move || {
+        let handle = brain_handle as *mut front::abi::FrontAbi;
+        let mut request_id = 0u64;
+        let mut request_len = 0usize;
+        assert_eq!(
+            unsafe { r9p_front_next_request(handle, 1000, &mut request_id, &mut request_len) },
+            0
+        );
+        let prefix = request_prefix(handle, request_id);
+        assert_eq!(prefix, "views/alice/control");
+        let mut request = vec![0u8; request_len];
+        let copied = unsafe {
+            r9p_front_request_copy(handle, request_id, request.as_mut_ptr(), request.len())
+        };
+        assert_eq!(copied as usize, request_len);
+        assert_eq!(request, b"#M(\"command\" \"restart\")".to_vec());
+        let (prefix_ptr, prefix_len) = cstr(&prefix);
+        assert_eq!(
+            unsafe {
+                r9p_front_complete_write(
+                    handle,
+                    prefix_ptr,
+                    prefix_len,
+                    request_id,
+                    u32::try_from(request.len()).expect("request length"),
+                )
+            },
+            0
+        );
+    });
+    let control_fid = alice.walk_path("/control").expect("walk control");
+    alice.open(control_fid, OWRITE).expect("open control");
+    let wrote = alice
+        .write_once(control_fid, 0, b"#M(\"command\" \"restart\")")
+        .expect("write control");
+    assert_eq!(wrote as usize, b"#M(\"command\" \"restart\")".len());
+    brain.join().expect("brain join");
+
+    assert_eq!(unsafe { r9p_front_stop(handle) }, 0);
+    unsafe { r9p_front_free(handle) };
+}
+
+#[test]
+fn door_rehearsal_serves_pushed_principal_view_and_fails_unknown_principal() {
+    let front = Front::new();
+    front
+        .set(
+            "views/alice/status",
+            b"#M(\"contract\" \"runtime-door-freshness.v1\" \"served_state\" \"stale\")",
+        )
+        .expect("push alice status");
+    front
+        .set("views/bob/status", b"#M(\"served_state\" \"fresh\")")
+        .expect("push bob status");
+    front
+        .set_principal_root("alice", "views/alice")
+        .expect("push alice principal root");
+    let serve = front.serve_tcp("127.0.0.1:0").expect("serve front");
+    let address = serve.addr().to_string();
+
+    let mut alice = Client::connect_tcp(&address, "alice", "/", 65536).expect("connect alice");
+    let status_fid = alice.walk_path("/status").expect("walk alice status");
+    alice.open(status_fid, 0).expect("open alice status");
+    let read_started = Instant::now();
+    let status = alice.read(status_fid, 0, 4096).expect("read alice status");
+    let read_elapsed = read_started.elapsed();
+    println!(
+        "door_rehearsal_pushed_read_latency_us {}",
+        read_elapsed.as_micros()
+    );
+    assert!(
+        read_elapsed < Duration::from_millis(50),
+        "pushed read should be local latency class, got {read_elapsed:?}"
+    );
+    assert_eq!(
+        status,
+        b"#M(\"contract\" \"runtime-door-freshness.v1\" \"served_state\" \"stale\")".to_vec()
+    );
+    assert!(Client::connect_tcp(&address, "bob", "/", 65536).is_err());
+
+    serve.shutdown();
+}
+
+#[test]
+fn door_rehearsal_relayed_write_returns_count_after_brain_accepts() {
+    let front = Front::new();
+    front
+        .register_write_relay("control")
+        .expect("register control relay");
+    front
+        .set_wait_timeout(Duration::from_secs(5))
+        .expect("set wait timeout");
+    let serve = front.serve_tcp("127.0.0.1:0").expect("serve front");
+    let address = serve.addr().to_string();
+    let brain = front.clone();
+    let brain_thread = thread::spawn(move || {
+        let request = brain
+            .next_request(Duration::from_secs(1))
+            .expect("next request")
+            .expect("write request");
+        assert_eq!(request.prefix, "control");
+        assert_eq!(request.bytes, b"#M(\"command\" \"restart\")");
+        brain
+            .complete_write(
+                "control",
+                request.request_id,
+                u32::try_from(request.bytes.len()).expect("request length"),
+            )
+            .expect("complete write");
+    });
+
+    let mut client = Client::connect_tcp(&address, "alice", "/", 65536).expect("connect front");
+    let control_fid = client.walk_path("/control").expect("walk control");
+    client.open(control_fid, OWRITE).expect("open control");
+    let wrote = client
+        .write_once(control_fid, 0, b"#M(\"command\" \"restart\")")
+        .expect("write control");
+    assert_eq!(wrote as usize, b"#M(\"command\" \"restart\")".len());
+
+    brain_thread.join().expect("brain thread join");
+    serve.shutdown();
+}
+
+#[test]
+fn door_rehearsal_relayed_write_reports_unavailable_when_brain_absent() {
+    let front = Front::new();
+    front
+        .register_write_relay("control")
+        .expect("register control relay");
+    front
+        .set_wait_timeout(Duration::from_millis(20))
+        .expect("set wait timeout");
+    let serve = front.serve_tcp("127.0.0.1:0").expect("serve front");
+    let address = serve.addr().to_string();
+
+    let mut client = Client::connect_tcp(&address, "alice", "/", 65536).expect("connect front");
+    let control_fid = client.walk_path("/control").expect("walk control");
+    client.open(control_fid, OWRITE).expect("open control");
+    let error = client
+        .write_once(control_fid, 0, b"#M(\"command\" \"restart\")")
+        .expect_err("brain-absent relay must be unavailable");
+    assert_eq!(error.message(), b"write relay unavailable");
+    assert!(front
+        .next_request(Duration::from_millis(0))
+        .expect("check pending queue")
+        .is_none());
+
+    serve.shutdown();
 }
 
 #[test]

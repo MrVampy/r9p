@@ -27,13 +27,15 @@
  * - r9p_front_next_request stages the returned request by request id for
  *   r9p_front_request_prefix_copy and r9p_front_request_copy. Call sequence
  *   per request: next_request, request_prefix_copy(request_id),
- *   request_copy(request_id), complete_request. The prefix is the value to
- *   pass to complete_request: the intake prefix for register_intake, or the
- *   registered RPC path for register_rpc. request_prefix_copy with cap=0
- *   returns the required length without copying. request_copy consumes the
- *   staged request bytes, so copy the prefix first.
- * - Two host-side request shapes, both drained by the same
- *   next_request/request_copy/complete_request loop:
+ *   request_copy(request_id), then complete_request, complete_write, or
+ *   reject_write according to the registered shape. The prefix is the value
+ *   to pass to the completion call: the intake prefix for register_intake, or
+ *   the registered path for register_rpc and register_write_relay.
+ *   request_prefix_copy with cap=0 returns the required length without
+ *   copying. request_copy consumes the staged request bytes, so copy the
+ *   prefix first.
+ * - Three host-side request shapes, all drained by the same
+ *   next_request/request_copy loop:
  *   - register_intake(prefix): a request LIFECYCLE. A client write to
  *     <prefix>/new enqueues a request; complete_request publishes the
  *     result file at <prefix>/<id>/result for a separate reader. Use for
@@ -45,6 +47,16 @@
  *     stateless query/response. A subsequent write on the same fid is a
  *     fresh request; clunk discards a pending one. A read before a write,
  *     or after the host abandons the request, errors.
+ *   - register_write_relay(path): synchronous write relay. A client opens
+ *     <path> O_WRITE and writes bytes; the Rwrite count is returned only
+ *     after the host calls complete_write. reject_write returns the supplied
+ *     error text to the writer, and a missing host reports write relay
+ *     unavailable after the front wait timeout. Use for write/control
+ *     surfaces where enqueueing is not admission.
+ * - set_principal_root(principal, root_path) pushes an attach root for a
+ *   principal. Installing any root switches attach handling to explicit
+ *   pushed roots: principals without a row fail closed at attach. The front
+ *   does no policy evaluation and does not derive principal classes.
  * - append_event(path) lazily creates a log node on first append.
  *   register_log(path) instead declares an empty log up front, so an
  *   advertised event-stream path is walkable and subscribable from
@@ -95,8 +107,15 @@ int32_t r9p_front_register_intake(r9p_front *front, const char *prefix,
                                   size_t prefix_len);
 int32_t r9p_front_register_rpc(r9p_front *front, const char *path,
                                size_t path_len);
+int32_t r9p_front_register_write_relay(r9p_front *front, const char *path,
+                                       size_t path_len);
 int32_t r9p_front_register_log(r9p_front *front, const char *path,
                                size_t path_len);
+int32_t r9p_front_set_principal_root(r9p_front *front,
+                                     const char *principal,
+                                     size_t principal_len,
+                                     const char *root_path,
+                                     size_t root_path_len);
 int32_t r9p_front_serve_tcp(r9p_front *front, const char *bind,
                             size_t bind_len, uint16_t *port_out);
 int32_t r9p_front_next_request(r9p_front *front, uint64_t timeout_ms,
@@ -108,6 +127,12 @@ intptr_t r9p_front_request_prefix_copy(r9p_front *front, uint64_t request_id,
 int32_t r9p_front_complete_request(r9p_front *front, const char *prefix,
                                    size_t prefix_len, uint64_t request_id,
                                    const uint8_t *bytes, size_t bytes_len);
+int32_t r9p_front_complete_write(r9p_front *front, const char *prefix,
+                                 size_t prefix_len, uint64_t request_id,
+                                 uint32_t count);
+int32_t r9p_front_reject_write(r9p_front *front, const char *prefix,
+                               size_t prefix_len, uint64_t request_id,
+                               const char *message, size_t message_len);
 int32_t r9p_front_stop(r9p_front *front);
 int32_t r9p_front_publish_r9p_export(
     r9p_front *front, const char *vault_endpoint_bind,

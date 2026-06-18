@@ -119,7 +119,7 @@ const str = (value: string): [Uint8Array, number] => {
   return [bytes, bytes.length];
 };
 
-if (lib.symbols.r9p_front_abi_version() !== 9) {
+if (lib.symbols.r9p_front_abi_version() !== 10) {
   throw new Error("abi version mismatch");
 }
 const front = lib.symbols.r9p_front_new();

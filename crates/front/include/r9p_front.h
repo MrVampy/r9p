@@ -2,11 +2,11 @@
 #define R9P_FRONT_H
 
 /*
- * r9p front C ABI, version 9.
+ * r9p front C ABI, version 10.
  *
  * Contract rules:
- * - r9p_front_abi_version() must return 9 before any other call is made;
- *   hosts reject a mismatch.
+ * - r9p_front_abi_version() must return 10 before v10-only calls are made.
+ *   Hosts that only use the v9 call set may accept either 9 or 10.
  * - r9p_front_new() returns an owned handle; every handle must be released
  *   exactly once with r9p_front_free(). Calls other than r9p_front_free()
  *   are thread-safe: they may be called from any thread concurrently.
@@ -25,15 +25,20 @@
  *   caller memory and returns the full byte length. Passing cap=0 is a
  *   length query. The bytes are not NUL-terminated.
  * - r9p_front_next_request stages the returned request by request id for
- *   r9p_front_request_prefix_copy and r9p_front_request_copy. Call sequence
- *   per request: next_request, request_prefix_copy(request_id),
+ *   r9p_front_request_prefix_copy, r9p_front_request_context_copy, and
+ *   r9p_front_request_copy. Call sequence per request: next_request,
+ *   request_prefix_copy(request_id), request_context_copy(request_id),
  *   request_copy(request_id), then complete_request, complete_write, or
  *   reject_write according to the registered shape. The prefix is the value
  *   to pass to the completion call: the intake prefix for register_intake, or
  *   the registered path for register_rpc and register_write_relay.
- *   request_prefix_copy with cap=0 returns the required length without
- *   copying. request_copy consumes the staged request bytes, so copy the
- *   prefix first.
+ *   request_prefix_copy and request_context_copy with cap=0 return the
+ *   required length without copying. request_copy consumes the staged request
+ *   bytes, so copy prefix and context first.
+ * - r9p_front_set_pushed_file is the v10 public-door push path. It installs
+ *   file bytes with brain-owned qid path, qid version, generation,
+ *   visibility class, and wake token. The front must serve those qid fields
+ *   exactly; it does not increment them locally.
  * - Three host-side request shapes, all drained by the same
  *   next_request/request_copy loop:
  *   - register_intake(prefix): a request LIFECYCLE. A client write to
@@ -53,10 +58,16 @@
  *     error text to the writer, and a missing host reports write relay
  *     unavailable after the front wait timeout. Use for write/control
  *     surfaces where enqueueing is not admission.
- * - set_principal_root(principal, root_path) pushes an attach root for a
- *   principal. Installing any root switches attach handling to explicit
- *   pushed roots: principals without a row fail closed at attach. The front
- *   does no policy evaluation and does not derive principal classes.
+ * - set_principal_root(principal, root_path) pushes a v9-style wildcard attach
+ *   root for a principal. set_principal_root_aname(principal, aname,
+ *   root_path) is the v10 admission form: each call admits one aname for the
+ *   principal's pushed root. Installing any root switches attach handling to
+ *   explicit pushed roots: principals without a row, or with a non-admitted
+ *   aname, fail closed at attach. The front does no policy evaluation and
+ *   does not derive principal classes.
+ * - r9p_front_set_protocol_limits sets the advertised max msize and open
+ *   iounit for newly accepted connections. The front validates the msize
+ *   against the r9p codec bounds and serves the supplied iounit on open.
  * - append_event(path) lazily creates a log node on first append.
  *   register_log(path) instead declares an empty log up front, so an
  *   advertised event-stream path is walkable and subscribable from
@@ -100,6 +111,12 @@ void r9p_front_free(r9p_front *front);
 
 int32_t r9p_front_set(r9p_front *front, const char *path, size_t path_len,
                       const uint8_t *bytes, size_t bytes_len);
+int32_t r9p_front_set_pushed_file(
+    r9p_front *front, const char *path, size_t path_len, const uint8_t *bytes,
+    size_t bytes_len, uint64_t qid_path, uint32_t qid_version,
+    uint64_t generation, const char *visibility_class,
+    size_t visibility_class_len, const char *wake_token,
+    size_t wake_token_len);
 int32_t r9p_front_append_event(r9p_front *front, const char *path,
                                size_t path_len, const uint8_t *bytes,
                                size_t bytes_len);
@@ -116,6 +133,15 @@ int32_t r9p_front_set_principal_root(r9p_front *front,
                                      size_t principal_len,
                                      const char *root_path,
                                      size_t root_path_len);
+int32_t r9p_front_set_principal_root_aname(r9p_front *front,
+                                           const char *principal,
+                                           size_t principal_len,
+                                           const char *aname,
+                                           size_t aname_len,
+                                           const char *root_path,
+                                           size_t root_path_len);
+int32_t r9p_front_set_protocol_limits(r9p_front *front, uint32_t max_msize,
+                                      uint32_t iounit);
 int32_t r9p_front_serve_tcp(r9p_front *front, const char *bind,
                             size_t bind_len, uint16_t *port_out);
 int32_t r9p_front_next_request(r9p_front *front, uint64_t timeout_ms,
@@ -124,6 +150,8 @@ intptr_t r9p_front_request_copy(r9p_front *front, uint64_t request_id,
                                 uint8_t *buf, size_t cap);
 intptr_t r9p_front_request_prefix_copy(r9p_front *front, uint64_t request_id,
                                        uint8_t *buf, size_t cap);
+intptr_t r9p_front_request_context_copy(r9p_front *front, uint64_t request_id,
+                                        uint8_t *buf, size_t cap);
 int32_t r9p_front_complete_request(r9p_front *front, const char *prefix,
                                    size_t prefix_len, uint64_t request_id,
                                    const uint8_t *bytes, size_t bytes_len);

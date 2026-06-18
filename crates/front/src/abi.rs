@@ -1,7 +1,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 use crate::serve::ServeHandle;
-use crate::Front;
+use crate::{Front, PushedFileMetadata, RequestContext};
 use r9p::export_descriptor::{
     AuthBoundary, ExportDescriptor, ExportMode, Protocol, TransportClass,
 };
@@ -14,7 +14,7 @@ use std::ffi::c_char;
 use std::sync::Mutex;
 use std::time::Duration;
 
-pub const ABI_VERSION: u32 = 9;
+pub const ABI_VERSION: u32 = 10;
 
 const OK: i32 = 0;
 const TIMEOUT: i32 = 1;
@@ -32,6 +32,7 @@ pub struct FrontAbi {
 struct StagedRequest {
     prefix: Vec<u8>,
     bytes: Vec<u8>,
+    context: Vec<u8>,
 }
 
 unsafe fn str_arg<'a>(ptr: *const c_char, len: usize) -> Option<&'a str> {
@@ -70,6 +71,36 @@ fn clear_last_error(abi: &FrontAbi) {
     if let Ok(mut last_error) = abi.last_error.lock() {
         last_error.clear();
     }
+}
+
+fn request_context_lfe(context: &RequestContext) -> Vec<u8> {
+    format!(
+        "#M(\"version\" \"r9p-front-request-context.v1\" \"uname\" \"{}\" \"aname\" \"{}\" \"session_id\" {} \"fid\" {} \"target_path\" \"{}\" \"offset\" {} \"open_mode\" {} \"pushed_generation\" {})",
+        escape_lfe_string(&context.uname),
+        escape_lfe_string(&context.aname),
+        context.session_id,
+        context.fid,
+        escape_lfe_string(&context.target_path),
+        context.offset,
+        context.open_mode,
+        context.pushed_generation,
+    )
+    .into_bytes()
+}
+
+fn escape_lfe_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 #[no_mangle]
@@ -126,6 +157,51 @@ pub unsafe extern "C" fn r9p_front_set(
         return INVALID;
     };
     match abi.front.set(path, bytes) {
+        Ok(()) => {
+            clear_last_error(abi);
+            OK
+        }
+        Err(error) => set_last_error(abi, error),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn r9p_front_set_pushed_file(
+    handle: *mut FrontAbi,
+    path: *const c_char,
+    path_len: usize,
+    bytes: *const u8,
+    bytes_len: usize,
+    qid_path: u64,
+    qid_version: u32,
+    generation: u64,
+    visibility_class: *const c_char,
+    visibility_class_len: usize,
+    wake_token: *const c_char,
+    wake_token_len: usize,
+) -> i32 {
+    let Some(abi) = (unsafe { handle.as_ref() }) else {
+        return INVALID;
+    };
+    let (Some(path), Some(bytes), Some(visibility_class), Some(wake_token)) = (
+        unsafe { str_arg(path, path_len) },
+        unsafe { bytes_arg(bytes, bytes_len) },
+        unsafe { str_arg(visibility_class, visibility_class_len) },
+        unsafe { str_arg(wake_token, wake_token_len) },
+    ) else {
+        return INVALID;
+    };
+    match abi.front.set_pushed_file(
+        path,
+        bytes,
+        PushedFileMetadata {
+            qid_path,
+            qid_version,
+            generation,
+            visibility_class: visibility_class.to_string(),
+            wake_token: wake_token.to_string(),
+        },
+    ) {
         Ok(()) => {
             clear_last_error(abi);
             OK
@@ -271,6 +347,56 @@ pub unsafe extern "C" fn r9p_front_set_principal_root(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn r9p_front_set_principal_root_aname(
+    handle: *mut FrontAbi,
+    principal: *const c_char,
+    principal_len: usize,
+    aname: *const c_char,
+    aname_len: usize,
+    root_path: *const c_char,
+    root_path_len: usize,
+) -> i32 {
+    let Some(abi) = (unsafe { handle.as_ref() }) else {
+        return INVALID;
+    };
+    let (Some(principal), Some(aname), Some(root_path)) = (
+        unsafe { str_arg(principal, principal_len) },
+        unsafe { str_arg(aname, aname_len) },
+        unsafe { str_arg(root_path, root_path_len) },
+    ) else {
+        return INVALID;
+    };
+    match abi
+        .front
+        .set_principal_root_aname(principal, aname, root_path)
+    {
+        Ok(()) => {
+            clear_last_error(abi);
+            OK
+        }
+        Err(error) => set_last_error(abi, error),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn r9p_front_set_protocol_limits(
+    handle: *mut FrontAbi,
+    max_msize: u32,
+    iounit: u32,
+) -> i32 {
+    let Some(abi) = (unsafe { handle.as_ref() }) else {
+        return INVALID;
+    };
+    match abi.front.set_protocol_limits(max_msize, iounit) {
+        Ok(()) => {
+            clear_last_error(abi);
+            OK
+        }
+        Err(error) => set_last_error(abi, error),
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn r9p_front_serve_tcp(
     handle: *mut FrontAbi,
     bind: *const c_char,
@@ -325,6 +451,7 @@ pub unsafe extern "C" fn r9p_front_next_request(
                         StagedRequest {
                             prefix: request.prefix.into_bytes(),
                             bytes: request.bytes,
+                            context: request_context_lfe(&request.context),
                         },
                     );
                 }
@@ -401,6 +528,37 @@ pub unsafe extern "C" fn r9p_front_request_prefix_copy(
         std::ptr::copy_nonoverlapping(request.prefix.as_ptr(), buf, request.prefix.len());
     }
     request.prefix.len() as isize
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn r9p_front_request_context_copy(
+    handle: *mut FrontAbi,
+    request_id: u64,
+    buf: *mut u8,
+    cap: usize,
+) -> isize {
+    let Some(abi) = (unsafe { handle.as_ref() }) else {
+        return INVALID as isize;
+    };
+    let Ok(requests) = abi.staged_requests.lock() else {
+        return INTERNAL as isize;
+    };
+    let Some(request) = requests.get(&request_id) else {
+        return INVALID as isize;
+    };
+    if cap == 0 {
+        return request.context.len() as isize;
+    }
+    if buf.is_null() {
+        return INVALID as isize;
+    }
+    if request.context.len() > cap {
+        return INVALID as isize;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(request.context.as_ptr(), buf, request.context.len());
+    }
+    request.context.len() as isize
 }
 
 #[no_mangle]

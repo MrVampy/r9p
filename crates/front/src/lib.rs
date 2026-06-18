@@ -1,13 +1,14 @@
 pub mod abi;
 pub mod serve;
 
+use r9p::codec::{MAX_MSIZE, MIN_MSIZE};
 use r9p::error::{Error, Result};
 use r9p::fid::Fid;
 use r9p::qid::{Qid, DMDIR, QTDIR, QTFILE};
 use r9p::server::{FileTree, OpenFile, ReadData};
 use r9p::stat::Stat;
-use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -100,6 +101,50 @@ pub struct IntakeRequest {
     pub request_id: u64,
     pub prefix: String,
     pub bytes: Vec<u8>,
+    pub context: RequestContext,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequestContext {
+    pub uname: String,
+    pub aname: String,
+    pub session_id: u64,
+    pub fid: Fid,
+    pub target_path: String,
+    pub offset: u64,
+    pub open_mode: u8,
+    pub pushed_generation: u64,
+}
+
+impl RequestContext {
+    fn from_parts(
+        binding: &FidBinding,
+        fid: Fid,
+        target_path: String,
+        offset: u64,
+        open_mode: u8,
+        pushed_generation: u64,
+    ) -> Self {
+        Self {
+            uname: String::from_utf8_lossy(&binding.uname).into_owned(),
+            aname: String::from_utf8_lossy(&binding.aname).into_owned(),
+            session_id: binding.session_id,
+            fid,
+            target_path,
+            offset,
+            open_mode,
+            pushed_generation,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PushedFileMetadata {
+    pub qid_path: u64,
+    pub qid_version: u32,
+    pub generation: u64,
+    pub visibility_class: String,
+    pub wake_token: String,
 }
 
 enum WriteRelayReply {
@@ -110,12 +155,17 @@ enum WriteRelayReply {
 struct Node {
     name: Vec<u8>,
     parent: u64,
+    qid_path: u64,
     version: u32,
+    generation: u64,
+    visibility_class: Option<String>,
+    wake_token: Option<String>,
     body: Body,
 }
 
 struct State {
     nodes: BTreeMap<u64, Node>,
+    qid_index: BTreeMap<u64, u64>,
     next_id: u64,
     next_request_id: u64,
     intakes: BTreeMap<u64, Intake>,
@@ -123,29 +173,57 @@ struct State {
     rpc_responses: BTreeMap<u64, Option<Vec<u8>>>,
     write_relay_responses: BTreeMap<u64, Option<WriteRelayReply>>,
     principal_roots_required: bool,
-    principal_roots: BTreeMap<Vec<u8>, u64>,
+    principal_roots: BTreeMap<Vec<u8>, PrincipalRoot>,
     wait_timeout: Duration,
     log_capacity: usize,
+    protocol: ProtocolConfig,
 }
 
 struct Intake {
     prefix: String,
 }
 
+struct PrincipalRoot {
+    root: u64,
+    anames: BTreeSet<Vec<u8>>,
+}
+
+#[derive(Clone, Copy)]
+struct ProtocolConfig {
+    max_msize: u32,
+    iounit: u32,
+}
+
+impl Default for ProtocolConfig {
+    fn default() -> Self {
+        Self {
+            max_msize: MAX_MSIZE,
+            iounit: 0,
+        }
+    }
+}
+
 impl State {
     fn new() -> Self {
         let mut nodes = BTreeMap::new();
+        let mut qid_index = BTreeMap::new();
+        qid_index.insert(ROOT_ID, ROOT_ID);
         nodes.insert(
             ROOT_ID,
             Node {
                 name: b"/".to_vec(),
                 parent: ROOT_ID,
+                qid_path: ROOT_ID,
                 version: 0,
+                generation: 0,
+                visibility_class: None,
+                wake_token: None,
                 body: Body::Dir(BTreeMap::new()),
             },
         );
         Self {
             nodes,
+            qid_index,
             next_id: 1,
             next_request_id: 1,
             intakes: BTreeMap::new(),
@@ -156,6 +234,7 @@ impl State {
             principal_roots: BTreeMap::new(),
             wait_timeout: Duration::from_secs(30),
             log_capacity: DEFAULT_LOG_CAPACITY,
+            protocol: ProtocolConfig::default(),
         }
     }
 
@@ -171,7 +250,31 @@ impl State {
             Body::Dir(_) => QTDIR,
             _ => QTFILE,
         };
-        Ok(Qid::new(qtype, node.version, id))
+        Ok(Qid::new(qtype, node.version, node.qid_path))
+    }
+
+    fn node_id_for_qid_path(&self, qid_path: u64) -> Result<u64> {
+        self.qid_index
+            .get(&qid_path)
+            .copied()
+            .ok_or_else(|| Error::from_static(ENOENT))
+    }
+
+    fn replace_qid_path(&mut self, id: u64, qid_path: u64) -> Result<()> {
+        if let Some(owner) = self.qid_index.get(&qid_path) {
+            if *owner != id {
+                return Err(Error::from_static("qid path already in use"));
+            }
+        }
+        let old_qid_path = self.node(id)?.qid_path;
+        if old_qid_path != qid_path {
+            self.qid_index.remove(&old_qid_path);
+            self.qid_index.insert(qid_path, id);
+            if let Some(node) = self.nodes.get_mut(&id) {
+                node.qid_path = qid_path;
+            }
+        }
+        Ok(())
     }
 
     fn stat_for(&self, id: u64) -> Result<Stat> {
@@ -222,10 +325,15 @@ impl State {
             Node {
                 name: name.to_vec(),
                 parent,
+                qid_path: id,
                 version: 0,
+                generation: 0,
+                visibility_class: None,
+                wake_token: None,
                 body: Body::Dir(BTreeMap::new()),
             },
         );
+        self.qid_index.insert(id, id);
         if let Some(Node {
             body: Body::Dir(children),
             ..
@@ -277,10 +385,80 @@ impl State {
                     Node {
                         name: last.clone(),
                         parent,
+                        qid_path: id,
                         version: 0,
+                        generation: 0,
+                        visibility_class: None,
+                        wake_token: None,
                         body,
                     },
                 );
+                self.qid_index.insert(id, id);
+                if let Some(Node {
+                    body: Body::Dir(children),
+                    ..
+                }) = self.nodes.get_mut(&parent)
+                {
+                    children.insert(last.clone(), id);
+                }
+                Ok(id)
+            }
+        }
+    }
+
+    fn place_pushed_file(
+        &mut self,
+        path: &str,
+        bytes: Vec<u8>,
+        metadata: PushedFileMetadata,
+    ) -> Result<u64> {
+        let segments = split_path(path)?;
+        let (last, dirs) = segments
+            .split_last()
+            .ok_or_else(|| Error::from_static(EPERM))?;
+        let mut parent = ROOT_ID;
+        for dir in dirs {
+            parent = self.ensure_dir(parent, dir)?;
+        }
+        let existing = match &self.node(parent)?.body {
+            Body::Dir(children) => children.get(last.as_slice()).copied(),
+            _ => return Err(Error::from_static(ENOTDIR)),
+        };
+        match existing {
+            Some(id) => {
+                if !matches!(self.node(id)?.body, Body::File(_)) {
+                    return Err(Error::from_static(EPERM));
+                }
+                self.replace_qid_path(id, metadata.qid_path)?;
+                if let Some(node) = self.nodes.get_mut(&id) {
+                    node.version = metadata.qid_version;
+                    node.generation = metadata.generation;
+                    node.visibility_class = Some(metadata.visibility_class);
+                    node.wake_token = Some(metadata.wake_token);
+                    node.body = Body::File(bytes);
+                }
+                Ok(id)
+            }
+            None => {
+                if self.qid_index.contains_key(&metadata.qid_path) {
+                    return Err(Error::from_static("qid path already in use"));
+                }
+                let id = self.next_id;
+                self.next_id += 1;
+                self.nodes.insert(
+                    id,
+                    Node {
+                        name: last.clone(),
+                        parent,
+                        qid_path: metadata.qid_path,
+                        version: metadata.qid_version,
+                        generation: metadata.generation,
+                        visibility_class: Some(metadata.visibility_class),
+                        wake_token: Some(metadata.wake_token),
+                        body: Body::File(bytes),
+                    },
+                );
+                self.qid_index.insert(metadata.qid_path, id);
                 if let Some(Node {
                     body: Body::Dir(children),
                     ..
@@ -319,14 +497,41 @@ impl State {
             .retain(|request| request.request_id != request_id);
     }
 
-    fn attach_root_for(&self, uname: &[u8]) -> Result<u64> {
+    fn path_relative_to(&self, id: u64, root: u64) -> Result<String> {
+        let mut current = id;
+        let mut segments = Vec::new();
+        loop {
+            if current == root {
+                break;
+            }
+            if current == ROOT_ID {
+                return Err(Error::from_static(EPERM));
+            }
+            let node = self.node(current)?;
+            segments.push(String::from_utf8_lossy(&node.name).into_owned());
+            current = node.parent;
+        }
+        segments.reverse();
+        if segments.is_empty() {
+            Ok("/".to_string())
+        } else {
+            Ok(format!("/{}", segments.join("/")))
+        }
+    }
+
+    fn attach_root_for(&self, uname: &[u8], aname: &[u8]) -> Result<u64> {
         if !self.principal_roots_required {
             return Ok(ROOT_ID);
         }
-        self.principal_roots
+        let root = self
+            .principal_roots
             .get(uname)
-            .copied()
-            .ok_or_else(|| Error::from_static("principal root unavailable"))
+            .ok_or_else(|| Error::from_static("principal root unavailable"))?;
+        if root.anames.contains(b"*".as_slice()) || root.anames.contains(aname) {
+            Ok(root.root)
+        } else {
+            Err(Error::from_static("principal aname unavailable"))
+        }
     }
 }
 
@@ -355,6 +560,7 @@ fn open_allowed(body: &Body, mode: u8) -> bool {
 #[derive(Clone)]
 pub struct Front {
     shared: Arc<(Mutex<State>, Condvar)>,
+    next_session_id: Arc<AtomicU64>,
 }
 
 impl Default for Front {
@@ -367,6 +573,7 @@ impl Front {
     pub fn new() -> Self {
         Self {
             shared: Arc::new((Mutex::new(State::new()), Condvar::new())),
+            next_session_id: Arc::new(AtomicU64::new(1)),
         }
     }
 
@@ -379,6 +586,18 @@ impl Front {
 
     pub fn set(&self, path: &str, bytes: &[u8]) -> Result<()> {
         self.lock()?.place(path, Body::File(bytes.to_vec()))?;
+        self.shared.1.notify_all();
+        Ok(())
+    }
+
+    pub fn set_pushed_file(
+        &self,
+        path: &str,
+        bytes: &[u8],
+        metadata: PushedFileMetadata,
+    ) -> Result<()> {
+        self.lock()?
+            .place_pushed_file(path, bytes.to_vec(), metadata)?;
         self.shared.1.notify_all();
         Ok(())
     }
@@ -397,6 +616,17 @@ impl Front {
 
     pub fn set_wait_timeout(&self, timeout: Duration) -> Result<()> {
         self.lock()?.wait_timeout = timeout;
+        Ok(())
+    }
+
+    pub fn set_protocol_limits(&self, max_msize: u32, iounit: u32) -> Result<()> {
+        if !(MIN_MSIZE..=MAX_MSIZE).contains(&max_msize) {
+            return Err(Error::from_static("invalid max msize"));
+        }
+        if iounit > max_msize {
+            return Err(Error::from_static("invalid iounit"));
+        }
+        self.lock()?.protocol = ProtocolConfig { max_msize, iounit };
         Ok(())
     }
 
@@ -446,7 +676,19 @@ impl Front {
     }
 
     pub fn set_principal_root(&self, principal: &str, root_path: &str) -> Result<()> {
+        self.set_principal_root_aname(principal, "*", root_path)
+    }
+
+    pub fn set_principal_root_aname(
+        &self,
+        principal: &str,
+        aname: &str,
+        root_path: &str,
+    ) -> Result<()> {
         if principal.is_empty() {
+            return Err(Error::from_static(EPERM));
+        }
+        if aname.is_empty() {
             return Err(Error::from_static(EPERM));
         }
         let mut state = self.lock()?;
@@ -455,9 +697,22 @@ impl Front {
             return Err(Error::from_static(ENOTDIR));
         }
         state.principal_roots_required = true;
-        state
-            .principal_roots
-            .insert(principal.as_bytes().to_vec(), root);
+        match state.principal_roots.get_mut(principal.as_bytes()) {
+            Some(existing) => {
+                if existing.root != root {
+                    return Err(Error::from_static("principal root path mismatch"));
+                }
+                existing.anames.insert(aname.as_bytes().to_vec());
+            }
+            None => {
+                let mut anames = BTreeSet::new();
+                anames.insert(aname.as_bytes().to_vec());
+                state.principal_roots.insert(
+                    principal.as_bytes().to_vec(),
+                    PrincipalRoot { root, anames },
+                );
+            }
+        }
         Ok(())
     }
 
@@ -682,13 +937,19 @@ impl Front {
     pub fn tree(&self) -> FrontTree {
         FrontTree {
             front: self.clone(),
+            session_id: self.next_session_id.fetch_add(1, Ordering::Relaxed),
             fids: BTreeMap::new(),
+            open_modes: BTreeMap::new(),
             rpc_inflight: BTreeMap::new(),
         }
     }
 
     pub(crate) fn wake_readers(&self) {
         self.shared.1.notify_all();
+    }
+
+    pub(crate) fn max_msize(&self) -> Result<u32> {
+        Ok(self.lock()?.protocol.max_msize)
     }
 
     pub(crate) fn read_node(
@@ -728,30 +989,45 @@ pub(crate) enum ReadTarget {
 
 pub struct FrontTree {
     front: Front,
+    session_id: u64,
     fids: BTreeMap<Fid, FidBinding>,
+    open_modes: BTreeMap<Fid, u8>,
     rpc_inflight: BTreeMap<Fid, u64>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct FidBinding {
     node: u64,
     root: u64,
+    session_id: u64,
+    uname: Vec<u8>,
+    aname: Vec<u8>,
 }
 
 impl FileTree for FrontTree {
-    fn attach(&mut self, fid: Fid, uname: &[u8], _aname: &[u8]) -> Result<Qid> {
+    fn attach(&mut self, fid: Fid, uname: &[u8], aname: &[u8]) -> Result<Qid> {
         let state = self.front.lock()?;
-        let root = state.attach_root_for(uname)?;
+        let root = state.attach_root_for(uname, aname)?;
         let qid = state.qid_for(root)?;
-        self.fids.insert(fid, FidBinding { node: root, root });
+        self.fids.insert(
+            fid,
+            FidBinding {
+                node: root,
+                root,
+                session_id: self.session_id,
+                uname: uname.to_vec(),
+                aname: aname.to_vec(),
+            },
+        );
         Ok(qid)
     }
 
     fn walk(&mut self, fid: Fid, newfid: Fid, _start: Qid, names: &[Vec<u8>]) -> Result<Vec<Qid>> {
         let state = self.front.lock()?;
-        let binding = *self
+        let binding = self
             .fids
             .get(&fid)
+            .cloned()
             .ok_or_else(|| Error::from_static(EBADFID))?;
         let mut current = binding.node;
         let mut qids = Vec::with_capacity(names.len());
@@ -781,7 +1057,7 @@ impl FileTree for FrontTree {
                 newfid,
                 FidBinding {
                     node: current,
-                    root: binding.root,
+                    ..binding
                 },
             );
         }
@@ -801,7 +1077,11 @@ impl FileTree for FrontTree {
         if !open_allowed(&state.node(id)?.body, mode) {
             return Err(Error::from_static(EPERM));
         }
-        Ok(OpenFile { qid, iounit: 0 })
+        self.open_modes.insert(fid, mode);
+        Ok(OpenFile {
+            qid,
+            iounit: state.protocol.iounit,
+        })
     }
 
     fn read(&mut self, fid: Fid, _qid: Qid, offset: u64, count: u32) -> Result<ReadData> {
@@ -811,13 +1091,25 @@ impl FileTree for FrontTree {
         }
     }
 
-    fn write(&mut self, fid: Fid, _qid: Qid, _offset: u64, data: &[u8]) -> Result<u32> {
+    fn write(&mut self, fid: Fid, _qid: Qid, offset: u64, data: &[u8]) -> Result<u32> {
         let mut state = self.front.lock()?;
-        let id = self
+        let binding = self
             .fids
             .get(&fid)
-            .ok_or_else(|| Error::from_static(EBADFID))?
-            .node;
+            .cloned()
+            .ok_or_else(|| Error::from_static(EBADFID))?;
+        let id = binding.node;
+        let open_mode = self.open_modes.get(&fid).copied().unwrap_or(0);
+        let target_path = state.path_relative_to(id, binding.root)?;
+        let pushed_generation = state.node(id)?.generation;
+        let request_context = RequestContext::from_parts(
+            &binding,
+            fid,
+            target_path,
+            offset,
+            open_mode,
+            pushed_generation,
+        );
         if let Body::Rpc(prefix) = &state.node(id)?.body {
             let prefix = prefix.clone();
             if let Some(previous) = self.rpc_inflight.remove(&fid) {
@@ -830,6 +1122,7 @@ impl FileTree for FrontTree {
                 request_id,
                 prefix,
                 bytes: data.to_vec(),
+                context: request_context,
             });
             self.rpc_inflight.insert(fid, request_id);
             drop(state);
@@ -845,6 +1138,7 @@ impl FileTree for FrontTree {
                 request_id,
                 prefix,
                 bytes: data.to_vec(),
+                context: request_context,
             });
             drop(state);
             self.front.shared.1.notify_all();
@@ -877,6 +1171,7 @@ impl FileTree for FrontTree {
             request_id,
             prefix,
             bytes: data.to_vec(),
+            context: request_context,
         });
         drop(state);
         self.front.shared.1.notify_all();
@@ -884,11 +1179,14 @@ impl FileTree for FrontTree {
     }
 
     fn stat(&mut self, qid: Qid) -> Result<Stat> {
-        self.front.lock()?.stat_for(qid.path)
+        let state = self.front.lock()?;
+        let id = state.node_id_for_qid_path(qid.path)?;
+        state.stat_for(id)
     }
 
     fn clunk(&mut self, fid: Fid, _qid: Qid) -> Result<()> {
         self.fids.remove(&fid);
+        self.open_modes.remove(&fid);
         if let Some(request_id) = self.rpc_inflight.remove(&fid) {
             if let Ok(mut state) = self.front.lock() {
                 state.rpc_responses.remove(&request_id);
@@ -974,6 +1272,57 @@ mod tests {
         assert_eq!(stat.length, 6);
         let data = tree.read(2, qids[1], 0, 4096)?;
         assert_eq!(data, ReadData::Bytes(b"second".to_vec()));
+        Ok(())
+    }
+
+    #[test]
+    fn pushed_file_uses_brain_owned_qid_and_version() -> Result<()> {
+        let front = Front::new();
+        front.set_pushed_file(
+            "market/status",
+            b"first",
+            PushedFileMetadata {
+                qid_path: 9001,
+                qid_version: 44,
+                generation: 100,
+                visibility_class: "runtime-reader".to_string(),
+                wake_token: "wake:status".to_string(),
+            },
+        )?;
+        front.set_pushed_file(
+            "market/status",
+            b"second",
+            PushedFileMetadata {
+                qid_path: 9001,
+                qid_version: 45,
+                generation: 101,
+                visibility_class: "runtime-reader".to_string(),
+                wake_token: "wake:status".to_string(),
+            },
+        )?;
+        let mut tree = front.tree();
+        tree.attach(1, b"claude", b"/")?;
+        let qids = walk_to(&mut tree, 1, 2, &["market", "status"]);
+        assert_eq!(qids[1].path, 9001);
+        assert_eq!(qids[1].version, 45);
+        let stat = tree.stat(qids[1])?;
+        assert_eq!(stat.qid.path, 9001);
+        assert_eq!(stat.qid.version, 45);
+        let data = tree.read(2, qids[1], 0, 4096)?;
+        assert_eq!(data, ReadData::Bytes(b"second".to_vec()));
+        Ok(())
+    }
+
+    #[test]
+    fn protocol_limits_control_open_iounit() -> Result<()> {
+        let front = Front::new();
+        front.set_protocol_limits(65_536, 4096)?;
+        front.set("market/status", b"x")?;
+        let mut tree = front.tree();
+        tree.attach(1, b"claude", b"/")?;
+        let qids = walk_to(&mut tree, 1, 2, &["market", "status"]);
+        let opened = tree.open(2, qids[1], OREAD)?;
+        assert_eq!(opened.iounit, 4096);
         Ok(())
     }
 
@@ -1252,7 +1601,7 @@ mod tests {
         let front = Front::new();
         front.set("views/alice/status", b"alice-visible")?;
         front.set("views/bob/status", b"bob-visible")?;
-        front.set_principal_root("alice", "views/alice")?;
+        front.set_principal_root_aname("alice", "/", "views/alice")?;
 
         let mut alice = front.tree();
         alice.attach(1, b"alice", b"/")?;
@@ -1269,6 +1618,12 @@ mod tests {
             .attach(1, b"bob", b"/")
             .expect_err("principal without pushed root must fail closed");
         assert_eq!(error.message(), b"principal root unavailable");
+
+        let mut wrong_aname = front.tree();
+        let error = wrong_aname
+            .attach(1, b"alice", b"not-admitted")
+            .expect_err("principal without admitted aname must fail closed");
+        assert_eq!(error.message(), b"principal aname unavailable");
         Ok(())
     }
 

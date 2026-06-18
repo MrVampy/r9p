@@ -3,9 +3,10 @@ use front::abi::{
     r9p_front_complete_write, r9p_front_free, r9p_front_last_error, r9p_front_maintain_r9p_export,
     r9p_front_new, r9p_front_next_request, r9p_front_publish_r9p_export,
     r9p_front_reconcile_r9p_exports, r9p_front_register_intake, r9p_front_register_log,
-    r9p_front_register_rpc, r9p_front_register_write_relay, r9p_front_request_copy,
-    r9p_front_request_prefix_copy, r9p_front_serve_tcp, r9p_front_set,
-    r9p_front_set_principal_root, r9p_front_stop,
+    r9p_front_register_rpc, r9p_front_register_write_relay, r9p_front_request_context_copy,
+    r9p_front_request_copy, r9p_front_request_prefix_copy, r9p_front_serve_tcp, r9p_front_set,
+    r9p_front_set_principal_root, r9p_front_set_principal_root_aname,
+    r9p_front_set_protocol_limits, r9p_front_set_pushed_file, r9p_front_stop,
 };
 use front::Front;
 use r9p::blocking::{Client, OWRITE};
@@ -38,9 +39,20 @@ fn request_prefix(handle: *mut front::abi::FrontAbi, request_id: u64) -> String 
     String::from_utf8(buf).expect("prefix utf8")
 }
 
+fn request_context(handle: *mut front::abi::FrontAbi, request_id: u64) -> String {
+    let len =
+        unsafe { r9p_front_request_context_copy(handle, request_id, std::ptr::null_mut(), 0) };
+    assert!(len >= 0);
+    let mut buf = vec![0u8; len as usize];
+    let copied =
+        unsafe { r9p_front_request_context_copy(handle, request_id, buf.as_mut_ptr(), buf.len()) };
+    assert_eq!(copied, len);
+    String::from_utf8(buf).expect("context utf8")
+}
+
 #[test]
 fn abi_roundtrip_over_tcp() {
-    assert_eq!(r9p_front_abi_version(), 9);
+    assert_eq!(r9p_front_abi_version(), 10);
     let handle = r9p_front_new();
     let (path, path_len) = cstr("market/status");
     let (bytes, bytes_len) = cbytes(b"#M(\"state\" 'open)");
@@ -244,7 +256,7 @@ fn abi_roundtrip_over_tcp() {
 
 #[test]
 fn abi_publish_reports_last_error() {
-    assert_eq!(r9p_front_abi_version(), 9);
+    assert_eq!(r9p_front_abi_version(), 10);
     let handle = r9p_front_new();
     let (vault_bind, vault_bind_len) = cstr("127.0.0.1:1");
     let (vault_uname, vault_uname_len) = cstr("codex");
@@ -307,7 +319,7 @@ fn abi_publish_reports_last_error() {
 
 #[test]
 fn abi_reconcile_without_maintainers_is_ok() {
-    assert_eq!(r9p_front_abi_version(), 9);
+    assert_eq!(r9p_front_abi_version(), 10);
     let handle = r9p_front_new();
     assert_eq!(unsafe { r9p_front_reconcile_r9p_exports(handle) }, 0);
     unsafe { r9p_front_free(handle) };
@@ -315,7 +327,7 @@ fn abi_reconcile_without_maintainers_is_ok() {
 
 #[test]
 fn abi_door_rehearsal_principal_root_and_write_relay() {
-    assert_eq!(r9p_front_abi_version(), 9);
+    assert_eq!(r9p_front_abi_version(), 10);
     let handle = r9p_front_new();
     let (status_path, status_path_len) = cstr("views/alice/status");
     let (status_body, status_body_len) = cbytes(b"#M(\"served_state\" \"fresh\")");
@@ -396,6 +408,131 @@ fn abi_door_rehearsal_principal_root_and_write_relay() {
     alice.open(control_fid, OWRITE).expect("open control");
     let wrote = alice
         .write_once(control_fid, 0, b"#M(\"command\" \"restart\")")
+        .expect("write control");
+    assert_eq!(wrote as usize, b"#M(\"command\" \"restart\")".len());
+    brain.join().expect("brain join");
+
+    assert_eq!(unsafe { r9p_front_stop(handle) }, 0);
+    unsafe { r9p_front_free(handle) };
+}
+
+#[test]
+fn abi_v10_pushed_metadata_aname_gate_and_request_context() {
+    assert_eq!(r9p_front_abi_version(), 10);
+    let handle = r9p_front_new();
+    assert_eq!(
+        unsafe { r9p_front_set_protocol_limits(handle, 65_536, 4096) },
+        0
+    );
+
+    let (status_path, status_path_len) = cstr("views/alice/status");
+    let (status_body, status_body_len) = cbytes(b"#M(\"served_state\" \"fresh\")");
+    let (visibility, visibility_len) = cstr("principal:alice");
+    let (wake, wake_len) = cstr("wake:status");
+    assert_eq!(
+        unsafe {
+            r9p_front_set_pushed_file(
+                handle,
+                status_path,
+                status_path_len,
+                status_body,
+                status_body_len,
+                4242,
+                77,
+                123,
+                visibility,
+                visibility_len,
+                wake,
+                wake_len,
+            )
+        },
+        0
+    );
+    let (principal, principal_len) = cstr("alice");
+    let (aname, aname_len) = cstr("/");
+    let bad_aname = "not-admitted";
+    let (root_path, root_path_len) = cstr("views/alice");
+    assert_eq!(
+        unsafe {
+            r9p_front_set_principal_root_aname(
+                handle,
+                principal,
+                principal_len,
+                aname,
+                aname_len,
+                root_path,
+                root_path_len,
+            )
+        },
+        0
+    );
+    let (control, control_len) = cstr("views/alice/control");
+    assert_eq!(
+        unsafe { r9p_front_register_write_relay(handle, control, control_len) },
+        0
+    );
+    let (bind, bind_len) = cstr("127.0.0.1:0");
+    let mut port = 0u16;
+    assert_eq!(
+        unsafe { r9p_front_serve_tcp(handle, bind, bind_len, &mut port) },
+        0
+    );
+    let address = format!("127.0.0.1:{port}");
+
+    let mut alice = Client::connect_tcp(&address, "alice", "/", 65_536).expect("connect alice");
+    assert_eq!(alice.msize(), 65_536);
+    let status_fid = alice.walk_path("/status").expect("walk status");
+    let qid = alice.open(status_fid, 0).expect("open status");
+    assert_eq!(qid.path, 4242);
+    assert_eq!(qid.version, 77);
+    assert_eq!(
+        alice.read(status_fid, 0, 4096).expect("read status"),
+        b"#M(\"served_state\" \"fresh\")".to_vec()
+    );
+    assert!(Client::connect_tcp(&address, "alice", bad_aname, 65_536).is_err());
+
+    let brain_handle = handle as usize;
+    let brain = thread::spawn(move || {
+        let handle = brain_handle as *mut front::abi::FrontAbi;
+        let mut request_id = 0u64;
+        let mut request_len = 0usize;
+        assert_eq!(
+            unsafe { r9p_front_next_request(handle, 1000, &mut request_id, &mut request_len) },
+            0
+        );
+        assert_eq!(request_prefix(handle, request_id), "views/alice/control");
+        let context = request_context(handle, request_id);
+        assert!(context.contains("\"version\" \"r9p-front-request-context.v1\""));
+        assert!(context.contains("\"uname\" \"alice\""));
+        assert!(context.contains("\"aname\" \"/\""));
+        assert!(context.contains("\"target_path\" \"/control\""));
+        assert!(context.contains("\"offset\" 9"));
+        assert!(context.contains("\"open_mode\" 1"));
+        assert!(context.contains("\"pushed_generation\" 0"));
+        let mut request = vec![0u8; request_len];
+        let copied = unsafe {
+            r9p_front_request_copy(handle, request_id, request.as_mut_ptr(), request.len())
+        };
+        assert_eq!(copied as usize, request_len);
+        assert_eq!(request, b"#M(\"command\" \"restart\")".to_vec());
+        let (prefix_ptr, prefix_len) = cstr("views/alice/control");
+        assert_eq!(
+            unsafe {
+                r9p_front_complete_write(
+                    handle,
+                    prefix_ptr,
+                    prefix_len,
+                    request_id,
+                    u32::try_from(request.len()).expect("request length"),
+                )
+            },
+            0
+        );
+    });
+    let control_fid = alice.walk_path("/control").expect("walk control");
+    alice.open(control_fid, OWRITE).expect("open control");
+    let wrote = alice
+        .write_once(control_fid, 9, b"#M(\"command\" \"restart\")")
         .expect("write control");
     assert_eq!(wrote as usize, b"#M(\"command\" \"restart\")".len());
     brain.join().expect("brain join");
@@ -514,7 +651,7 @@ fn door_rehearsal_relayed_write_reports_unavailable_when_brain_absent() {
 
 #[test]
 fn abi_maintain_reports_initial_publish_error() {
-    assert_eq!(r9p_front_abi_version(), 9);
+    assert_eq!(r9p_front_abi_version(), 10);
     let handle = r9p_front_new();
     let (vault_bind, vault_bind_len) = cstr("127.0.0.1:1");
     let (vault_uname, vault_uname_len) = cstr("codex");

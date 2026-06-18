@@ -81,7 +81,15 @@ fn serve_connection(front: &Front, stream: TcpStream, stop: Arc<AtomicBool>) -> 
         .try_clone()
         .map_err(|error| Error::new(format!("clone 9P stream: {error}")))?;
     let writer = Arc::new(Mutex::new(stream));
-    let server = Arc::new(Mutex::new(Server::with_config((), ServerConfig::default())));
+    let max_msize = front.max_msize()?;
+    let server = Arc::new(Mutex::new(Server::with_config(
+        (),
+        ServerConfig {
+            default_msize: max_msize,
+            max_msize,
+            ..ServerConfig::default()
+        },
+    )));
     let tree = Arc::new(Mutex::new(front.tree()));
     let cancels = Arc::new(Mutex::new(BTreeMap::new()));
     loop {

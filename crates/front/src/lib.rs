@@ -507,6 +507,14 @@ impl State {
             .retain(|request| request.request_id != request_id);
     }
 
+    fn pop_pending_for_prefix(&mut self, prefix: &str) -> Option<IntakeRequest> {
+        let index = self
+            .pending
+            .iter()
+            .position(|request| request.prefix == prefix)?;
+        self.pending.remove(index)
+    }
+
     fn path_relative_to(&self, id: u64, root: u64) -> Result<String> {
         let mut current = id;
         let mut segments = Vec::new();
@@ -554,6 +562,14 @@ fn split_path(path: &str) -> Result<Vec<Vec<u8>>> {
         .split('/')
         .map(|segment| segment.as_bytes().to_vec())
         .collect())
+}
+
+fn normalise_request_prefix(prefix: &str) -> Result<String> {
+    let trimmed = prefix.trim_matches('/');
+    if trimmed.is_empty() {
+        return Err(Error::from_static(EPERM));
+    }
+    Ok(trimmed.to_string())
 }
 
 fn open_allowed(body: &Body, mode: u8) -> bool {
@@ -763,10 +779,50 @@ impl Front {
         }
     }
 
+    pub fn next_request_for_prefix(
+        &self,
+        prefix: &str,
+        timeout: Duration,
+    ) -> Result<Option<IntakeRequest>> {
+        let prefix = normalise_request_prefix(prefix)?;
+        let deadline = Instant::now() + timeout;
+        let mut state = self.lock()?;
+        loop {
+            if let Some(request) = state.pop_pending_for_prefix(&prefix) {
+                return Ok(Some(request));
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Ok(None);
+            }
+            let (next, _timeout_result) = self
+                .shared
+                .1
+                .wait_timeout(state, deadline - now)
+                .map_err(|_| Error::from_static("front state poisoned"))?;
+            state = next;
+        }
+    }
+
     pub fn next_request_blocking(&self) -> Result<IntakeRequest> {
         let mut state = self.lock()?;
         loop {
             if let Some(request) = state.pending.pop_front() {
+                return Ok(request);
+            }
+            state = self
+                .shared
+                .1
+                .wait(state)
+                .map_err(|_| Error::from_static("front state poisoned"))?;
+        }
+    }
+
+    pub fn next_request_for_prefix_blocking(&self, prefix: &str) -> Result<IntakeRequest> {
+        let prefix = normalise_request_prefix(prefix)?;
+        let mut state = self.lock()?;
+        loop {
+            if let Some(request) = state.pop_pending_for_prefix(&prefix) {
                 return Ok(request);
             }
             state = self
@@ -1272,6 +1328,25 @@ mod tests {
     use super::*;
     use std::{sync::mpsc, thread};
 
+    fn test_intake_request(request_id: u64, prefix: &str, bytes: &[u8]) -> IntakeRequest {
+        IntakeRequest {
+            request_id,
+            prefix: prefix.to_string(),
+            bytes: bytes.to_vec(),
+            context: RequestContext {
+                principal_id: "test.principal".to_string(),
+                uname: "test".to_string(),
+                aname: "/".to_string(),
+                session_id: 1,
+                fid: 1,
+                target_path: prefix.to_string(),
+                offset: 0,
+                open_mode: OWRITE,
+                pushed_generation: 0,
+            },
+        }
+    }
+
     fn walk_to(tree: &mut FrontTree, fid: Fid, newfid: Fid, path: &[&str]) -> Vec<Qid> {
         let names: Vec<Vec<u8>> = path.iter().map(|name| name.as_bytes().to_vec()).collect();
         let start = Qid::new(QTDIR, 0, ROOT_ID);
@@ -1515,6 +1590,35 @@ mod tests {
         assert_eq!(request.request_id, 1);
         assert_eq!(request.prefix, "queries");
         assert_eq!(request.bytes, b"blocked wait wakes");
+        Ok(())
+    }
+
+    #[test]
+    fn prefix_wait_leaves_other_pending_requests_in_queue() -> Result<()> {
+        let front = Front::new();
+        {
+            let mut state = front.lock()?;
+            state
+                .pending
+                .push_back(test_intake_request(1, "relay", b"relay"));
+            state
+                .pending
+                .push_back(test_intake_request(2, "control", b"control"));
+        }
+
+        let control = front
+            .next_request_for_prefix("control", Duration::from_millis(0))?
+            .expect("control request should be available");
+        assert_eq!(control.request_id, 2);
+        assert_eq!(control.prefix, "control");
+        assert_eq!(control.bytes, b"control");
+
+        let relay = front
+            .next_request(Duration::from_millis(0))?
+            .expect("relay request must remain queued");
+        assert_eq!(relay.request_id, 1);
+        assert_eq!(relay.prefix, "relay");
+        assert_eq!(relay.bytes, b"relay");
         Ok(())
     }
 

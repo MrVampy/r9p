@@ -9,7 +9,7 @@ use r9p::server::{
     FileTree, Server, ServerCompletion, ServerConfig, ServerEvent, ServerRequest, ServerRequestKind,
 };
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -45,7 +45,26 @@ impl ServeHandle {
     }
 }
 
+pub trait FrontServeStream: Read + Write + Send + 'static {
+    fn try_clone_stream(&self) -> io::Result<Self>
+    where
+        Self: Sized;
+}
+
+impl FrontServeStream for TcpStream {
+    fn try_clone_stream(&self) -> io::Result<Self> {
+        self.try_clone()
+    }
+}
+
 impl Front {
+    pub fn serve_stream<S>(&self, stream: S) -> Result<()>
+    where
+        S: FrontServeStream,
+    {
+        serve_connection(self, stream, Arc::new(AtomicBool::new(false)))
+    }
+
     pub fn serve_tcp(&self, bind: &str) -> Result<ServeHandle> {
         let listener = TcpListener::bind(bind)
             .map_err(|error| Error::new(format!("front bind {bind}: {error}")))?;
@@ -76,9 +95,12 @@ impl Front {
     }
 }
 
-fn serve_connection(front: &Front, stream: TcpStream, stop: Arc<AtomicBool>) -> Result<()> {
+fn serve_connection<S>(front: &Front, stream: S, stop: Arc<AtomicBool>) -> Result<()>
+where
+    S: FrontServeStream,
+{
     let mut reader = stream
-        .try_clone()
+        .try_clone_stream()
         .map_err(|error| Error::new(format!("clone 9P stream: {error}")))?;
     let writer = Arc::new(Mutex::new(stream));
     let max_msize = front.max_msize()?;
@@ -361,11 +383,14 @@ fn perform_request(
     }
 }
 
-fn write_reply(
+fn write_reply<S>(
     server: &Arc<Mutex<Server<()>>>,
-    writer: &Arc<Mutex<TcpStream>>,
+    writer: &Arc<Mutex<S>>,
     reply: &RMessage,
-) -> Result<()> {
+) -> Result<()>
+where
+    S: FrontServeStream,
+{
     let msize = server
         .lock()
         .map_err(|_| Error::from_static("front server session poisoned"))?

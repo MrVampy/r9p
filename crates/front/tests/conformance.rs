@@ -6,7 +6,8 @@ use front::abi::{
     r9p_front_register_rpc, r9p_front_register_write_relay, r9p_front_request_context_copy,
     r9p_front_request_copy, r9p_front_request_prefix_copy, r9p_front_serve_tcp, r9p_front_set,
     r9p_front_set_principal_class_aname, r9p_front_set_principal_root,
-    r9p_front_set_protocol_limits, r9p_front_set_pushed_file, r9p_front_stop,
+    r9p_front_set_protocol_limits, r9p_front_set_pushed_directory, r9p_front_set_pushed_file,
+    r9p_front_stop,
 };
 use front::Front;
 use r9p::blocking::{Client, OWRITE};
@@ -52,7 +53,7 @@ fn request_context(handle: *mut front::abi::FrontAbi, request_id: u64) -> String
 
 #[test]
 fn abi_roundtrip_over_tcp() {
-    assert_eq!(r9p_front_abi_version(), 10);
+    assert_eq!(r9p_front_abi_version(), 11);
     let handle = r9p_front_new();
     let (path, path_len) = cstr("market/status");
     let (bytes, bytes_len) = cbytes(b"#M(\"state\" 'open)");
@@ -256,7 +257,7 @@ fn abi_roundtrip_over_tcp() {
 
 #[test]
 fn abi_publish_reports_last_error() {
-    assert_eq!(r9p_front_abi_version(), 10);
+    assert_eq!(r9p_front_abi_version(), 11);
     let handle = r9p_front_new();
     let (vault_bind, vault_bind_len) = cstr("127.0.0.1:1");
     let (vault_uname, vault_uname_len) = cstr("codex");
@@ -319,7 +320,7 @@ fn abi_publish_reports_last_error() {
 
 #[test]
 fn abi_reconcile_without_maintainers_is_ok() {
-    assert_eq!(r9p_front_abi_version(), 10);
+    assert_eq!(r9p_front_abi_version(), 11);
     let handle = r9p_front_new();
     assert_eq!(unsafe { r9p_front_reconcile_r9p_exports(handle) }, 0);
     unsafe { r9p_front_free(handle) };
@@ -327,7 +328,7 @@ fn abi_reconcile_without_maintainers_is_ok() {
 
 #[test]
 fn abi_door_rehearsal_principal_root_and_write_relay() {
-    assert_eq!(r9p_front_abi_version(), 10);
+    assert_eq!(r9p_front_abi_version(), 11);
     let handle = r9p_front_new();
     let (status_path, status_path_len) = cstr("views/alice/status");
     let (status_body, status_body_len) = cbytes(b"#M(\"served_state\" \"fresh\")");
@@ -417,8 +418,8 @@ fn abi_door_rehearsal_principal_root_and_write_relay() {
 }
 
 #[test]
-fn abi_v10_pushed_metadata_aname_gate_and_request_context() {
-    assert_eq!(r9p_front_abi_version(), 10);
+fn abi_v11_pushed_metadata_aname_gate_and_request_context() {
+    assert_eq!(r9p_front_abi_version(), 11);
     let handle = r9p_front_new();
     assert_eq!(
         unsafe { r9p_front_set_protocol_limits(handle, 65_536, 4096) },
@@ -430,6 +431,26 @@ fn abi_v10_pushed_metadata_aname_gate_and_request_context() {
     let (visibility, visibility_len) = cstr("principal:alice");
     let (freshness, freshness_len) = cstr("freshness:status");
     let (wake, wake_len) = cstr("wake:status");
+    let (root_path, root_path_len) = cstr("views/alice");
+    assert_eq!(
+        unsafe {
+            r9p_front_set_pushed_directory(
+                handle,
+                root_path,
+                root_path_len,
+                4141,
+                76,
+                122,
+                visibility,
+                visibility_len,
+                freshness,
+                freshness_len,
+                wake,
+                wake_len,
+            )
+        },
+        0
+    );
     assert_eq!(
         unsafe {
             r9p_front_set_pushed_file(
@@ -455,7 +476,6 @@ fn abi_v10_pushed_metadata_aname_gate_and_request_context() {
     let (principal_id, principal_id_len) = cstr("human.alice");
     let (aname, aname_len) = cstr("/");
     let bad_aname = "not-admitted";
-    let (root_path, root_path_len) = cstr("views/alice");
     assert_eq!(
         unsafe {
             r9p_front_set_principal_class_aname(
@@ -487,6 +507,8 @@ fn abi_v10_pushed_metadata_aname_gate_and_request_context() {
 
     let mut alice = Client::connect_tcp(&address, "alice", "/", 65_536).expect("connect alice");
     assert_eq!(alice.msize(), 65_536);
+    assert_eq!(alice.root_qid().path, 4141);
+    assert_eq!(alice.root_qid().version, 76);
     let status_fid = alice.walk_path("/status").expect("walk status");
     let qid = alice.open(status_fid, 0).expect("open status");
     assert_eq!(qid.path, 4242);
@@ -658,7 +680,7 @@ fn door_rehearsal_relayed_write_reports_unavailable_when_brain_absent() {
 
 #[test]
 fn abi_maintain_reports_initial_publish_error() {
-    assert_eq!(r9p_front_abi_version(), 10);
+    assert_eq!(r9p_front_abi_version(), 11);
     let handle = r9p_front_new();
     let (vault_bind, vault_bind_len) = cstr("127.0.0.1:1");
     let (vault_uname, vault_uname_len) = cstr("codex");

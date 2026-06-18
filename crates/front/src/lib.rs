@@ -141,7 +141,7 @@ impl RequestContext {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PushedFileMetadata {
+pub struct PushedEntryMetadata {
     pub qid_path: u64,
     pub qid_version: u32,
     pub generation: u64,
@@ -149,6 +149,10 @@ pub struct PushedFileMetadata {
     pub freshness_ref: String,
     pub wake_token: String,
 }
+
+pub type PushedFileMetadata = PushedEntryMetadata;
+
+pub type PushedDirectoryMetadata = PushedEntryMetadata;
 
 enum WriteRelayReply {
     Accepted(u32),
@@ -279,6 +283,18 @@ impl State {
             if let Some(node) = self.nodes.get_mut(&id) {
                 node.qid_path = qid_path;
             }
+        }
+        Ok(())
+    }
+
+    fn apply_pushed_metadata(&mut self, id: u64, metadata: &PushedEntryMetadata) -> Result<()> {
+        self.replace_qid_path(id, metadata.qid_path)?;
+        if let Some(node) = self.nodes.get_mut(&id) {
+            node.version = metadata.qid_version;
+            node.generation = metadata.generation;
+            node.visibility_class = Some(metadata.visibility_class.clone());
+            node.freshness_ref = Some(metadata.freshness_ref.clone());
+            node.wake_token = Some(metadata.wake_token.clone());
         }
         Ok(())
     }
@@ -437,13 +453,8 @@ impl State {
                 if !matches!(self.node(id)?.body, Body::File(_)) {
                     return Err(Error::from_static(EPERM));
                 }
-                self.replace_qid_path(id, metadata.qid_path)?;
+                self.apply_pushed_metadata(id, &metadata)?;
                 if let Some(node) = self.nodes.get_mut(&id) {
-                    node.version = metadata.qid_version;
-                    node.generation = metadata.generation;
-                    node.visibility_class = Some(metadata.visibility_class);
-                    node.freshness_ref = Some(metadata.freshness_ref);
-                    node.wake_token = Some(metadata.wake_token);
                     node.body = Body::File(bytes);
                 }
                 Ok(id)
@@ -466,6 +477,64 @@ impl State {
                         freshness_ref: Some(metadata.freshness_ref),
                         wake_token: Some(metadata.wake_token),
                         body: Body::File(bytes),
+                    },
+                );
+                self.qid_index.insert(metadata.qid_path, id);
+                if let Some(Node {
+                    body: Body::Dir(children),
+                    ..
+                }) = self.nodes.get_mut(&parent)
+                {
+                    children.insert(last.clone(), id);
+                }
+                Ok(id)
+            }
+        }
+    }
+
+    fn place_pushed_directory(
+        &mut self,
+        path: &str,
+        metadata: PushedDirectoryMetadata,
+    ) -> Result<u64> {
+        let segments = split_path(path)?;
+        let (last, dirs) = segments
+            .split_last()
+            .ok_or_else(|| Error::from_static(EPERM))?;
+        let mut parent = ROOT_ID;
+        for dir in dirs {
+            parent = self.ensure_dir(parent, dir)?;
+        }
+        let existing = match &self.node(parent)?.body {
+            Body::Dir(children) => children.get(last.as_slice()).copied(),
+            _ => return Err(Error::from_static(ENOTDIR)),
+        };
+        match existing {
+            Some(id) => {
+                if !matches!(self.node(id)?.body, Body::Dir(_)) {
+                    return Err(Error::from_static(EPERM));
+                }
+                self.apply_pushed_metadata(id, &metadata)?;
+                Ok(id)
+            }
+            None => {
+                if self.qid_index.contains_key(&metadata.qid_path) {
+                    return Err(Error::from_static("qid path already in use"));
+                }
+                let id = self.next_id;
+                self.next_id += 1;
+                self.nodes.insert(
+                    id,
+                    Node {
+                        name: last.clone(),
+                        parent,
+                        qid_path: metadata.qid_path,
+                        version: metadata.qid_version,
+                        generation: metadata.generation,
+                        visibility_class: Some(metadata.visibility_class),
+                        freshness_ref: Some(metadata.freshness_ref),
+                        wake_token: Some(metadata.wake_token),
+                        body: Body::Dir(BTreeMap::new()),
                     },
                 );
                 self.qid_index.insert(metadata.qid_path, id);
@@ -624,6 +693,16 @@ impl Front {
     ) -> Result<()> {
         self.lock()?
             .place_pushed_file(path, bytes.to_vec(), metadata)?;
+        self.shared.1.notify_all();
+        Ok(())
+    }
+
+    pub fn set_pushed_directory(
+        &self,
+        path: &str,
+        metadata: PushedDirectoryMetadata,
+    ) -> Result<()> {
+        self.lock()?.place_pushed_directory(path, metadata)?;
         self.shared.1.notify_all();
         Ok(())
     }
@@ -1447,6 +1526,70 @@ mod tests {
         assert_eq!(stat.qid.version, 45);
         let data = tree.read(2, qids[1], 0, 4096)?;
         assert_eq!(data, ReadData::Bytes(b"second".to_vec()));
+        Ok(())
+    }
+
+    #[test]
+    fn pushed_directory_uses_brain_owned_qid_and_version() -> Result<()> {
+        let front = Front::new();
+        front.set_pushed_directory(
+            "views/runtime",
+            PushedDirectoryMetadata {
+                qid_path: 8001,
+                qid_version: 7,
+                generation: 70,
+                visibility_class: "runtime-reader".to_string(),
+                freshness_ref: "freshness:runtime".to_string(),
+                wake_token: "wake:runtime".to_string(),
+            },
+        )?;
+        front.set_pushed_file(
+            "views/runtime/status",
+            b"ok",
+            PushedFileMetadata {
+                qid_path: 9001,
+                qid_version: 8,
+                generation: 71,
+                visibility_class: "runtime-reader".to_string(),
+                freshness_ref: "freshness:runtime/status".to_string(),
+                wake_token: "wake:runtime/status".to_string(),
+            },
+        )?;
+        front.set_principal_class_aname(
+            "alice",
+            "principal.alice",
+            "door-token",
+            "views/runtime",
+        )?;
+
+        let mut tree = front.tree();
+        let root_qid = tree.attach(1, b"alice", b"door-token")?;
+        assert_eq!(root_qid.qtype, QTDIR);
+        assert_eq!(root_qid.path, 8001);
+        assert_eq!(root_qid.version, 7);
+        let root_stat = tree.stat(root_qid)?;
+        assert_eq!(root_stat.qid.path, 8001);
+        assert_eq!(root_stat.qid.version, 7);
+
+        let qids = walk_to(&mut tree, 1, 2, &["status"]);
+        assert_eq!(qids[0].path, 9001);
+        assert_eq!(qids[0].version, 8);
+
+        front.set_pushed_directory(
+            "views/runtime",
+            PushedDirectoryMetadata {
+                qid_path: 8001,
+                qid_version: 9,
+                generation: 72,
+                visibility_class: "runtime-reader".to_string(),
+                freshness_ref: "freshness:runtime".to_string(),
+                wake_token: "wake:runtime".to_string(),
+            },
+        )?;
+        let mut updated = front.tree();
+        let updated_root = updated.attach(1, b"alice", b"door-token")?;
+        assert_eq!(updated_root.path, 8001);
+        assert_eq!(updated_root.version, 9);
         Ok(())
     }
 

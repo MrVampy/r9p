@@ -2,11 +2,11 @@
 #define R9P_FRONT_H
 
 /*
- * r9p front C ABI, version 10.
+ * r9p front C ABI, version 11.
  *
  * Contract rules:
- * - r9p_front_abi_version() must return 10 before v10-only calls are made.
- *   Hosts that only use the v9 call set may accept either 9 or 10.
+ * - r9p_front_abi_version() must return 11 before v11-only calls are made.
+ *   Hosts that only use the v9/v10 call set may accept their known versions.
  * - r9p_front_new() returns an owned handle; every handle must be released
  *   exactly once with r9p_front_free(). Calls other than r9p_front_free()
  *   are thread-safe: they may be called from any thread concurrently.
@@ -35,10 +35,14 @@
  *   request_prefix_copy and request_context_copy with cap=0 return the
  *   required length without copying. request_copy consumes the staged request
  *   bytes, so copy prefix and context first.
- * - r9p_front_set_pushed_file is the v10 public-door push path. It installs
- *   file bytes with brain-owned qid path, qid version, generation,
+ * - r9p_front_set_pushed_file is the v10 public-door file push path. It
+ *   installs file bytes with brain-owned qid path, qid version, generation,
  *   visibility class, freshness reference, and wake token. The front must
  *   serve those qid fields exactly; it does not increment them locally.
+ * - r9p_front_set_pushed_directory is the v11 public-door directory push
+ *   path. It installs a visible directory with the same brain-owned metadata
+ *   contract as pushed files. Use it for admitted roots and visible
+ *   intermediate directories; the front must not invent public qid identity.
  * - Three host-side request shapes, all drained by the same
  *   next_request/request_copy loop:
  *   - register_intake(prefix): a request LIFECYCLE. A client write to
@@ -116,6 +120,11 @@ int32_t r9p_front_set_pushed_file(
     r9p_front *front, const char *path, size_t path_len, const uint8_t *bytes,
     size_t bytes_len, uint64_t qid_path, uint32_t qid_version,
     uint64_t generation, const char *visibility_class,
+    size_t visibility_class_len, const char *freshness_ref,
+    size_t freshness_ref_len, const char *wake_token, size_t wake_token_len);
+int32_t r9p_front_set_pushed_directory(
+    r9p_front *front, const char *path, size_t path_len, uint64_t qid_path,
+    uint32_t qid_version, uint64_t generation, const char *visibility_class,
     size_t visibility_class_len, const char *freshness_ref,
     size_t freshness_ref_len, const char *wake_token, size_t wake_token_len);
 int32_t r9p_front_append_event(r9p_front *front, const char *path,

@@ -1,7 +1,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 use crate::serve::ServeHandle;
-use crate::{Front, PushedFileMetadata, RequestContext};
+use crate::{Front, PushedDirectoryMetadata, PushedFileMetadata, RequestContext};
 use r9p::export_descriptor::{
     AuthBoundary, ExportDescriptor, ExportMode, Protocol, TransportClass,
 };
@@ -14,7 +14,7 @@ use std::ffi::c_char;
 use std::sync::Mutex;
 use std::time::Duration;
 
-pub const ABI_VERSION: u32 = 10;
+pub const ABI_VERSION: u32 = 11;
 
 const OK: i32 = 0;
 const TIMEOUT: i32 = 1;
@@ -199,6 +199,51 @@ pub unsafe extern "C" fn r9p_front_set_pushed_file(
         path,
         bytes,
         PushedFileMetadata {
+            qid_path,
+            qid_version,
+            generation,
+            visibility_class: visibility_class.to_string(),
+            freshness_ref: freshness_ref.to_string(),
+            wake_token: wake_token.to_string(),
+        },
+    ) {
+        Ok(()) => {
+            clear_last_error(abi);
+            OK
+        }
+        Err(error) => set_last_error(abi, error),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn r9p_front_set_pushed_directory(
+    handle: *mut FrontAbi,
+    path: *const c_char,
+    path_len: usize,
+    qid_path: u64,
+    qid_version: u32,
+    generation: u64,
+    visibility_class: *const c_char,
+    visibility_class_len: usize,
+    freshness_ref: *const c_char,
+    freshness_ref_len: usize,
+    wake_token: *const c_char,
+    wake_token_len: usize,
+) -> i32 {
+    let Some(abi) = (unsafe { handle.as_ref() }) else {
+        return INVALID;
+    };
+    let (Some(path), Some(visibility_class), Some(freshness_ref), Some(wake_token)) = (
+        unsafe { str_arg(path, path_len) },
+        unsafe { str_arg(visibility_class, visibility_class_len) },
+        unsafe { str_arg(freshness_ref, freshness_ref_len) },
+        unsafe { str_arg(wake_token, wake_token_len) },
+    ) else {
+        return INVALID;
+    };
+    match abi.front.set_pushed_directory(
+        path,
+        PushedDirectoryMetadata {
             qid_path,
             qid_version,
             generation,

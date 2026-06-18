@@ -106,6 +106,7 @@ pub struct IntakeRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RequestContext {
+    pub principal_id: String,
     pub uname: String,
     pub aname: String,
     pub session_id: u64,
@@ -126,6 +127,7 @@ impl RequestContext {
         pushed_generation: u64,
     ) -> Self {
         Self {
+            principal_id: binding.principal_id.clone(),
             uname: String::from_utf8_lossy(&binding.uname).into_owned(),
             aname: String::from_utf8_lossy(&binding.aname).into_owned(),
             session_id: binding.session_id,
@@ -144,6 +146,7 @@ pub struct PushedFileMetadata {
     pub qid_version: u32,
     pub generation: u64,
     pub visibility_class: String,
+    pub freshness_ref: String,
     pub wake_token: String,
 }
 
@@ -159,6 +162,7 @@ struct Node {
     version: u32,
     generation: u64,
     visibility_class: Option<String>,
+    freshness_ref: Option<String>,
     wake_token: Option<String>,
     body: Body,
 }
@@ -185,6 +189,7 @@ struct Intake {
 
 struct PrincipalRoot {
     root: u64,
+    principal_id: String,
     anames: BTreeSet<Vec<u8>>,
 }
 
@@ -217,6 +222,7 @@ impl State {
                 version: 0,
                 generation: 0,
                 visibility_class: None,
+                freshness_ref: None,
                 wake_token: None,
                 body: Body::Dir(BTreeMap::new()),
             },
@@ -329,6 +335,7 @@ impl State {
                 version: 0,
                 generation: 0,
                 visibility_class: None,
+                freshness_ref: None,
                 wake_token: None,
                 body: Body::Dir(BTreeMap::new()),
             },
@@ -389,6 +396,7 @@ impl State {
                         version: 0,
                         generation: 0,
                         visibility_class: None,
+                        freshness_ref: None,
                         wake_token: None,
                         body,
                     },
@@ -434,6 +442,7 @@ impl State {
                     node.version = metadata.qid_version;
                     node.generation = metadata.generation;
                     node.visibility_class = Some(metadata.visibility_class);
+                    node.freshness_ref = Some(metadata.freshness_ref);
                     node.wake_token = Some(metadata.wake_token);
                     node.body = Body::File(bytes);
                 }
@@ -454,6 +463,7 @@ impl State {
                         version: metadata.qid_version,
                         generation: metadata.generation,
                         visibility_class: Some(metadata.visibility_class),
+                        freshness_ref: Some(metadata.freshness_ref),
                         wake_token: Some(metadata.wake_token),
                         body: Body::File(bytes),
                     },
@@ -676,7 +686,7 @@ impl Front {
     }
 
     pub fn set_principal_root(&self, principal: &str, root_path: &str) -> Result<()> {
-        self.set_principal_root_aname(principal, "*", root_path)
+        self.set_principal_class_aname(principal, principal, "*", root_path)
     }
 
     pub fn set_principal_root_aname(
@@ -685,7 +695,17 @@ impl Front {
         aname: &str,
         root_path: &str,
     ) -> Result<()> {
-        if principal.is_empty() {
+        self.set_principal_class_aname(principal, principal, aname, root_path)
+    }
+
+    pub fn set_principal_class_aname(
+        &self,
+        uname: &str,
+        principal_id: &str,
+        aname: &str,
+        root_path: &str,
+    ) -> Result<()> {
+        if uname.is_empty() || principal_id.is_empty() {
             return Err(Error::from_static(EPERM));
         }
         if aname.is_empty() {
@@ -697,10 +717,13 @@ impl Front {
             return Err(Error::from_static(ENOTDIR));
         }
         state.principal_roots_required = true;
-        match state.principal_roots.get_mut(principal.as_bytes()) {
+        match state.principal_roots.get_mut(uname.as_bytes()) {
             Some(existing) => {
                 if existing.root != root {
                     return Err(Error::from_static("principal root path mismatch"));
+                }
+                if existing.principal_id != principal_id {
+                    return Err(Error::from_static("principal id mismatch"));
                 }
                 existing.anames.insert(aname.as_bytes().to_vec());
             }
@@ -708,8 +731,12 @@ impl Front {
                 let mut anames = BTreeSet::new();
                 anames.insert(aname.as_bytes().to_vec());
                 state.principal_roots.insert(
-                    principal.as_bytes().to_vec(),
-                    PrincipalRoot { root, anames },
+                    uname.as_bytes().to_vec(),
+                    PrincipalRoot {
+                        root,
+                        principal_id: principal_id.to_string(),
+                        anames,
+                    },
                 );
             }
         }
@@ -1002,12 +1029,18 @@ struct FidBinding {
     session_id: u64,
     uname: Vec<u8>,
     aname: Vec<u8>,
+    principal_id: String,
 }
 
 impl FileTree for FrontTree {
     fn attach(&mut self, fid: Fid, uname: &[u8], aname: &[u8]) -> Result<Qid> {
         let state = self.front.lock()?;
         let root = state.attach_root_for(uname, aname)?;
+        let principal_id = state
+            .principal_roots
+            .get(uname)
+            .map(|root| root.principal_id.clone())
+            .unwrap_or_else(|| String::from_utf8_lossy(uname).into_owned());
         let qid = state.qid_for(root)?;
         self.fids.insert(
             fid,
@@ -1017,6 +1050,7 @@ impl FileTree for FrontTree {
                 session_id: self.session_id,
                 uname: uname.to_vec(),
                 aname: aname.to_vec(),
+                principal_id,
             },
         );
         Ok(qid)
@@ -1286,6 +1320,7 @@ mod tests {
                 qid_version: 44,
                 generation: 100,
                 visibility_class: "runtime-reader".to_string(),
+                freshness_ref: "freshness:status".to_string(),
                 wake_token: "wake:status".to_string(),
             },
         )?;
@@ -1297,6 +1332,7 @@ mod tests {
                 qid_version: 45,
                 generation: 101,
                 visibility_class: "runtime-reader".to_string(),
+                freshness_ref: "freshness:status".to_string(),
                 wake_token: "wake:status".to_string(),
             },
         )?;

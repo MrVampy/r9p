@@ -75,7 +75,8 @@ fn clear_last_error(abi: &FrontAbi) {
 
 fn request_context_lfe(context: &RequestContext) -> Vec<u8> {
     format!(
-        "#M(\"version\" \"r9p-front-request-context.v1\" \"uname\" \"{}\" \"aname\" \"{}\" \"session_id\" {} \"fid\" {} \"target_path\" \"{}\" \"offset\" {} \"open_mode\" {} \"pushed_generation\" {})",
+        "#M(\"version\" \"r9p-front-request-context.v1\" \"principal_id\" \"{}\" \"uname\" \"{}\" \"aname\" \"{}\" \"session_id\" {} \"fid\" {} \"target_path\" \"{}\" \"offset\" {} \"open_mode\" {} \"pushed_generation\" {})",
+        escape_lfe_string(&context.principal_id),
         escape_lfe_string(&context.uname),
         escape_lfe_string(&context.aname),
         context.session_id,
@@ -177,16 +178,19 @@ pub unsafe extern "C" fn r9p_front_set_pushed_file(
     generation: u64,
     visibility_class: *const c_char,
     visibility_class_len: usize,
+    freshness_ref: *const c_char,
+    freshness_ref_len: usize,
     wake_token: *const c_char,
     wake_token_len: usize,
 ) -> i32 {
     let Some(abi) = (unsafe { handle.as_ref() }) else {
         return INVALID;
     };
-    let (Some(path), Some(bytes), Some(visibility_class), Some(wake_token)) = (
+    let (Some(path), Some(bytes), Some(visibility_class), Some(freshness_ref), Some(wake_token)) = (
         unsafe { str_arg(path, path_len) },
         unsafe { bytes_arg(bytes, bytes_len) },
         unsafe { str_arg(visibility_class, visibility_class_len) },
+        unsafe { str_arg(freshness_ref, freshness_ref_len) },
         unsafe { str_arg(wake_token, wake_token_len) },
     ) else {
         return INVALID;
@@ -199,6 +203,7 @@ pub unsafe extern "C" fn r9p_front_set_pushed_file(
             qid_version,
             generation,
             visibility_class: visibility_class.to_string(),
+            freshness_ref: freshness_ref.to_string(),
             wake_token: wake_token.to_string(),
         },
     ) {
@@ -369,6 +374,41 @@ pub unsafe extern "C" fn r9p_front_set_principal_root_aname(
     match abi
         .front
         .set_principal_root_aname(principal, aname, root_path)
+    {
+        Ok(()) => {
+            clear_last_error(abi);
+            OK
+        }
+        Err(error) => set_last_error(abi, error),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn r9p_front_set_principal_class_aname(
+    handle: *mut FrontAbi,
+    uname: *const c_char,
+    uname_len: usize,
+    principal_id: *const c_char,
+    principal_id_len: usize,
+    aname: *const c_char,
+    aname_len: usize,
+    root_path: *const c_char,
+    root_path_len: usize,
+) -> i32 {
+    let Some(abi) = (unsafe { handle.as_ref() }) else {
+        return INVALID;
+    };
+    let (Some(uname), Some(principal_id), Some(aname), Some(root_path)) = (
+        unsafe { str_arg(uname, uname_len) },
+        unsafe { str_arg(principal_id, principal_id_len) },
+        unsafe { str_arg(aname, aname_len) },
+        unsafe { str_arg(root_path, root_path_len) },
+    ) else {
+        return INVALID;
+    };
+    match abi
+        .front
+        .set_principal_class_aname(uname, principal_id, aname, root_path)
     {
         Ok(()) => {
             clear_last_error(abi);

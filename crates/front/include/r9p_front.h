@@ -37,8 +37,8 @@
  *   bytes, so copy prefix and context first.
  * - r9p_front_set_pushed_file is the v10 public-door push path. It installs
  *   file bytes with brain-owned qid path, qid version, generation,
- *   visibility class, and wake token. The front must serve those qid fields
- *   exactly; it does not increment them locally.
+ *   visibility class, freshness reference, and wake token. The front must
+ *   serve those qid fields exactly; it does not increment them locally.
  * - Three host-side request shapes, all drained by the same
  *   next_request/request_copy loop:
  *   - register_intake(prefix): a request LIFECYCLE. A client write to
@@ -60,11 +60,12 @@
  *     surfaces where enqueueing is not admission.
  * - set_principal_root(principal, root_path) pushes a v9-style wildcard attach
  *   root for a principal. set_principal_root_aname(principal, aname,
- *   root_path) is the v10 admission form: each call admits one aname for the
- *   principal's pushed root. Installing any root switches attach handling to
- *   explicit pushed roots: principals without a row, or with a non-admitted
- *   aname, fail closed at attach. The front does no policy evaluation and
- *   does not derive principal classes.
+ *   root_path) admits one aname while using the same value for uname and
+ *   principal id. set_principal_class_aname(uname, principal_id, aname,
+ *   root_path) is the v10 public-door admission form. Installing any root
+ *   switches attach handling to explicit pushed roots: principals without a
+ *   row, or with a non-admitted aname, fail closed at attach. The front does
+ *   no policy evaluation and does not derive principal classes.
  * - r9p_front_set_protocol_limits sets the advertised max msize and open
  *   iounit for newly accepted connections. The front validates the msize
  *   against the r9p codec bounds and serves the supplied iounit on open.
@@ -115,8 +116,8 @@ int32_t r9p_front_set_pushed_file(
     r9p_front *front, const char *path, size_t path_len, const uint8_t *bytes,
     size_t bytes_len, uint64_t qid_path, uint32_t qid_version,
     uint64_t generation, const char *visibility_class,
-    size_t visibility_class_len, const char *wake_token,
-    size_t wake_token_len);
+    size_t visibility_class_len, const char *freshness_ref,
+    size_t freshness_ref_len, const char *wake_token, size_t wake_token_len);
 int32_t r9p_front_append_event(r9p_front *front, const char *path,
                                size_t path_len, const uint8_t *bytes,
                                size_t bytes_len);
@@ -140,6 +141,10 @@ int32_t r9p_front_set_principal_root_aname(r9p_front *front,
                                            size_t aname_len,
                                            const char *root_path,
                                            size_t root_path_len);
+int32_t r9p_front_set_principal_class_aname(
+    r9p_front *front, const char *uname, size_t uname_len,
+    const char *principal_id, size_t principal_id_len, const char *aname,
+    size_t aname_len, const char *root_path, size_t root_path_len);
 int32_t r9p_front_set_protocol_limits(r9p_front *front, uint32_t max_msize,
                                       uint32_t iounit);
 int32_t r9p_front_serve_tcp(r9p_front *front, const char *bind,

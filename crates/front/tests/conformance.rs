@@ -5,7 +5,7 @@ use front::abi::{
     r9p_front_reconcile_r9p_exports, r9p_front_register_intake, r9p_front_register_log,
     r9p_front_register_rpc, r9p_front_register_write_relay, r9p_front_request_context_copy,
     r9p_front_request_copy, r9p_front_request_prefix_copy, r9p_front_serve_tcp, r9p_front_set,
-    r9p_front_set_principal_root, r9p_front_set_principal_root_aname,
+    r9p_front_set_principal_class_aname, r9p_front_set_principal_root,
     r9p_front_set_protocol_limits, r9p_front_set_pushed_file, r9p_front_stop,
 };
 use front::Front;
@@ -428,6 +428,7 @@ fn abi_v10_pushed_metadata_aname_gate_and_request_context() {
     let (status_path, status_path_len) = cstr("views/alice/status");
     let (status_body, status_body_len) = cbytes(b"#M(\"served_state\" \"fresh\")");
     let (visibility, visibility_len) = cstr("principal:alice");
+    let (freshness, freshness_len) = cstr("freshness:status");
     let (wake, wake_len) = cstr("wake:status");
     assert_eq!(
         unsafe {
@@ -442,6 +443,8 @@ fn abi_v10_pushed_metadata_aname_gate_and_request_context() {
                 123,
                 visibility,
                 visibility_len,
+                freshness,
+                freshness_len,
                 wake,
                 wake_len,
             )
@@ -449,15 +452,18 @@ fn abi_v10_pushed_metadata_aname_gate_and_request_context() {
         0
     );
     let (principal, principal_len) = cstr("alice");
+    let (principal_id, principal_id_len) = cstr("human.alice");
     let (aname, aname_len) = cstr("/");
     let bad_aname = "not-admitted";
     let (root_path, root_path_len) = cstr("views/alice");
     assert_eq!(
         unsafe {
-            r9p_front_set_principal_root_aname(
+            r9p_front_set_principal_class_aname(
                 handle,
                 principal,
                 principal_len,
+                principal_id,
+                principal_id_len,
                 aname,
                 aname_len,
                 root_path,
@@ -503,6 +509,7 @@ fn abi_v10_pushed_metadata_aname_gate_and_request_context() {
         assert_eq!(request_prefix(handle, request_id), "views/alice/control");
         let context = request_context(handle, request_id);
         assert!(context.contains("\"version\" \"r9p-front-request-context.v1\""));
+        assert!(context.contains("\"principal_id\" \"human.alice\""));
         assert!(context.contains("\"uname\" \"alice\""));
         assert!(context.contains("\"aname\" \"/\""));
         assert!(context.contains("\"target_path\" \"/control\""));

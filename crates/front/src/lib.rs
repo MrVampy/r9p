@@ -833,6 +833,28 @@ impl Front {
         }
     }
 
+    pub fn next_request_for_prefix_while_rpc_pending(
+        &self,
+        prefix: &str,
+        rpc_request_id: u64,
+    ) -> Result<Option<IntakeRequest>> {
+        let prefix = normalise_request_prefix(prefix)?;
+        let mut state = self.lock()?;
+        loop {
+            if !state.rpc_responses.contains_key(&rpc_request_id) {
+                return Ok(None);
+            }
+            if let Some(request) = state.pop_pending_for_prefix(&prefix) {
+                return Ok(Some(request));
+            }
+            state = self
+                .shared
+                .1
+                .wait(state)
+                .map_err(|_| Error::from_static("front state poisoned"))?;
+        }
+    }
+
     pub fn complete_request(&self, prefix: &str, request_id: u64, bytes: &[u8]) -> Result<()> {
         let trimmed = prefix.trim_matches('/');
         {
@@ -1280,6 +1302,8 @@ impl FileTree for FrontTree {
         if let Some(request_id) = self.rpc_inflight.remove(&fid) {
             if let Ok(mut state) = self.front.lock() {
                 state.rpc_responses.remove(&request_id);
+                drop(state);
+                self.front.shared.1.notify_all();
             }
         }
         Ok(())
@@ -1319,6 +1343,8 @@ impl Drop for FrontTree {
             for (_, request_id) in std::mem::take(&mut self.rpc_inflight) {
                 state.rpc_responses.remove(&request_id);
             }
+            drop(state);
+            self.front.shared.1.notify_all();
         }
     }
 }
@@ -1879,6 +1905,52 @@ mod tests {
             &["queries", &request.request_id.to_string(), "result"],
         );
         assert!(qids.len() < 3);
+        Ok(())
+    }
+
+    #[test]
+    fn prefix_wait_tied_to_rpc_close_does_not_consume_later_requests() -> Result<()> {
+        let front = Front::new();
+        front.register_rpc("control")?;
+        front.register_write_relay("relay")?;
+        front.set_wait_timeout(Duration::from_secs(5))?;
+        let mut control = front.tree();
+        control.attach(1, b"brain", b"/")?;
+        let control_qids = walk_to(&mut control, 1, 2, &["control"]);
+        control.open(2, control_qids[0], ORDWR)?;
+        control.write(2, control_qids[0], 0, b"take relay")?;
+        let control_request = front
+            .next_request_for_prefix("control", Duration::from_millis(200))?
+            .expect("control rpc request");
+        let waiter_front = front.clone();
+        let waiter = thread::spawn(move || {
+            waiter_front
+                .next_request_for_prefix_while_rpc_pending("relay", control_request.request_id)
+        });
+
+        control.clunk(2, control_qids[0])?;
+        let abandoned = waiter.join().expect("waiter join")?;
+        assert!(abandoned.is_none());
+
+        let writer_front = front.clone();
+        let writer = thread::spawn(move || {
+            let mut tree = writer_front.tree();
+            tree.attach(1, b"alice", b"/")?;
+            let relay_qids = walk_to(&mut tree, 1, 2, &["relay"]);
+            tree.open(2, relay_qids[0], OWRITE)?;
+            tree.write(2, relay_qids[0], 0, b"still owned")
+        });
+        let request = front
+            .next_request_for_prefix("relay", Duration::from_millis(200))?
+            .expect("relay request must remain available");
+        assert_eq!(request.bytes, b"still owned");
+        front.complete_write(
+            "relay",
+            request.request_id,
+            u32::try_from(request.bytes.len()).expect("request length"),
+        )?;
+        let wrote = writer.join().expect("writer join")?;
+        assert_eq!(wrote as usize, request.bytes.len());
         Ok(())
     }
 

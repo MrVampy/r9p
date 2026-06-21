@@ -435,7 +435,7 @@ fn create_and_write<S: std::io::Read + std::io::Write>(
     service_name: &str,
     descriptor: &str,
 ) -> Result<()> {
-    let parent = client.walk_path("/runtime/srv")?;
+    let parent = client.walk_path("/srv")?;
     let (fid, _) = client.create(parent, service_name.as_bytes(), 0o666, OWRITE)?;
     let write_result = client.write(fid, 0, descriptor.as_bytes());
     let clunk_result = client.clunk(fid);
@@ -473,15 +473,15 @@ fn read_file<S: std::io::Read + std::io::Write>(
 }
 
 fn srv_path(service_name: &str) -> String {
-    format!("/runtime/srv/{service_name}")
+    format!("/srv/{service_name}")
 }
 
 fn srv_wait_state_path(service_name: &str) -> String {
-    format!("/runtime/srv-wait/{service_name}/state")
+    format!("/srv-wait/{service_name}/state")
 }
 
 fn srv_wait_changed_after_path(service_name: &str, token: &str) -> String {
-    format!("/runtime/srv-wait/{service_name}/changed-after/{token}")
+    format!("/srv-wait/{service_name}/changed-after/{token}")
 }
 
 fn field_value(report: &str, field: &str) -> Option<String> {
@@ -781,8 +781,7 @@ mod tests {
     }
 
     const ROOT: u64 = 1;
-    const RUNTIME: u64 = 2;
-    const SRV: u64 = 3;
+    const SRV: u64 = 2;
 
     struct SrvTree {
         nodes: BTreeMap<u64, TestNode>,
@@ -808,14 +807,6 @@ mod tests {
                 TestNode {
                     name: b".".to_vec(),
                     parent: ROOT,
-                    body: TestBody::Dir(BTreeMap::from([(b"runtime".to_vec(), RUNTIME)])),
-                },
-            );
-            nodes.insert(
-                RUNTIME,
-                TestNode {
-                    name: b"runtime".to_vec(),
-                    parent: ROOT,
                     body: TestBody::Dir(BTreeMap::from([(b"srv".to_vec(), SRV)])),
                 },
             );
@@ -823,11 +814,11 @@ mod tests {
                 SRV,
                 TestNode {
                     name: b"srv".to_vec(),
-                    parent: RUNTIME,
+                    parent: ROOT,
                     body: TestBody::Dir(BTreeMap::new()),
                 },
             );
-            Self { nodes, next_id: 4 }
+            Self { nodes, next_id: 3 }
         }
 
         fn walk(&self, start: u64, names: &[Vec<u8>]) -> Result<Vec<Qid>> {
@@ -967,7 +958,7 @@ mod tests {
         }
 
         fn remove(&mut self, id: u64) -> Result<()> {
-            if id == ROOT || id == RUNTIME || id == SRV {
+            if id == ROOT || id == SRV {
                 return Err(Error::from("cannot remove directory"));
             }
             let parent = self.node(id)?.parent;

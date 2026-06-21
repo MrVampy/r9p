@@ -87,7 +87,7 @@
  * - r9p_front_publish_r9p_export is the generic r9p/Vault service
  *   rendezvous helper for embedded hosts. It renders r9p-export.v1 from
  *   the supplied fields, connects to the Vault 9P endpoint, and publishes
- *   the descriptor through /runtime/srv/<service>. If a matching ready
+ *   the descriptor through /srv/<service>. If a matching ready
  *   handle already exists it returns ok; if a stale handle exists it is
  *   updated through the same namespace surface without removing the srv file.
  *   Passing service_unit declares host process ownership; when
@@ -96,8 +96,8 @@
  *   internal failure details via last_error.
  * - r9p_front_maintain_r9p_export performs the same initial publication,
  *   then keeps a cancellable maintainer owned by the front handle. The
- *   maintainer waits on /runtime/srv-wait/<service>/changed-after/<token>
- *   after each successful publication and republishes through /runtime/srv
+ *   maintainer waits on /srv-wait/<service>/changed-after/<token>
+ *   after each successful publication and republishes through /srv
  *   when Vault reports that the rendezvous changed. Failed publishes or
  *   failed wait-surface reads retry after retry_interval_ms; 0 selects the
  *   library default. r9p_front_reconcile_r9p_exports nudges all maintainers

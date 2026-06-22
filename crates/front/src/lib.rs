@@ -193,6 +193,7 @@ struct Intake {
 
 struct PrincipalRoot {
     root: u64,
+    root_path: String,
     principal_id: String,
     anames: BTreeSet<Vec<u8>>,
 }
@@ -686,6 +687,15 @@ fn split_path(path: &str) -> Result<Vec<Vec<u8>>> {
         .collect())
 }
 
+fn canonical_root_path(path: &str) -> Result<String> {
+    let trimmed = path.trim_matches('/');
+    if trimmed.is_empty() {
+        return Ok("/".to_string());
+    }
+    let _ = split_path(trimmed)?;
+    Ok(trimmed.to_string())
+}
+
 fn normalise_request_prefix(prefix: &str) -> Result<String> {
     let trimmed = prefix.trim_matches('/');
     if trimmed.is_empty() {
@@ -870,15 +880,17 @@ impl Front {
         if !matches!(state.node(root)?.body, Body::Dir(_)) {
             return Err(Error::from_static(ENOTDIR));
         }
+        let root_path = canonical_root_path(root_path)?;
         state.principal_roots_required = true;
         match state.principal_roots.get_mut(uname.as_bytes()) {
             Some(existing) => {
-                if existing.root != root {
+                if existing.root_path != root_path {
                     return Err(Error::from_static("principal root path mismatch"));
                 }
                 if existing.principal_id != principal_id {
                     return Err(Error::from_static("principal id mismatch"));
                 }
+                existing.root = root;
                 existing.anames.insert(aname.as_bytes().to_vec());
             }
             None => {
@@ -888,6 +900,7 @@ impl Front {
                     uname.as_bytes().to_vec(),
                     PrincipalRoot {
                         root,
+                        root_path,
                         principal_id: principal_id.to_string(),
                         anames,
                     },
@@ -1677,6 +1690,12 @@ mod tests {
                 wake_token: "wake:runtime/substrates".to_string(),
             },
         )?;
+        front.set_principal_class_aname(
+            "alice",
+            "principal.alice",
+            "door-token",
+            "views/runtime",
+        )?;
         front.remove_subtree_if_exists("views/runtime")?;
         front.set_pushed_directory(
             "views/runtime",
@@ -1689,6 +1708,13 @@ mod tests {
                 wake_token: "wake:runtime".to_string(),
             },
         )?;
+        front.set_principal_class_aname(
+            "alice",
+            "principal.alice",
+            "door-token",
+            "views/runtime",
+        )?;
+        front.set_principal_root("claude", "/")?;
 
         let mut tree = front.tree();
         tree.attach(1, b"claude", b"/")?;
@@ -1698,6 +1724,13 @@ mod tests {
         assert_eq!(qids[1].version, 2);
         let stale = walk_to(&mut tree, 1, 3, &["views", "runtime", "substrates"]);
         assert_eq!(stale.len(), 2);
+
+        let mut scoped = front.tree();
+        let root_qid = scoped.attach(1, b"alice", b"door-token")?;
+        assert_eq!(root_qid.path, 8001);
+        assert_eq!(root_qid.version, 2);
+        let stale_from_root = walk_to(&mut scoped, 1, 2, &["substrates"]);
+        assert_eq!(stale_from_root.len(), 0);
         Ok(())
     }
 

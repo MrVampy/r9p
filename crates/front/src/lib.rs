@@ -550,6 +550,59 @@ impl State {
         }
     }
 
+    fn remove_subtree_if_exists(&mut self, path: &str) -> Result<()> {
+        let Some(id) = self.lookup_optional_path(path)? else {
+            return Ok(());
+        };
+        if id == ROOT_ID {
+            return Err(Error::from_static(EPERM));
+        }
+        let parent = self.node(id)?.parent;
+        let name = self.node(id)?.name.clone();
+        if let Some(Node {
+            body: Body::Dir(children),
+            ..
+        }) = self.nodes.get_mut(&parent)
+        {
+            children.remove(name.as_slice());
+        }
+        self.remove_node_recursive(id);
+        Ok(())
+    }
+
+    fn remove_node_recursive(&mut self, id: u64) {
+        let Some(node) = self.nodes.remove(&id) else {
+            return;
+        };
+        self.qid_index.remove(&node.qid_path);
+        self.intakes.remove(&id);
+        if let Body::Dir(children) = node.body {
+            for child in children.values() {
+                self.remove_node_recursive(*child);
+            }
+        }
+    }
+
+    fn lookup_optional_path(&self, path: &str) -> Result<Option<u64>> {
+        let trimmed = path.trim_matches('/');
+        if trimmed.is_empty() {
+            return Ok(Some(ROOT_ID));
+        }
+        let mut current = ROOT_ID;
+        for segment in split_path(trimmed)? {
+            let node = self.node(current)?;
+            let child = match &node.body {
+                Body::Dir(children) => children.get(segment.as_slice()).copied(),
+                _ => return Err(Error::from_static(ENOTDIR)),
+            };
+            let Some(next) = child else {
+                return Ok(None);
+            };
+            current = next;
+        }
+        Ok(Some(current))
+    }
+
     fn lookup_path(&self, path: &str) -> Result<u64> {
         let trimmed = path.trim_matches('/');
         if trimmed.is_empty() {
@@ -703,6 +756,12 @@ impl Front {
         metadata: PushedDirectoryMetadata,
     ) -> Result<()> {
         self.lock()?.place_pushed_directory(path, metadata)?;
+        self.shared.1.notify_all();
+        Ok(())
+    }
+
+    pub fn remove_subtree_if_exists(&self, path: &str) -> Result<()> {
+        self.lock()?.remove_subtree_if_exists(path)?;
         self.shared.1.notify_all();
         Ok(())
     }
@@ -1590,6 +1649,67 @@ mod tests {
         let updated_root = updated.attach(1, b"alice", b"door-token")?;
         assert_eq!(updated_root.path, 8001);
         assert_eq!(updated_root.version, 9);
+        Ok(())
+    }
+
+    #[test]
+    fn remove_subtree_releases_pushed_qids_and_children() -> Result<()> {
+        let front = Front::new();
+        front.set_pushed_directory(
+            "views/runtime",
+            PushedDirectoryMetadata {
+                qid_path: 8001,
+                qid_version: 1,
+                generation: 1,
+                visibility_class: "runtime-reader".to_string(),
+                freshness_ref: "freshness:runtime".to_string(),
+                wake_token: "wake:runtime".to_string(),
+            },
+        )?;
+        front.set_pushed_directory(
+            "views/runtime/substrates",
+            PushedDirectoryMetadata {
+                qid_path: 8002,
+                qid_version: 1,
+                generation: 1,
+                visibility_class: "runtime-reader".to_string(),
+                freshness_ref: "freshness:runtime/substrates".to_string(),
+                wake_token: "wake:runtime/substrates".to_string(),
+            },
+        )?;
+        front.remove_subtree_if_exists("views/runtime")?;
+        front.set_pushed_directory(
+            "views/runtime",
+            PushedDirectoryMetadata {
+                qid_path: 8001,
+                qid_version: 2,
+                generation: 2,
+                visibility_class: "runtime-reader".to_string(),
+                freshness_ref: "freshness:runtime".to_string(),
+                wake_token: "wake:runtime".to_string(),
+            },
+        )?;
+
+        let mut tree = front.tree();
+        tree.attach(1, b"claude", b"/")?;
+        let qids = walk_to(&mut tree, 1, 2, &["views", "runtime"]);
+        assert_eq!(qids.len(), 2);
+        assert_eq!(qids[1].path, 8001);
+        assert_eq!(qids[1].version, 2);
+        let stale = walk_to(&mut tree, 1, 3, &["views", "runtime", "substrates"]);
+        assert_eq!(stale.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn remove_subtree_missing_path_is_noop() -> Result<()> {
+        let front = Front::new();
+        front.remove_subtree_if_exists("views/runtime")?;
+        front.set("status", b"ok")?;
+        let mut tree = front.tree();
+        tree.attach(1, b"claude", b"/")?;
+        let qids = walk_to(&mut tree, 1, 2, &["status"]);
+        assert_eq!(qids.len(), 1);
         Ok(())
     }
 

@@ -1411,7 +1411,7 @@ impl Front {
         }
     }
 
-    pub(crate) fn wake_readers(&self) {
+    pub fn wake_readers(&self) {
         self.shared.1.notify_all();
     }
 
@@ -1792,6 +1792,19 @@ impl FileTree for FrontTree {
 }
 
 impl FrontTree {
+    pub fn read_with_cancel(
+        &self,
+        fid: Fid,
+        offset: u64,
+        count: u32,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<ReadData> {
+        match self.read_target(fid)? {
+            ReadTarget::Node(id) => self.front.read_node(id, offset, count, cancel),
+            ReadTarget::Rpc(request_id) => self.front.rpc_read(request_id, offset, count, cancel),
+        }
+    }
+
     pub(crate) fn read_target(&self, fid: Fid) -> Result<ReadTarget> {
         let id = self
             .fids

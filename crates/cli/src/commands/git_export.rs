@@ -383,6 +383,7 @@ fn descriptor_from_export_config(config: &ExportConfig, pid: u32) -> CliResult<E
         msize: config.serve.msize,
         expires_at: None,
         local_root_label: Some(config.serve.root.display().to_string()),
+        namespace_mount_paths: Vec::new(),
         extra_fields: config.extra_fields.clone(),
     })
 }

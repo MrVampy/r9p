@@ -202,7 +202,7 @@ mod tests {
             errno: libc::ETIMEDOUT,
             message: "timed out\nwhile reading \"x\"".to_string(),
             context: DiagnosticContext {
-                path: Some("/runtime/status".to_string()),
+                path: Some("/status".to_string()),
                 fh: Some(4),
                 offset: Some(12),
                 size: Some(64),
@@ -211,7 +211,7 @@ mod tests {
         });
         assert!(line.contains("\"event\":\"operation_error\""));
         assert!(line.contains("\"seq\":7"));
-        assert!(line.contains("\"path\":\"/runtime/status\""));
+        assert!(line.contains("\"path\":\"/status\""));
         assert!(line.contains("\"fh\":4"));
         assert!(line.contains("\"offset\":12"));
         assert!(line.contains("\"size\":64"));

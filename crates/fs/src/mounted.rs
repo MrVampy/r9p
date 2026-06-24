@@ -209,14 +209,8 @@ mod tests {
     #[test]
     fn resolves_absolute_namespace_paths_under_root() -> io::Result<()> {
         let root = PathBuf::from("/tmp/r9p-mounted-root");
-        assert_eq!(
-            path_at(&root, "/runtime/status")?,
-            root.join("runtime/status")
-        );
-        assert_eq!(
-            path_at(&root, "runtime/status")?,
-            root.join("runtime/status")
-        );
+        assert_eq!(path_at(&root, "/state/status")?, root.join("state/status"));
+        assert_eq!(path_at(&root, "state/status")?, root.join("state/status"));
         assert_eq!(path_at(&root, "/")?, root);
         Ok(())
     }
@@ -224,21 +218,21 @@ mod tests {
     #[test]
     fn rejects_parent_traversal() {
         let root = PathBuf::from("/tmp/r9p-mounted-root");
-        let error = path_at(&root, "/runtime/../secret").expect_err("path should be rejected");
+        let error = path_at(&root, "/state/../secret").expect_err("path should be rejected");
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]
     fn absolute_path_at_rejects_relative_paths() {
         let root = PathBuf::from("/tmp/r9p-mounted-root");
-        let error = absolute_path_at(&root, "runtime/status").expect_err("path should be rejected");
+        let error = absolute_path_at(&root, "state/status").expect_err("path should be rejected");
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]
     fn rejects_nul_path_segments() {
         let root = PathBuf::from("/tmp/r9p-mounted-root");
-        let error = path_at(&root, "/runtime/bad\0name").expect_err("path should be rejected");
+        let error = path_at(&root, "/state/bad\0name").expect_err("path should be rejected");
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 
@@ -247,29 +241,26 @@ mod tests {
         let root = fixture_root("mounted")?;
         let mounted = MountedNamespace::new(&root);
 
-        mounted.create_directory_all("/runtime")?;
-        mounted.write_utf8("/runtime/status", "abcdef")?;
-        assert_eq!(mounted.read_utf8("runtime/status")?, "abcdef");
-        assert_eq!(mounted.read_bytes_range("/runtime/status", 2, 3)?, b"cde");
+        mounted.create_directory_all("/state")?;
+        mounted.write_utf8("/state/status", "abcdef")?;
+        assert_eq!(mounted.read_utf8("state/status")?, "abcdef");
+        assert_eq!(mounted.read_bytes_range("/state/status", 2, 3)?, b"cde");
 
-        assert_eq!(mounted.write_bytes_range("/runtime/status", 3, b"XYZ")?, 3);
-        assert_eq!(mounted.read_utf8("/runtime/status")?, "abcXYZ");
-        assert_eq!(mounted.file_size("/runtime/status")?, 6);
+        assert_eq!(mounted.write_bytes_range("/state/status", 3, b"XYZ")?, 3);
+        assert_eq!(mounted.read_utf8("/state/status")?, "abcXYZ");
+        assert_eq!(mounted.file_size("/state/status")?, 6);
 
-        mounted.truncate_file("/runtime/status", 3)?;
-        assert_eq!(mounted.read_utf8("/runtime/status")?, "abc");
+        mounted.truncate_file("/state/status", 3)?;
+        assert_eq!(mounted.read_utf8("/state/status")?, "abc");
 
-        mounted.rename_path("/runtime/status", "/runtime/ready")?;
-        assert_eq!(
-            mounted.read_directory("/runtime")?,
-            vec!["ready".to_string()]
-        );
-        mounted.delete_tree("/runtime/ready")?;
-        mounted.write_utf8("/runtime/delete-file", "gone")?;
-        mounted.delete_file("/runtime/delete-file")?;
-        mounted.create_directory_all("/runtime/empty")?;
-        mounted.delete_directory("/runtime/empty")?;
-        mounted.delete_tree("/runtime")?;
+        mounted.rename_path("/state/status", "/state/ready")?;
+        assert_eq!(mounted.read_directory("/state")?, vec!["ready".to_string()]);
+        mounted.delete_tree("/state/ready")?;
+        mounted.write_utf8("/state/delete-file", "gone")?;
+        mounted.delete_file("/state/delete-file")?;
+        mounted.create_directory_all("/state/empty")?;
+        mounted.delete_directory("/state/empty")?;
+        mounted.delete_tree("/state")?;
 
         let _ = fs::remove_dir_all(root);
         Ok(())
@@ -280,13 +271,13 @@ mod tests {
         let root = fixture_root("mounted-delete-directory")?;
         let mounted = MountedNamespace::new(&root);
 
-        mounted.create_directory_all("/runtime/non-empty")?;
-        mounted.write_utf8("/runtime/non-empty/file", "content")?;
+        mounted.create_directory_all("/state/non-empty")?;
+        mounted.write_utf8("/state/non-empty/file", "content")?;
         let error = mounted
-            .delete_directory("/runtime/non-empty")
+            .delete_directory("/state/non-empty")
             .expect_err("direct directory delete should not recurse");
         assert_eq!(error.kind(), io::ErrorKind::DirectoryNotEmpty);
-        assert!(root.join("runtime/non-empty/file").exists());
+        assert!(root.join("state/non-empty/file").exists());
 
         let _ = fs::remove_dir_all(root);
         Ok(())
@@ -298,10 +289,10 @@ mod tests {
         let mounted = MountedNamespace::new(&root);
 
         let error = mounted
-            .write_utf8("/runtime/status", "abcdef")
+            .write_utf8("/state/status", "abcdef")
             .expect_err("write should require an existing parent directory");
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
-        assert!(!root.join("runtime").exists());
+        assert!(!root.join("state").exists());
 
         let _ = fs::remove_dir_all(root);
         Ok(())

@@ -295,14 +295,11 @@ mod tests {
             "--request-timeout".to_string(),
             "0".to_string(),
             "read".to_string(),
-            "/runtime/events/stream".to_string(),
+            "/events/stream".to_string(),
         ];
         let config = parse_global_options(&mut args).expect("options should parse");
         assert_eq!(config.request_timeout, None);
-        assert_eq!(
-            args,
-            ["read".to_string(), "/runtime/events/stream".to_string()]
-        );
+        assert_eq!(args, ["read".to_string(), "/events/stream".to_string()]);
     }
 
     #[test]
@@ -311,11 +308,11 @@ mod tests {
             "--bind".to_string(),
             "192.168.0.30:9564".to_string(),
             "read".to_string(),
-            "/runtime/status".to_string(),
+            "/status".to_string(),
         ];
         let config = parse_global_options(&mut args).expect("options should parse");
         assert_eq!(config.address.as_deref(), Some("192.168.0.30:9564"));
-        assert_eq!(args, ["read".to_string(), "/runtime/status".to_string()]);
+        assert_eq!(args, ["read".to_string(), "/status".to_string()]);
     }
 
     #[test]
@@ -323,11 +320,11 @@ mod tests {
         let mut args = vec![
             "--bind=192.168.0.30:9564".to_string(),
             "cat".to_string(),
-            "/runtime/status".to_string(),
+            "/status".to_string(),
         ];
         let config = parse_global_options(&mut args).expect("options should parse");
         assert_eq!(config.address.as_deref(), Some("192.168.0.30:9564"));
-        assert_eq!(args, ["cat".to_string(), "/runtime/status".to_string()]);
+        assert_eq!(args, ["cat".to_string(), "/status".to_string()]);
     }
 
     #[test]

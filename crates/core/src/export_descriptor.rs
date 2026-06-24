@@ -18,6 +18,7 @@ pub struct ExportDescriptor {
     pub msize: u32,
     pub expires_at: Option<String>,
     pub local_root_label: Option<String>,
+    pub namespace_mount_paths: Vec<String>,
     pub extra_fields: BTreeMap<String, String>,
 }
 
@@ -72,6 +73,12 @@ impl ExportDescriptor {
         }
         if let Some(label) = &self.local_root_label {
             fields.push(("local_root_label", label.clone()));
+        }
+        if !self.namespace_mount_paths.is_empty() {
+            fields.push((
+                "namespace_mount_paths",
+                self.namespace_mount_paths.join(","),
+            ));
         }
         for (field, value) in &self.extra_fields {
             validate_extension_field_name(field)?;
@@ -145,6 +152,9 @@ impl ExportDescriptor {
             msize: parse_u32(required(&fields, "msize")?, "msize")?,
             expires_at: fields.get("expires_at").cloned(),
             local_root_label: fields.get("local_root_label").cloned(),
+            namespace_mount_paths: parse_namespace_mount_paths(
+                fields.get("namespace_mount_paths"),
+            )?,
             extra_fields,
         };
         descriptor.validate_authority_boundary()?;
@@ -356,7 +366,41 @@ fn is_reserved_field(field: &str) -> bool {
             | "msize"
             | "expires_at"
             | "local_root_label"
+            | "namespace_mount_paths"
     )
+}
+
+fn parse_namespace_mount_paths(value: Option<&String>) -> Result<Vec<String>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    trimmed
+        .split(',')
+        .map(|path| {
+            let path = path.trim();
+            validate_namespace_mount_path(path)?;
+            Ok(path.to_string())
+        })
+        .collect()
+}
+
+fn validate_namespace_mount_path(path: &str) -> Result<()> {
+    if path.is_empty() {
+        return Err(Error::from("empty namespace_mount_paths entry"));
+    }
+    if !path.starts_with('/') {
+        return Err(Error::from(format!(
+            "namespace_mount_paths entry is not absolute: {path}"
+        )));
+    }
+    if path == "/" {
+        return Err(Error::from("namespace_mount_paths entry cannot be root"));
+    }
+    Ok(())
 }
 
 fn tcp_endpoint_is_loopback(endpoint: &str) -> bool {
@@ -387,6 +431,7 @@ mod tests {
             msize: 65_536,
             expires_at: None,
             local_root_label: Some("/tmp/candidate".to_string()),
+            namespace_mount_paths: Vec::new(),
             extra_fields: BTreeMap::new(),
         }
     }
@@ -413,6 +458,24 @@ mod tests {
                 .get("git_bundle_path")
                 .map(String::as_str),
             Some("/.vault/source.bundle")
+        );
+    }
+
+    #[test]
+    fn descriptor_round_trips_namespace_mount_paths() {
+        let mut descriptor = descriptor();
+        descriptor.namespace_mount_paths = vec![
+            "/sensors/polymarket".to_string(),
+            "/markets/polymarket".to_string(),
+        ];
+        let rendered = descriptor.render().expect("descriptor should render");
+        assert!(
+            rendered.contains("namespace_mount_paths\t/sensors/polymarket,/markets/polymarket\n")
+        );
+        let parsed = ExportDescriptor::parse(&rendered).expect("descriptor should parse");
+        assert_eq!(
+            parsed.namespace_mount_paths,
+            descriptor.namespace_mount_paths
         );
     }
 

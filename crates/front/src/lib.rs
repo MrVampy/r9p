@@ -104,6 +104,15 @@ pub struct IntakeRequest {
     pub context: RequestContext,
 }
 
+pub struct CreateRelayRequest {
+    pub request_id: u64,
+    pub prefix: String,
+    pub name: String,
+    pub perm: u32,
+    pub mode: u8,
+    pub context: RequestContext,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RequestContext {
     pub principal_id: String,
@@ -159,6 +168,15 @@ enum WriteRelayReply {
     Rejected(String),
 }
 
+enum CreateRelayReply {
+    Accepted {
+        qtype: u8,
+        qid_version: u32,
+        qid_path: u64,
+    },
+    Rejected(String),
+}
+
 struct Node {
     name: Vec<u8>,
     parent: u64,
@@ -168,6 +186,7 @@ struct Node {
     visibility_class: Option<String>,
     freshness_ref: Option<String>,
     wake_token: Option<String>,
+    create_relay: Option<String>,
     body: Body,
 }
 
@@ -178,8 +197,11 @@ struct State {
     next_request_id: u64,
     intakes: BTreeMap<u64, Intake>,
     pending: VecDeque<IntakeRequest>,
+    create_pending: VecDeque<CreateRelayRequest>,
     rpc_responses: BTreeMap<u64, Option<Vec<u8>>>,
+    create_relay_responses: BTreeMap<u64, Option<CreateRelayReply>>,
     write_relay_responses: BTreeMap<u64, Option<WriteRelayReply>>,
+    write_relay_prefixes: BTreeSet<String>,
     principal_roots_required: bool,
     principal_roots: BTreeMap<Vec<u8>, PrincipalRoot>,
     wait_timeout: Duration,
@@ -229,6 +251,7 @@ impl State {
                 visibility_class: None,
                 freshness_ref: None,
                 wake_token: None,
+                create_relay: None,
                 body: Body::Dir(BTreeMap::new()),
             },
         );
@@ -239,8 +262,11 @@ impl State {
             next_request_id: 1,
             intakes: BTreeMap::new(),
             pending: VecDeque::new(),
+            create_pending: VecDeque::new(),
             rpc_responses: BTreeMap::new(),
+            create_relay_responses: BTreeMap::new(),
             write_relay_responses: BTreeMap::new(),
+            write_relay_prefixes: BTreeSet::new(),
             principal_roots_required: false,
             principal_roots: BTreeMap::new(),
             wait_timeout: Duration::from_secs(30),
@@ -354,6 +380,7 @@ impl State {
                 visibility_class: None,
                 freshness_ref: None,
                 wake_token: None,
+                create_relay: None,
                 body: Body::Dir(BTreeMap::new()),
             },
         );
@@ -366,6 +393,15 @@ impl State {
             children.insert(name.to_vec(), id);
         }
         Ok(id)
+    }
+
+    fn ensure_path_dir(&mut self, path: &str) -> Result<u64> {
+        let segments = split_path(path)?;
+        let mut current = ROOT_ID;
+        for segment in segments {
+            current = self.ensure_dir(current, &segment)?;
+        }
+        Ok(current)
     }
 
     fn place(&mut self, path: &str, body: Body) -> Result<u64> {
@@ -415,6 +451,7 @@ impl State {
                         visibility_class: None,
                         freshness_ref: None,
                         wake_token: None,
+                        create_relay: None,
                         body,
                     },
                 );
@@ -477,6 +514,7 @@ impl State {
                         visibility_class: Some(metadata.visibility_class),
                         freshness_ref: Some(metadata.freshness_ref),
                         wake_token: Some(metadata.wake_token),
+                        create_relay: None,
                         body: Body::File(bytes),
                     },
                 );
@@ -535,6 +573,7 @@ impl State {
                         visibility_class: Some(metadata.visibility_class),
                         freshness_ref: Some(metadata.freshness_ref),
                         wake_token: Some(metadata.wake_token),
+                        create_relay: None,
                         body: Body::Dir(BTreeMap::new()),
                     },
                 );
@@ -638,6 +677,14 @@ impl State {
         self.pending.remove(index)
     }
 
+    fn pop_create_pending_for_prefix(&mut self, prefix: &str) -> Option<CreateRelayRequest> {
+        let index = self
+            .create_pending
+            .iter()
+            .position(|request| request.prefix == prefix)?;
+        self.create_pending.remove(index)
+    }
+
     fn path_relative_to(&self, id: u64, root: u64) -> Result<String> {
         let mut current = id;
         let mut segments = Vec::new();
@@ -702,6 +749,14 @@ fn normalise_request_prefix(prefix: &str) -> Result<String> {
         return Err(Error::from_static(EPERM));
     }
     Ok(trimmed.to_string())
+}
+
+fn created_child_path(parent_path: &str, name: &str) -> String {
+    if parent_path == "/" {
+        format!("/{name}")
+    } else {
+        format!("{}/{}", parent_path.trim_end_matches('/'), name)
+    }
 }
 
 fn open_allowed(body: &Body, mode: u8) -> bool {
@@ -835,7 +890,24 @@ impl Front {
         if trimmed.is_empty() {
             return Err(Error::from_static(EPERM));
         }
+        state.write_relay_prefixes.insert(trimmed.to_string());
         state.place(trimmed, Body::WriteRelay(trimmed.to_string()))?;
+        Ok(())
+    }
+
+    pub fn register_create_relay(&self, path: &str) -> Result<()> {
+        let mut state = self.lock()?;
+        let trimmed = normalise_request_prefix(path)?;
+        let id = state.ensure_path_dir(&trimmed)?;
+        let node = state
+            .nodes
+            .get_mut(&id)
+            .ok_or_else(|| Error::from_static(ENOENT))?;
+        if !matches!(node.body, Body::Dir(_)) {
+            return Err(Error::from_static(ENOTDIR));
+        }
+        node.create_relay = Some(trimmed.clone());
+        state.write_relay_prefixes.insert(trimmed);
         Ok(())
     }
 
@@ -984,6 +1056,24 @@ impl Front {
         }
     }
 
+    pub fn next_create_request_for_prefix_blocking(
+        &self,
+        prefix: &str,
+    ) -> Result<CreateRelayRequest> {
+        let prefix = normalise_request_prefix(prefix)?;
+        let mut state = self.lock()?;
+        loop {
+            if let Some(request) = state.pop_create_pending_for_prefix(&prefix) {
+                return Ok(request);
+            }
+            state = self
+                .shared
+                .1
+                .wait(state)
+                .map_err(|_| Error::from_static("front state poisoned"))?;
+        }
+    }
+
     pub fn next_request_for_prefix_while_rpc_pending(
         &self,
         prefix: &str,
@@ -1036,6 +1126,55 @@ impl Front {
         )
     }
 
+    pub fn complete_create(
+        &self,
+        prefix: &str,
+        request_id: u64,
+        qtype: u8,
+        qid_version: u32,
+        qid_path: u64,
+    ) -> Result<()> {
+        self.complete_create_result(
+            prefix,
+            request_id,
+            CreateRelayReply::Accepted {
+                qtype,
+                qid_version,
+                qid_path,
+            },
+        )
+    }
+
+    pub fn reject_create(&self, prefix: &str, request_id: u64, message: &str) -> Result<()> {
+        self.complete_create_result(
+            prefix,
+            request_id,
+            CreateRelayReply::Rejected(message.to_string()),
+        )
+    }
+
+    fn complete_create_result(
+        &self,
+        prefix: &str,
+        request_id: u64,
+        reply: CreateRelayReply,
+    ) -> Result<()> {
+        let mut state = self.lock()?;
+        let prefix = normalise_request_prefix(prefix)?;
+        if !state.write_relay_prefixes.contains(&prefix) {
+            return Err(Error::from_static(ENOENT));
+        }
+        match state.create_relay_responses.get_mut(&request_id) {
+            Some(slot) => {
+                *slot = Some(reply);
+                drop(state);
+                self.shared.1.notify_all();
+                Ok(())
+            }
+            None => Err(Error::from_static(ENOENT)),
+        }
+    }
+
     fn complete_write_result(
         &self,
         prefix: &str,
@@ -1043,8 +1182,8 @@ impl Front {
         reply: WriteRelayReply,
     ) -> Result<()> {
         let mut state = self.lock()?;
-        let relay_id = state.lookup_path(prefix)?;
-        if !matches!(state.node(relay_id)?.body, Body::WriteRelay(_)) {
+        let prefix = normalise_request_prefix(prefix)?;
+        if !state.write_relay_prefixes.contains(&prefix) {
             return Err(Error::from_static(ENOENT));
         }
         match state.write_relay_responses.get_mut(&request_id) {
@@ -1141,6 +1280,44 @@ impl Front {
                 state.write_relay_responses.remove(&request_id);
                 state.remove_pending_request(request_id);
                 return Err(Error::from_static("write relay unavailable"));
+            }
+            let (next, _timeout_result) = self
+                .shared
+                .1
+                .wait_timeout(state, deadline - now)
+                .map_err(|_| Error::from_static("front state poisoned"))?;
+            state = next;
+        }
+    }
+
+    fn wait_create_relay(
+        &self,
+        mut state: std::sync::MutexGuard<'_, State>,
+        request_id: u64,
+    ) -> Result<(u8, u32, u64)> {
+        let deadline = Instant::now() + state.wait_timeout;
+        loop {
+            match state.create_relay_responses.remove(&request_id) {
+                None => return Err(Error::from_static(ENOENT)),
+                Some(Some(CreateRelayReply::Accepted {
+                    qtype,
+                    qid_version,
+                    qid_path,
+                })) => return Ok((qtype, qid_version, qid_path)),
+                Some(Some(CreateRelayReply::Rejected(message))) => {
+                    return Err(Error::from(message));
+                }
+                Some(None) => {
+                    state.create_relay_responses.insert(request_id, None);
+                }
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                state.create_relay_responses.remove(&request_id);
+                state
+                    .create_pending
+                    .retain(|request| request.request_id != request_id);
+                return Err(Error::from_static("create relay unavailable"));
             }
             let (next, _timeout_result) = self
                 .shared
@@ -1343,6 +1520,102 @@ impl FileTree for FrontTree {
         self.open_modes.insert(fid, mode);
         Ok(OpenFile {
             qid,
+            iounit: state.protocol.iounit,
+        })
+    }
+
+    fn create(&mut self, fid: Fid, qid: Qid, name: &[u8], perm: u32, mode: u8) -> Result<OpenFile> {
+        let mut state = self.front.lock()?;
+        let binding = self
+            .fids
+            .get(&fid)
+            .cloned()
+            .ok_or_else(|| Error::from_static(EBADFID))?;
+        let parent_id = binding.node;
+        if state.qid_for(parent_id)?.path != qid.path {
+            return Err(Error::from_static(EBADFID));
+        }
+        if !matches!(state.node(parent_id)?.body, Body::Dir(_)) {
+            return Err(Error::from_static(ENOTDIR));
+        }
+        if let Body::Dir(children) = &state.node(parent_id)?.body {
+            if children.contains_key(name) {
+                return Err(Error::from_static("file exists"));
+            }
+        }
+        let create_prefix = state
+            .node(parent_id)?
+            .create_relay
+            .clone()
+            .ok_or_else(|| Error::from_static(EPERM))?;
+        let name_text = std::str::from_utf8(name)
+            .map_err(|_| Error::from_static("create name is not utf-8"))?
+            .to_string();
+        let parent_path = state.path_relative_to(parent_id, binding.root)?;
+        let target_path = created_child_path(&parent_path, &name_text);
+        let parent_generation = state.node(parent_id)?.generation;
+        let request_context =
+            RequestContext::from_parts(&binding, fid, target_path, 0, mode, parent_generation);
+        let request_id = state.next_request_id;
+        state.next_request_id = state.next_request_id.saturating_add(1);
+        state.create_relay_responses.insert(request_id, None);
+        state.create_pending.push_back(CreateRelayRequest {
+            request_id,
+            prefix: create_prefix.clone(),
+            name: name_text,
+            perm,
+            mode,
+            context: request_context,
+        });
+        drop(state);
+        self.front.shared.1.notify_all();
+
+        let state = self.front.lock()?;
+        let (qtype, qid_version, qid_path) = self.front.wait_create_relay(state, request_id)?;
+        let mut state = self.front.lock()?;
+        if state.qid_index.contains_key(&qid_path) {
+            return Err(Error::from_static("qid path already in use"));
+        }
+        let id = state.next_id;
+        state.next_id = state.next_id.saturating_add(1);
+        let body = if qtype & QTDIR != 0 {
+            Body::Dir(BTreeMap::new())
+        } else {
+            Body::WriteRelay(create_prefix)
+        };
+        state.nodes.insert(
+            id,
+            Node {
+                name: name.to_vec(),
+                parent: parent_id,
+                qid_path,
+                version: qid_version,
+                generation: parent_generation,
+                visibility_class: None,
+                freshness_ref: None,
+                wake_token: None,
+                create_relay: None,
+                body,
+            },
+        );
+        state.qid_index.insert(qid_path, id);
+        if let Some(Node {
+            body: Body::Dir(children),
+            ..
+        }) = state.nodes.get_mut(&parent_id)
+        {
+            children.insert(name.to_vec(), id);
+        }
+        self.fids.insert(
+            fid,
+            FidBinding {
+                node: id,
+                ..binding
+            },
+        );
+        self.open_modes.insert(fid, mode);
+        Ok(OpenFile {
+            qid: Qid::new(qtype, qid_version, qid_path),
             iounit: state.protocol.iounit,
         })
     }
@@ -1605,34 +1878,29 @@ mod tests {
     fn pushed_directory_uses_brain_owned_qid_and_version() -> Result<()> {
         let front = Front::new();
         front.set_pushed_directory(
-            "views/runtime",
+            "views/core",
             PushedDirectoryMetadata {
                 qid_path: 8001,
                 qid_version: 7,
                 generation: 70,
                 visibility_class: "runtime-reader".to_string(),
-                freshness_ref: "freshness:runtime".to_string(),
-                wake_token: "wake:runtime".to_string(),
+                freshness_ref: "freshness:core".to_string(),
+                wake_token: "wake:core".to_string(),
             },
         )?;
         front.set_pushed_file(
-            "views/runtime/status",
+            "views/core/status",
             b"ok",
             PushedFileMetadata {
                 qid_path: 9001,
                 qid_version: 8,
                 generation: 71,
                 visibility_class: "runtime-reader".to_string(),
-                freshness_ref: "freshness:runtime/status".to_string(),
-                wake_token: "wake:runtime/status".to_string(),
+                freshness_ref: "freshness:core/status".to_string(),
+                wake_token: "wake:core/status".to_string(),
             },
         )?;
-        front.set_principal_class_aname(
-            "alice",
-            "principal.alice",
-            "door-token",
-            "views/runtime",
-        )?;
+        front.set_principal_class_aname("alice", "principal.alice", "door-token", "views/core")?;
 
         let mut tree = front.tree();
         let root_qid = tree.attach(1, b"alice", b"door-token")?;
@@ -1648,14 +1916,14 @@ mod tests {
         assert_eq!(qids[0].version, 8);
 
         front.set_pushed_directory(
-            "views/runtime",
+            "views/core",
             PushedDirectoryMetadata {
                 qid_path: 8001,
                 qid_version: 9,
                 generation: 72,
                 visibility_class: "runtime-reader".to_string(),
-                freshness_ref: "freshness:runtime".to_string(),
-                wake_token: "wake:runtime".to_string(),
+                freshness_ref: "freshness:core".to_string(),
+                wake_token: "wake:core".to_string(),
             },
         )?;
         let mut updated = front.tree();
@@ -1669,67 +1937,57 @@ mod tests {
     fn remove_subtree_releases_pushed_qids_and_children() -> Result<()> {
         let front = Front::new();
         front.set_pushed_directory(
-            "views/runtime",
+            "views/core",
             PushedDirectoryMetadata {
                 qid_path: 8001,
                 qid_version: 1,
                 generation: 1,
                 visibility_class: "runtime-reader".to_string(),
-                freshness_ref: "freshness:runtime".to_string(),
-                wake_token: "wake:runtime".to_string(),
+                freshness_ref: "freshness:core".to_string(),
+                wake_token: "wake:core".to_string(),
             },
         )?;
         front.set_pushed_directory(
-            "views/runtime/substrates",
+            "views/core/services",
             PushedDirectoryMetadata {
                 qid_path: 8002,
                 qid_version: 1,
                 generation: 1,
                 visibility_class: "runtime-reader".to_string(),
-                freshness_ref: "freshness:runtime/substrates".to_string(),
-                wake_token: "wake:runtime/substrates".to_string(),
+                freshness_ref: "freshness:core/services".to_string(),
+                wake_token: "wake:core/services".to_string(),
             },
         )?;
-        front.set_principal_class_aname(
-            "alice",
-            "principal.alice",
-            "door-token",
-            "views/runtime",
-        )?;
-        front.remove_subtree_if_exists("views/runtime")?;
+        front.set_principal_class_aname("alice", "principal.alice", "door-token", "views/core")?;
+        front.remove_subtree_if_exists("views/core")?;
         front.set_pushed_directory(
-            "views/runtime",
+            "views/core",
             PushedDirectoryMetadata {
                 qid_path: 8001,
                 qid_version: 2,
                 generation: 2,
                 visibility_class: "runtime-reader".to_string(),
-                freshness_ref: "freshness:runtime".to_string(),
-                wake_token: "wake:runtime".to_string(),
+                freshness_ref: "freshness:core".to_string(),
+                wake_token: "wake:core".to_string(),
             },
         )?;
-        front.set_principal_class_aname(
-            "alice",
-            "principal.alice",
-            "door-token",
-            "views/runtime",
-        )?;
+        front.set_principal_class_aname("alice", "principal.alice", "door-token", "views/core")?;
         front.set_principal_root("claude", "/")?;
 
         let mut tree = front.tree();
         tree.attach(1, b"claude", b"/")?;
-        let qids = walk_to(&mut tree, 1, 2, &["views", "runtime"]);
+        let qids = walk_to(&mut tree, 1, 2, &["views", "core"]);
         assert_eq!(qids.len(), 2);
         assert_eq!(qids[1].path, 8001);
         assert_eq!(qids[1].version, 2);
-        let stale = walk_to(&mut tree, 1, 3, &["views", "runtime", "substrates"]);
+        let stale = walk_to(&mut tree, 1, 3, &["views", "core", "services"]);
         assert_eq!(stale.len(), 2);
 
         let mut scoped = front.tree();
         let root_qid = scoped.attach(1, b"alice", b"door-token")?;
         assert_eq!(root_qid.path, 8001);
         assert_eq!(root_qid.version, 2);
-        let stale_from_root = walk_to(&mut scoped, 1, 2, &["substrates"]);
+        let stale_from_root = walk_to(&mut scoped, 1, 2, &["services"]);
         assert_eq!(stale_from_root.len(), 0);
         Ok(())
     }
@@ -1737,7 +1995,7 @@ mod tests {
     #[test]
     fn remove_subtree_missing_path_is_noop() -> Result<()> {
         let front = Front::new();
-        front.remove_subtree_if_exists("views/runtime")?;
+        front.remove_subtree_if_exists("views/core")?;
         front.set("status", b"ok")?;
         let mut tree = front.tree();
         tree.attach(1, b"claude", b"/")?;
@@ -2122,6 +2380,55 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("writer should finish")?;
         assert_eq!(wrote as usize, request.bytes.len());
+        writer.join().expect("writer join")?;
+        Ok(())
+    }
+
+    #[test]
+    fn create_relay_returns_backend_qid_and_rebinds_fid_for_write() -> Result<()> {
+        let front = Front::new();
+        front.register_create_relay("srv")?;
+        front.set_wait_timeout(Duration::from_secs(5))?;
+        let writer_front = front.clone();
+        let (done_tx, done_rx) = mpsc::channel();
+        let writer = thread::spawn(move || {
+            let mut tree = writer_front.tree();
+            tree.attach(1, b"alice", b"/")?;
+            let qids = walk_to(&mut tree, 1, 2, &["srv"]);
+            let opened = tree.create(2, qids[0], b"calendar", 0o666, OWRITE)?;
+            let wrote = tree.write(2, opened.qid, 0, b"descriptor")?;
+            done_tx
+                .send((opened.qid.path, opened.qid.version, wrote))
+                .expect("send writer result");
+            Ok::<(), Error>(())
+        });
+
+        let create = front.next_create_request_for_prefix_blocking("srv")?;
+        assert_eq!(create.prefix, "srv");
+        assert_eq!(create.name, "calendar");
+        assert_eq!(create.perm, 0o666);
+        assert_eq!(create.mode, OWRITE);
+        assert_eq!(create.context.target_path, "/srv/calendar");
+        assert!(done_rx.recv_timeout(Duration::from_millis(50)).is_err());
+
+        front.complete_create("srv", create.request_id, QTFILE, 17, 42_000)?;
+        let write = front
+            .next_request_for_prefix("srv", Duration::from_secs(1))?
+            .expect("dynamic write relay request");
+        assert_eq!(write.prefix, "srv");
+        assert_eq!(write.context.target_path, "/srv/calendar");
+        assert_eq!(write.bytes, b"descriptor");
+        front.complete_write(
+            "srv",
+            write.request_id,
+            u32::try_from(write.bytes.len()).expect("request length"),
+        )?;
+        let (qid_path, qid_version, wrote) = done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("writer should finish");
+        assert_eq!(qid_path, 42_000);
+        assert_eq!(qid_version, 17);
+        assert_eq!(wrote as usize, b"descriptor".len());
         writer.join().expect("writer join")?;
         Ok(())
     }

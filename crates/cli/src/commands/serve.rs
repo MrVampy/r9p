@@ -539,6 +539,7 @@ fn export_descriptor(config: &ExportConfig, bound: &BoundListener) -> CliResult<
         msize: config.serve.msize,
         expires_at: None,
         local_root_label: Some(config.serve.root.display().to_string()),
+        namespace_mount_paths: Vec::new(),
         extra_fields: config.extra_fields.clone(),
     })
 }

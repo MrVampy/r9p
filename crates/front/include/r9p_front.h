@@ -2,10 +2,10 @@
 #define R9P_FRONT_H
 
 /*
- * r9p front C ABI, version 11.
+ * r9p front C ABI, version 12.
  *
  * Contract rules:
- * - r9p_front_abi_version() must return 11 before v11-only calls are made.
+ * - r9p_front_abi_version() must return 12 before v12-only calls are made.
  *   Hosts that only use the v9/v10 call set may accept their known versions.
  * - r9p_front_new() returns an owned handle; every handle must be released
  *   exactly once with r9p_front_free(). Calls other than r9p_front_free()
@@ -92,11 +92,13 @@
  *   updated through the same namespace surface without removing the srv file.
  *   Passing service_unit declares host process ownership; when
  *   host_firewall_admission is empty, TCP exports derive
- *   tcp:<export_endpoint_bind>. Authorization failures are returned as
- *   internal failure details via last_error.
+ *   tcp:<export_endpoint_bind>. Passing namespace_mount_paths as a comma
+ *   separated list asks Vault to mount the registered service at those
+ *   namespace paths. Authorization failures are returned as internal failure
+ *   details via last_error.
  * - r9p_front_maintain_r9p_export performs the same initial publication,
  *   then keeps a cancellable maintainer owned by the front handle. The
- *   maintainer waits on /srv-wait/<service>/changed-after/<token>
+ *   maintainer waits on /srv/wait/<service>/changed-after/<token>
  *   after each successful publication and republishes through /srv
  *   when Vault reports that the rendezvous changed. Failed publishes or
  *   failed wait-surface reads retry after retry_interval_ms; 0 selects the
@@ -190,7 +192,8 @@ int32_t r9p_front_publish_r9p_export(
     size_t protocol_len, const char *local_root_label,
     size_t local_root_label_len, uint32_t pid, uint32_t msize,
     const char *service_unit, size_t service_unit_len,
-    const char *host_firewall_admission, size_t host_firewall_admission_len);
+    const char *host_firewall_admission, size_t host_firewall_admission_len,
+    const char *namespace_mount_paths, size_t namespace_mount_paths_len);
 int32_t r9p_front_maintain_r9p_export(
     r9p_front *front, const char *vault_endpoint_bind,
     size_t vault_endpoint_bind_len, const char *vault_uname,
@@ -206,7 +209,8 @@ int32_t r9p_front_maintain_r9p_export(
     size_t local_root_label_len, uint32_t pid, uint32_t msize,
     uint32_t retry_interval_ms, const char *service_unit,
     size_t service_unit_len, const char *host_firewall_admission,
-    size_t host_firewall_admission_len);
+    size_t host_firewall_admission_len, const char *namespace_mount_paths,
+    size_t namespace_mount_paths_len);
 int32_t r9p_front_reconcile_r9p_exports(r9p_front *front);
 intptr_t r9p_front_last_error(r9p_front *front, uint8_t *buf, size_t cap);
 

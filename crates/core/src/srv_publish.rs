@@ -477,11 +477,11 @@ fn srv_path(service_name: &str) -> String {
 }
 
 fn srv_wait_state_path(service_name: &str) -> String {
-    format!("/srv-wait/{service_name}/state")
+    format!("/srv/wait/{service_name}/state")
 }
 
 fn srv_wait_changed_after_path(service_name: &str, token: &str) -> String {
-    format!("/srv-wait/{service_name}/changed-after/{token}")
+    format!("/srv/wait/{service_name}/changed-after/{token}")
 }
 
 fn field_value(report: &str, field: &str) -> Option<String> {
@@ -617,6 +617,18 @@ mod tests {
     }
 
     #[test]
+    fn maintainer_wait_paths_use_srv_namespace() {
+        assert_eq!(
+            srv_wait_state_path("polymarket"),
+            "/srv/wait/polymarket/state"
+        );
+        assert_eq!(
+            srv_wait_changed_after_path("polymarket", "token-1"),
+            "/srv/wait/polymarket/changed-after/token-1"
+        );
+    }
+
+    #[test]
     fn maintainer_republishes_disappeared_srv_entry() {
         let tree = SharedSrvTree::new();
         let address = serve_tree(tree.clone());
@@ -659,6 +671,7 @@ mod tests {
                 msize: 65_536,
                 expires_at: None,
                 local_root_label: Some("polymarket-watcher".to_string()),
+                namespace_mount_paths: Vec::new(),
                 extra_fields: BTreeMap::new(),
             },
         }

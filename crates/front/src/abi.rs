@@ -14,7 +14,7 @@ use std::ffi::c_char;
 use std::sync::Mutex;
 use std::time::Duration;
 
-pub const ABI_VERSION: u32 = 11;
+pub const ABI_VERSION: u32 = 12;
 
 const OK: i32 = 0;
 const TIMEOUT: i32 = 1;
@@ -795,6 +795,8 @@ pub unsafe extern "C" fn r9p_front_publish_r9p_export(
     service_unit_len: usize,
     host_firewall_admission: *const c_char,
     host_firewall_admission_len: usize,
+    namespace_mount_paths: *const c_char,
+    namespace_mount_paths_len: usize,
 ) -> i32 {
     let Some(abi) = (unsafe { handle.as_ref() }) else {
         return INVALID;
@@ -831,6 +833,8 @@ pub unsafe extern "C" fn r9p_front_publish_r9p_export(
             service_unit_len,
             host_firewall_admission,
             host_firewall_admission_len,
+            namespace_mount_paths,
+            namespace_mount_paths_len,
         })
     } {
         Ok(publication) => publication,
@@ -880,6 +884,8 @@ pub unsafe extern "C" fn r9p_front_maintain_r9p_export(
     service_unit_len: usize,
     host_firewall_admission: *const c_char,
     host_firewall_admission_len: usize,
+    namespace_mount_paths: *const c_char,
+    namespace_mount_paths_len: usize,
 ) -> i32 {
     let Some(abi) = (unsafe { handle.as_ref() }) else {
         return INVALID;
@@ -916,6 +922,8 @@ pub unsafe extern "C" fn r9p_front_maintain_r9p_export(
             service_unit_len,
             host_firewall_admission,
             host_firewall_admission_len,
+            namespace_mount_paths,
+            namespace_mount_paths_len,
         })
     } {
         Ok(publication) => publication,
@@ -999,6 +1007,8 @@ struct PublicationRawArgs {
     service_unit_len: usize,
     host_firewall_admission: *const c_char,
     host_firewall_admission_len: usize,
+    namespace_mount_paths: *const c_char,
+    namespace_mount_paths_len: usize,
 }
 
 unsafe fn publication_from_args(
@@ -1019,6 +1029,7 @@ unsafe fn publication_from_args(
         Some(local_root_label),
         Some(service_unit),
         Some(host_firewall_admission),
+        Some(namespace_mount_paths),
     ) = (
         unsafe { str_arg(args.vault_endpoint_bind, args.vault_endpoint_bind_len) },
         unsafe { str_arg(args.vault_uname, args.vault_uname_len) },
@@ -1039,6 +1050,7 @@ unsafe fn publication_from_args(
                 args.host_firewall_admission_len,
             )
         },
+        unsafe { optional_str_arg(args.namespace_mount_paths, args.namespace_mount_paths_len) },
     )
     else {
         return Err(PublicationArgError::Invalid);
@@ -1085,9 +1097,20 @@ unsafe fn publication_from_args(
             msize: args.msize,
             expires_at: None,
             local_root_label: local_root_label.map(str::to_string),
+            namespace_mount_paths: namespace_mount_paths_arg(namespace_mount_paths),
             extra_fields,
         },
     })
+}
+
+fn namespace_mount_paths_arg(value: Option<&str>) -> Vec<String> {
+    value
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn derive_host_firewall_admission(

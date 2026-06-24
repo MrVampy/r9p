@@ -1,6 +1,7 @@
 use crate::{
     client::{Client as ProtocolClient, ClientResponse, Completion, Op},
     codec,
+    error::ENOTDIR,
     error::{Error, Result},
     fid::{Fid, NOFID},
     message::TMessage,
@@ -287,7 +288,7 @@ impl<S: Read + Write> Client<S> {
             self.open(fid, OREAD)?;
             self.read_dir_stats(fid)
         } else {
-            Ok(vec![stat])
+            Err(Error::from(ENOTDIR))
         };
         let _ = self.clunk(fid);
         result

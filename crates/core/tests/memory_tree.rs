@@ -1,12 +1,24 @@
 use r9p::{
+    blocking::Client as BlockingClient,
     client::{Client, ClientResponse, Completion},
-    error::{Result, EPERM},
+    codec,
+    error::{Result, ENOTDIR, EPERM},
     fid::NOFID,
     message::{RMessage, TMessage},
     qid::{Qid, DMDIR, QTDIR},
     server::{FileTree, OpenFile, ReadData, Server},
     stat::Stat,
 };
+
+#[cfg(unix)]
+use std::{
+    io::{Read, Write},
+    os::unix::net::UnixStream,
+    thread,
+};
+
+#[cfg(unix)]
+type TestResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 #[derive(Debug)]
 struct MemoryTree {
@@ -183,4 +195,62 @@ fn memory_tree_is_not_acme_or_racme_core() -> Result<()> {
         }
     );
     Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn blocking_list_path_rejects_file_paths() -> TestResult<()> {
+    let (client_stream, server_stream) = UnixStream::pair()?;
+    let handle = thread::spawn(move || serve_blocking_connection(server_stream));
+    let mut client = BlockingClient::connect(client_stream, "glenda", "", 8192)?;
+
+    let error = client
+        .list_path("/hello.txt")
+        .expect_err("listing a file path should fail");
+    assert_eq!(error.display_lossy().as_ref(), ENOTDIR);
+
+    let stats = client.list_path("/nested")?;
+    assert_eq!(stats.len(), 1);
+    assert_eq!(stats[0].name, b"note.txt");
+
+    drop(client);
+    handle
+        .join()
+        .map_err(|_| "server thread panicked".to_string())??;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn serve_blocking_connection(mut stream: UnixStream) -> TestResult<()> {
+    let mut server = Server::new(MemoryTree::new());
+    while let Some(message) = read_tmessage(&mut stream)? {
+        let reply = server.handle(message);
+        let frame = codec::encode_rmessage_checked(&reply, server.session().msize())?;
+        stream.write_all(&frame)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn read_tmessage(stream: &mut UnixStream) -> TestResult<Option<TMessage>> {
+    let mut prefix = [0_u8; 4];
+    match stream.read_exact(&mut prefix) {
+        Ok(()) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(Box::new(error)),
+    }
+    let size = u32::from_le_bytes(prefix);
+    let rest_len = usize::try_from(size - 4)?;
+    let mut frame = Vec::with_capacity(rest_len + 4);
+    frame.extend(prefix);
+    frame.resize(rest_len + 4, 0);
+    stream.read_exact(&mut frame[4..])?;
+    Ok(Some(codec::decode_tmessage(&frame)?))
 }

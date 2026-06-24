@@ -7,6 +7,7 @@ use crate::{
     },
     stat::{push_qid, push_string, push_u16, push_u32, push_u64, Cursor, Stat},
 };
+use std::io::{Read, Write};
 
 pub const FRAME_HEADER_SIZE: u32 = 7;
 pub const RREAD_HEADER_SIZE: u32 = 11;
@@ -39,6 +40,70 @@ impl Variant {
 
 pub fn clamp_read_count(msize: u32, requested: u32) -> u32 {
     requested.min(msize.saturating_sub(RREAD_HEADER_SIZE))
+}
+
+pub fn read_tmessage<R: Read>(reader: &mut R) -> Result<Option<TMessage>> {
+    read_frame(reader)?
+        .map(|frame| decode_tmessage(&frame))
+        .transpose()
+}
+
+pub fn read_rmessage<R: Read>(reader: &mut R) -> Result<Option<RMessage>> {
+    read_frame(reader)?
+        .map(|frame| decode_rmessage(&frame))
+        .transpose()
+}
+
+pub fn write_tmessage<W: Write>(writer: &mut W, message: &TMessage) -> Result<()> {
+    let frame = encode_tmessage(message)?;
+    writer
+        .write_all(&frame)
+        .and_then(|_| writer.flush())
+        .map_err(|error| Error::from(format!("write 9P request frame: {error}")))
+}
+
+pub fn write_rmessage_checked<W: Write>(
+    writer: &mut W,
+    msize: u32,
+    message: &RMessage,
+) -> Result<()> {
+    let frame = encode_rmessage_checked(message, msize)?;
+    writer
+        .write_all(&frame)
+        .and_then(|_| writer.flush())
+        .map_err(|error| Error::from(format!("write 9P response frame: {error}")))
+}
+
+fn read_frame<R: Read>(reader: &mut R) -> Result<Option<Vec<u8>>> {
+    let mut prefix = [0_u8; 4];
+    match reader.read_exact(&mut prefix) {
+        Ok(()) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::BrokenPipe
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(Error::from(format!("read 9P frame size: {error}"))),
+    }
+
+    let size = u32::from_le_bytes(prefix);
+    if size < FRAME_HEADER_SIZE {
+        return Err(Error::from(format!("short 9P frame size {size}")));
+    }
+    let rest_len = usize::try_from(size - 4)
+        .map_err(|_| Error::from(format!("oversized frame size {size}")))?;
+    let mut frame = Vec::with_capacity(usize::try_from(size).unwrap_or(rest_len + 4));
+    frame.extend(prefix);
+    frame.resize(rest_len + 4, 0);
+    reader
+        .read_exact(&mut frame[4..])
+        .map_err(|error| Error::from(format!("read 9P frame body: {error}")))?;
+    Ok(Some(frame))
 }
 
 pub fn max_write_payload(msize: u32) -> u32 {

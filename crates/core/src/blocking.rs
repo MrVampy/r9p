@@ -3,9 +3,9 @@ use crate::{
     codec,
     error::{Error, Result},
     fid::{Fid, NOFID},
-    message::{RMessage, TMessage},
-    qid::Qid,
-    stat::Stat,
+    message::TMessage,
+    qid::{Qid, DMDIR},
+    stat::{decode_dir_entries, Stat},
 };
 use std::{
     io::{Read, Write},
@@ -21,6 +21,7 @@ pub const ORDWR: u8 = 2;
 pub const OEXEC: u8 = 3;
 pub const OTRUNC: u8 = 0x10;
 pub const ORCLOSE: u8 = 0x40;
+pub const DEFAULT_READ_CHUNK: u32 = 65_536;
 
 pub trait ReadWrite: Read + Write + Send {}
 
@@ -272,6 +273,98 @@ impl<S: Read + Write> Client<S> {
         }
     }
 
+    pub fn stat_path(&mut self, path: &str) -> Result<Stat> {
+        let fid = self.walk_path(path)?;
+        let result = self.stat(fid);
+        let _ = self.clunk(fid);
+        result
+    }
+
+    pub fn list_path(&mut self, path: &str) -> Result<Vec<Stat>> {
+        let fid = self.walk_path(path)?;
+        let stat = self.stat(fid)?;
+        let result = if stat.mode & DMDIR != 0 {
+            self.open(fid, OREAD)?;
+            self.read_dir_stats(fid)
+        } else {
+            Ok(vec![stat])
+        };
+        let _ = self.clunk(fid);
+        result
+    }
+
+    pub fn read_path(&mut self, path: &str) -> Result<Vec<u8>> {
+        let fid = self.walk_path(path)?;
+        let open = self.open(fid, OREAD);
+        let result = match open {
+            Ok(_) => self.read_all(fid),
+            Err(error) => Err(error),
+        };
+        let _ = self.clunk(fid);
+        result
+    }
+
+    pub fn read_path_range(&mut self, path: &str, offset: u64, count: u32) -> Result<Vec<u8>> {
+        let fid = self.walk_path(path)?;
+        let open = self.open(fid, OREAD);
+        let result = match open {
+            Ok(_) => self.read(fid, offset, count),
+            Err(error) => Err(error),
+        };
+        let _ = self.clunk(fid);
+        result
+    }
+
+    pub fn write_path(&mut self, path: &str, offset: u64, data: &[u8]) -> Result<u32> {
+        let fid = self.walk_path(path)?;
+        let open = self.open(fid, OWRITE);
+        let result = match open {
+            Ok(_) => self.write(fid, offset, data),
+            Err(error) => Err(error),
+        };
+        let _ = self.clunk(fid);
+        result
+    }
+
+    pub fn rpc_path(&mut self, path: &str, data: &[u8]) -> Result<Vec<u8>> {
+        let fid = self.walk_path(path)?;
+        let open = self.open(fid, ORDWR);
+        let result = match open {
+            Ok(_) => {
+                let count = self.write(fid, 0, data)?;
+                if usize::try_from(count).unwrap_or(usize::MAX) != data.len() {
+                    Err(Error::from("short rpc request write"))
+                } else {
+                    self.read_all(fid)
+                }
+            }
+            Err(error) => Err(error),
+        };
+        let _ = self.clunk(fid);
+        result
+    }
+
+    pub fn read_all(&mut self, fid: Fid) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        let mut offset = 0_u64;
+        loop {
+            let data = self.read(fid, offset, DEFAULT_READ_CHUNK)?;
+            if data.is_empty() {
+                break;
+            }
+            offset = offset.saturating_add(
+                u64::try_from(data.len()).map_err(|_| Error::from("read count overflow"))?,
+            );
+            out.extend(data);
+        }
+        Ok(out)
+    }
+
+    pub fn read_dir_stats(&mut self, fid: Fid) -> Result<Vec<Stat>> {
+        let data = self.read_all(fid)?;
+        decode_dir_entries(&data)
+    }
+
     fn call_op(&mut self, op: Op) -> Result<Completion> {
         let expected_tag = op.tag;
         match self.call_message(op.message)? {
@@ -284,33 +377,14 @@ impl<S: Read + Write> Client<S> {
     }
 
     fn call_message(&mut self, message: TMessage) -> Result<ClientResponse> {
-        let frame = codec::encode_tmessage(&message)
-            .map_err(|error| Error::from(format!("encode 9P frame: {error}")))?;
-        self.stream
-            .write_all(&frame)
-            .map_err(|error| io_error("write 9P frame", error))?;
+        codec::write_tmessage(&mut self.stream, &message)?;
         let response = self.read_response()?;
         self.protocol.receive(response).map_err(protocol_error)
     }
 
-    fn read_response(&mut self) -> Result<RMessage> {
-        let mut prefix = [0_u8; 4];
-        self.stream
-            .read_exact(&mut prefix)
-            .map_err(|error| io_error("read 9P frame size", error))?;
-        let size = u32::from_le_bytes(prefix);
-        if size < codec::FRAME_HEADER_SIZE {
-            return Err(Error::from("short 9P frame"));
-        }
-        let rest_len = usize::try_from(size - 4).map_err(|_| Error::from("oversized 9P frame"))?;
-        let mut frame = Vec::with_capacity(usize::try_from(size).unwrap_or(rest_len + 4));
-        frame.extend(prefix);
-        frame.resize(rest_len + 4, 0);
-        self.stream
-            .read_exact(&mut frame[4..])
-            .map_err(|error| io_error("read 9P frame body", error))?;
-        codec::decode_rmessage(&frame)
-            .map_err(|error| Error::from(format!("decode 9P frame: {error}")))
+    fn read_response(&mut self) -> Result<crate::message::RMessage> {
+        codec::read_rmessage(&mut self.stream)?
+            .ok_or_else(|| Error::from("9P transport closed before response"))
     }
 }
 

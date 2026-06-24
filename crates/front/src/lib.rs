@@ -120,6 +120,7 @@ pub struct RequestContext {
     pub aname: String,
     pub session_id: u64,
     pub fid: Fid,
+    pub front_path: String,
     pub target_path: String,
     pub offset: u64,
     pub open_mode: u8,
@@ -130,6 +131,7 @@ impl RequestContext {
     fn from_parts(
         binding: &FidBinding,
         fid: Fid,
+        front_path: String,
         target_path: String,
         offset: u64,
         open_mode: u8,
@@ -141,6 +143,7 @@ impl RequestContext {
             aname: String::from_utf8_lossy(&binding.aname).into_owned(),
             session_id: binding.session_id,
             fid,
+            front_path,
             target_path,
             offset,
             open_mode,
@@ -187,6 +190,7 @@ struct Node {
     freshness_ref: Option<String>,
     wake_token: Option<String>,
     create_relay: Option<String>,
+    write_relay: Option<String>,
     body: Body,
 }
 
@@ -252,6 +256,7 @@ impl State {
                 freshness_ref: None,
                 wake_token: None,
                 create_relay: None,
+                write_relay: None,
                 body: Body::Dir(BTreeMap::new()),
             },
         );
@@ -331,7 +336,14 @@ impl State {
         let qid = self.qid_for(id)?;
         let (mode, length) = match &node.body {
             Body::Dir(_) => (DMDIR | 0o555, 0u64),
-            Body::File(bytes) => (0o444u32, bytes.len() as u64),
+            Body::File(bytes) => {
+                let mode = if node.write_relay.is_some() {
+                    0o666u32
+                } else {
+                    0o444u32
+                };
+                (mode, bytes.len() as u64)
+            }
             Body::Log(log) => (0o444u32, log.end()),
             Body::IntakeNew(_) => (0o222u32, 0u64),
             Body::Rpc(_) => (0o600u32, 0u64),
@@ -381,6 +393,7 @@ impl State {
                 freshness_ref: None,
                 wake_token: None,
                 create_relay: None,
+                write_relay: None,
                 body: Body::Dir(BTreeMap::new()),
             },
         );
@@ -452,6 +465,7 @@ impl State {
                         freshness_ref: None,
                         wake_token: None,
                         create_relay: None,
+                        write_relay: None,
                         body,
                     },
                 );
@@ -488,7 +502,7 @@ impl State {
         };
         match existing {
             Some(id) => {
-                if !matches!(self.node(id)?.body, Body::File(_)) {
+                if !matches!(self.node(id)?.body, Body::File(_) | Body::WriteRelay(_)) {
                     return Err(Error::from_static(EPERM));
                 }
                 self.apply_pushed_metadata(id, &metadata)?;
@@ -515,6 +529,7 @@ impl State {
                         freshness_ref: Some(metadata.freshness_ref),
                         wake_token: Some(metadata.wake_token),
                         create_relay: None,
+                        write_relay: None,
                         body: Body::File(bytes),
                     },
                 );
@@ -574,6 +589,7 @@ impl State {
                         freshness_ref: Some(metadata.freshness_ref),
                         wake_token: Some(metadata.wake_token),
                         create_relay: None,
+                        write_relay: None,
                         body: Body::Dir(BTreeMap::new()),
                     },
                 );
@@ -759,11 +775,14 @@ fn created_child_path(parent_path: &str, name: &str) -> String {
     }
 }
 
-fn open_allowed(body: &Body, mode: u8) -> bool {
+fn open_allowed(node: &Node, mode: u8) -> bool {
     if mode & !KNOWN_OPEN_BITS != 0 || mode & (OTRUNC | ORCLOSE) != 0 {
         return false;
     }
-    match body {
+    if node.write_relay.is_some() && mode & OPEN_MODE_MASK == OWRITE {
+        return true;
+    }
+    match &node.body {
         Body::Dir(_) | Body::File(_) | Body::Log(_) => mode & OPEN_MODE_MASK == OREAD,
         Body::IntakeNew(_) | Body::WriteRelay(_) => mode & OPEN_MODE_MASK == OWRITE,
         Body::Rpc(_) => mode & OPEN_MODE_MASK == ORDWR,
@@ -886,12 +905,27 @@ impl Front {
 
     pub fn register_write_relay(&self, path: &str) -> Result<()> {
         let mut state = self.lock()?;
-        let trimmed = path.trim_matches('/');
-        if trimmed.is_empty() {
-            return Err(Error::from_static(EPERM));
-        }
+        let trimmed = normalise_request_prefix(path)?;
         state.write_relay_prefixes.insert(trimmed.to_string());
-        state.place(trimmed, Body::WriteRelay(trimmed.to_string()))?;
+        match state.lookup_optional_path(&trimmed)? {
+            Some(id) => {
+                if matches!(state.node(id)?.body, Body::Dir(_)) {
+                    return Err(Error::from_static(EPERM));
+                }
+                if let Some(node) = state.nodes.get_mut(&id) {
+                    if matches!(node.body, Body::WriteRelay(_)) {
+                        node.body = Body::WriteRelay(trimmed.clone());
+                    }
+                    node.write_relay = Some(trimmed);
+                }
+            }
+            None => {
+                let id = state.place(&trimmed, Body::WriteRelay(trimmed.clone()))?;
+                if let Some(node) = state.nodes.get_mut(&id) {
+                    node.write_relay = Some(trimmed);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1514,7 +1548,7 @@ impl FileTree for FrontTree {
         if state.qid_for(id)?.path != qid.path {
             return Err(Error::from_static(EBADFID));
         }
-        if !open_allowed(&state.node(id)?.body, mode) {
+        if !open_allowed(state.node(id)?, mode) {
             return Err(Error::from_static(EPERM));
         }
         self.open_modes.insert(fid, mode);
@@ -1553,9 +1587,18 @@ impl FileTree for FrontTree {
             .to_string();
         let parent_path = state.path_relative_to(parent_id, binding.root)?;
         let target_path = created_child_path(&parent_path, &name_text);
+        let parent_front_path = state.path_relative_to(parent_id, ROOT_ID)?;
+        let front_path = created_child_path(&parent_front_path, &name_text);
         let parent_generation = state.node(parent_id)?.generation;
-        let request_context =
-            RequestContext::from_parts(&binding, fid, target_path, 0, mode, parent_generation);
+        let request_context = RequestContext::from_parts(
+            &binding,
+            fid,
+            front_path,
+            target_path,
+            0,
+            mode,
+            parent_generation,
+        );
         let request_id = state.next_request_id;
         state.next_request_id = state.next_request_id.saturating_add(1);
         state.create_relay_responses.insert(request_id, None);
@@ -1578,6 +1621,11 @@ impl FileTree for FrontTree {
         }
         let id = state.next_id;
         state.next_id = state.next_id.saturating_add(1);
+        let write_relay = if qtype & QTDIR != 0 {
+            None
+        } else {
+            Some(create_prefix.clone())
+        };
         let body = if qtype & QTDIR != 0 {
             Body::Dir(BTreeMap::new())
         } else {
@@ -1595,6 +1643,7 @@ impl FileTree for FrontTree {
                 freshness_ref: None,
                 wake_token: None,
                 create_relay: None,
+                write_relay,
                 body,
             },
         );
@@ -1637,10 +1686,12 @@ impl FileTree for FrontTree {
         let id = binding.node;
         let open_mode = self.open_modes.get(&fid).copied().unwrap_or(0);
         let target_path = state.path_relative_to(id, binding.root)?;
+        let front_path = state.path_relative_to(id, ROOT_ID)?;
         let pushed_generation = state.node(id)?.generation;
         let request_context = RequestContext::from_parts(
             &binding,
             fid,
+            front_path,
             target_path,
             offset,
             open_mode,
@@ -1665,8 +1716,14 @@ impl FileTree for FrontTree {
             self.front.shared.1.notify_all();
             return u32::try_from(data.len()).map_err(|_| Error::from_static(EPERM));
         }
-        if let Body::WriteRelay(prefix) = &state.node(id)?.body {
-            let prefix = prefix.clone();
+        let write_relay = state.node(id)?.write_relay.clone().or_else(|| {
+            if let Body::WriteRelay(prefix) = &state.node(id).ok()?.body {
+                Some(prefix.clone())
+            } else {
+                None
+            }
+        });
+        if let Some(prefix) = write_relay {
             let request_id = state.next_request_id;
             state.next_request_id = state.next_request_id.saturating_add(1);
             state.write_relay_responses.insert(request_id, None);
@@ -1789,6 +1846,7 @@ mod tests {
                 aname: "/".to_string(),
                 session_id: 1,
                 fid: 1,
+                front_path: prefix.to_string(),
                 target_path: prefix.to_string(),
                 offset: 0,
                 open_mode: OWRITE,
@@ -2408,6 +2466,7 @@ mod tests {
         assert_eq!(create.name, "calendar");
         assert_eq!(create.perm, 0o666);
         assert_eq!(create.mode, OWRITE);
+        assert_eq!(create.context.front_path, "/srv/calendar");
         assert_eq!(create.context.target_path, "/srv/calendar");
         assert!(done_rx.recv_timeout(Duration::from_millis(50)).is_err());
 
@@ -2416,6 +2475,7 @@ mod tests {
             .next_request_for_prefix("srv", Duration::from_secs(1))?
             .expect("dynamic write relay request");
         assert_eq!(write.prefix, "srv");
+        assert_eq!(write.context.front_path, "/srv/calendar");
         assert_eq!(write.context.target_path, "/srv/calendar");
         assert_eq!(write.bytes, b"descriptor");
         front.complete_write(
@@ -2430,6 +2490,49 @@ mod tests {
         assert_eq!(qid_version, 17);
         assert_eq!(wrote as usize, b"descriptor".len());
         writer.join().expect("writer join")?;
+
+        front.set_pushed_file(
+            "srv/calendar",
+            b"service-channel-report",
+            PushedFileMetadata {
+                qid_path: 42_000,
+                qid_version: 18,
+                generation: 120,
+                visibility_class: "runtime-reader".to_string(),
+                freshness_ref: "freshness:srv/calendar".to_string(),
+                wake_token: "wake:srv/calendar".to_string(),
+            },
+        )?;
+        let mut verifier = front.tree();
+        verifier.attach(1, b"alice", b"/")?;
+        let qids = walk_to(&mut verifier, 1, 2, &["srv", "calendar"]);
+        let stat = verifier.stat(qids[1])?;
+        assert_eq!(stat.qid.path, 42_000);
+        assert_eq!(stat.qid.version, 18);
+        assert_eq!(stat.mode & 0o444, 0o444);
+        assert_eq!(stat.mode & 0o222, 0o222);
+        let opened_read = verifier.open(2, qids[1], OREAD)?;
+        let report = verifier.read(2, opened_read.qid, 0, 4096)?;
+        assert_eq!(report, ReadData::Bytes(b"service-channel-report".to_vec()));
+
+        let qids = walk_to(&mut verifier, 1, 3, &["srv", "calendar"]);
+        verifier.open(3, qids[1], OWRITE)?;
+        let relay_front = front.clone();
+        let second_writer =
+            thread::spawn(move || verifier.write(3, qids[1], 0, b"updated descriptor"));
+        let update = relay_front
+            .next_request_for_prefix("srv", Duration::from_secs(1))?
+            .expect("refreshed service channel must still relay writes");
+        assert_eq!(update.context.front_path, "/srv/calendar");
+        assert_eq!(update.context.target_path, "/srv/calendar");
+        assert_eq!(update.bytes, b"updated descriptor");
+        front.complete_write(
+            "srv",
+            update.request_id,
+            u32::try_from(update.bytes.len()).expect("request length"),
+        )?;
+        let wrote = second_writer.join().expect("second writer join")?;
+        assert_eq!(wrote as usize, b"updated descriptor".len());
         Ok(())
     }
 

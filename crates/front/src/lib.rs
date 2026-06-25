@@ -1572,16 +1572,15 @@ impl FileTree for FrontTree {
         if !matches!(state.node(parent_id)?.body, Body::Dir(_)) {
             return Err(Error::from_static(ENOTDIR));
         }
-        if let Body::Dir(children) = &state.node(parent_id)?.body {
-            if children.contains_key(name) {
-                return Err(Error::from_static("file exists"));
+        let create_prefix = state.node(parent_id)?.create_relay.clone();
+        if create_prefix.is_none() {
+            if let Body::Dir(children) = &state.node(parent_id)?.body {
+                if children.contains_key(name) {
+                    return Err(Error::from_static("file exists"));
+                }
             }
         }
-        let create_prefix = state
-            .node(parent_id)?
-            .create_relay
-            .clone()
-            .ok_or_else(|| Error::from_static(EPERM))?;
+        let create_prefix = create_prefix.ok_or_else(|| Error::from_static(EPERM))?;
         let name_text = std::str::from_utf8(name)
             .map_err(|_| Error::from_static("create name is not utf-8"))?
             .to_string();
@@ -2546,6 +2545,48 @@ mod tests {
         )?;
         let wrote = second_writer.join().expect("second writer join")?;
         assert_eq!(wrote as usize, b"updated descriptor".len());
+        Ok(())
+    }
+
+    #[test]
+    fn create_relay_delegates_existing_child_name_to_backend_policy() -> Result<()> {
+        let front = Front::new();
+        front.set_pushed_directory(
+            "srv/wait",
+            PushedDirectoryMetadata {
+                qid_path: 8001,
+                qid_version: 7,
+                generation: 70,
+                visibility_class: "runtime-reader".to_string(),
+                freshness_ref: "freshness:srv/wait".to_string(),
+                wake_token: "wake:srv/wait".to_string(),
+            },
+        )?;
+        front.register_create_relay("srv")?;
+        front.set_wait_timeout(Duration::from_secs(5))?;
+        let writer_front = front.clone();
+        let (done_tx, done_rx) = mpsc::channel();
+        let writer = thread::spawn(move || {
+            let mut tree = writer_front.tree();
+            tree.attach(1, b"alice", b"/")?;
+            let qids = walk_to(&mut tree, 1, 2, &["srv"]);
+            let result = tree.create(2, qids[0], b"wait", 0o666, OWRITE);
+            done_tx.send(result).expect("send create result");
+            Ok::<(), Error>(())
+        });
+
+        let create = front.next_create_request_for_prefix_blocking("srv")?;
+        assert_eq!(create.prefix, "srv");
+        assert_eq!(create.name, "wait");
+        assert_eq!(create.context.front_path, "/srv/wait");
+        assert_eq!(create.context.target_path, "/srv/wait");
+        front.reject_create("srv", create.request_id, "reserved_name")?;
+
+        let result = done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("writer should finish");
+        assert_eq!(result.unwrap_err().to_string(), "reserved_name");
+        writer.join().expect("writer join")?;
         Ok(())
     }
 

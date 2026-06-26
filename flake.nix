@@ -19,9 +19,35 @@
             src = self;
             cargoLock.lockFile = ./Cargo.lock;
           };
+          front = pkgs.rustPlatform.buildRustPackage {
+            pname = "r9p-front";
+            version = "0.1.0";
+            src = self;
+            cargoLock.lockFile = ./Cargo.lock;
+            cargoBuildFlags = [ "-p" "front" ];
+            doCheck = false;
+            nativeBuildInputs = with pkgs; [
+              clang
+              mold
+              binutils
+            ];
+            installPhase = ''
+              runHook preInstall
+              mkdir -p "$out/lib"
+              lib="$(find target -name 'libfront.so' -type f | head -n1)"
+              if [ -z "$lib" ]; then
+                echo "libfront.so not found under cargo target dir" >&2
+                find target -name 'libfront*' >&2 || true
+                exit 1
+              fi
+              install -Dm644 "$lib" "$out/lib/libfront.so"
+              runHook postInstall
+            '';
+          };
         in
         {
           packages.default = r9p;
+          packages.front = front;
           packages.r9p = r9p;
 
           devShells.default = pkgs.mkShell {

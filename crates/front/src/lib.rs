@@ -1016,6 +1016,21 @@ impl Front {
         Ok(())
     }
 
+    pub fn retain_principal_roots<'a, I>(&self, unames: I) -> Result<()>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let retain = unames
+            .into_iter()
+            .map(|uname| uname.as_bytes().to_vec())
+            .collect::<BTreeSet<_>>();
+        let mut state = self.lock()?;
+        state
+            .principal_roots
+            .retain(|uname, _root| retain.contains(uname));
+        Ok(())
+    }
+
     pub fn next_request(&self, timeout: Duration) -> Result<Option<IntakeRequest>> {
         let deadline = Instant::now() + timeout;
         let mut state = self.lock()?;
@@ -2414,6 +2429,33 @@ mod tests {
             .attach(1, b"alice", b"not-admitted")
             .expect_err("principal without admitted aname must fail closed");
         assert_eq!(error.message(), b"principal aname unavailable");
+        Ok(())
+    }
+
+    #[test]
+    fn retained_principal_roots_drop_stale_unames() -> Result<()> {
+        let front = Front::new();
+        front.set("views/control/status", b"control-visible")?;
+        front.set("views/service/status", b"service-visible")?;
+        front.set_principal_root_aname("vault.runtime", "runtime-door-feed", "views/control")?;
+        front.set_principal_root_aname("/srv/old", "/", "views/service")?;
+
+        front.retain_principal_roots(["vault.runtime"])?;
+
+        let mut control = front.tree();
+        control.attach(1, b"vault.runtime", b"runtime-door-feed")?;
+        let status = walk_to(&mut control, 1, 2, &["status"]);
+        assert_eq!(status.len(), 1);
+        assert_eq!(
+            control.read(2, status[0], 0, 4096)?,
+            ReadData::Bytes(b"control-visible".to_vec())
+        );
+
+        let mut stale = front.tree();
+        let error = stale
+            .attach(1, b"/srv/old", b"/")
+            .expect_err("retained roots must remove stale service callers");
+        assert_eq!(error.message(), b"principal root unavailable");
         Ok(())
     }
 

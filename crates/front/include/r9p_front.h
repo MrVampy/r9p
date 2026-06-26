@@ -2,10 +2,10 @@
 #define R9P_FRONT_H
 
 /*
- * r9p front C ABI, version 12.
+ * r9p front C ABI, version 13.
  *
  * Contract rules:
- * - r9p_front_abi_version() must return 12 before v12-only calls are made.
+ * - r9p_front_abi_version() must return 13 before v13-only calls are made.
  *   Hosts that only use the v9/v10 call set may accept their known versions.
  * - r9p_front_new() returns an owned handle; every handle must be released
  *   exactly once with r9p_front_free(). Calls other than r9p_front_free()
@@ -105,6 +105,13 @@
  *   library default. r9p_front_reconcile_r9p_exports nudges all maintainers
  *   immediately. r9p_front_stop/free stop all maintainers before releasing
  *   the handle.
+ * - r9p_front_client_rpc is the v13 outbound 9P client helper. It connects to
+ *   endpoint_bind, attaches as uname/aname, opens path O_RDWR, writes the
+ *   request, reads the response on the same fid, and copies that response into
+ *   caller-provided memory. It returns ok only for a complete single-request
+ *   exchange. response_len_out is always set to the full response length when
+ *   the exchange succeeds, even if response_cap is too small and the call
+ *   returns internal failure.
  */
 
 #include <stddef.h>
@@ -212,6 +219,12 @@ int32_t r9p_front_maintain_r9p_export(
     size_t host_firewall_admission_len, const char *namespace_mount_paths,
     size_t namespace_mount_paths_len);
 int32_t r9p_front_reconcile_r9p_exports(r9p_front *front);
+int32_t r9p_front_client_rpc(
+    r9p_front *front, const char *endpoint_bind, size_t endpoint_bind_len,
+    const char *uname, size_t uname_len, const char *aname, size_t aname_len,
+    const char *path, size_t path_len, const uint8_t *request,
+    size_t request_len, uint32_t msize, uint8_t *response_out,
+    size_t response_cap, size_t *response_len_out);
 intptr_t r9p_front_last_error(r9p_front *front, uint8_t *buf, size_t cap);
 
 #endif

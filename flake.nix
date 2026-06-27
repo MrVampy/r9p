@@ -18,6 +18,11 @@
             version = "0.1.0";
             src = self;
             cargoLock.lockFile = ./Cargo.lock;
+            nativeBuildInputs = with pkgs; [
+              clang
+              mold
+              binutils
+            ];
           };
           front = pkgs.rustPlatform.buildRustPackage {
             pname = "r9p-front";

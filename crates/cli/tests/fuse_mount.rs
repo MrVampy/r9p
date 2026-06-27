@@ -1,6 +1,6 @@
 use std::{
-    fs,
-    io::{self, Read, Write},
+    fs::{self, OpenOptions},
+    io::{self, Read, Seek, SeekFrom, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -94,6 +94,143 @@ fn fuse_mount_handles_parallel_recursive_reads() -> io::Result<()> {
     let _ = fs::remove_dir_all(&mountpoint);
     let _ = fs::remove_file(descriptor);
     let _ = fs::remove_file(diagnostics);
+    Ok(())
+}
+
+#[test]
+#[ignore = "host-gated: requires /dev/fuse, fusermount, and user mount permission"]
+fn fuse_mount_supports_create_truncate_and_offset_writes() -> io::Result<()> {
+    if !host_can_run_fuse() {
+        return Ok(());
+    }
+
+    let root = unique_temp_dir("r9p-fuse-write-export")?;
+    let mountpoint = unique_temp_dir("r9p-fuse-write-mount")?;
+    let descriptor = root.with_extension("desc");
+    seed_tree(&root)?;
+
+    let mut export = ChildGuard::spawn(
+        Command::new(r9p_bin())
+            .arg("export")
+            .arg("--bind")
+            .arg("127.0.0.1:0")
+            .arg("--writable")
+            .arg("--descriptor-file")
+            .arg(&descriptor)
+            .arg(&root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )?;
+    let endpoint = wait_for_descriptor_endpoint(&descriptor)?;
+
+    let mut mount = ChildGuard::spawn(
+        Command::new(r9p_bin())
+            .arg("mount")
+            .arg("--request-timeout")
+            .arg("1")
+            .arg("--control-timeout")
+            .arg("1")
+            .arg(endpoint)
+            .arg(&mountpoint)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )?;
+    wait_for_mounted_file(&mountpoint.join("dir-0/file-0.txt"))?;
+
+    fs::write(mountpoint.join("dir-0/created.txt"), "created\n")?;
+    wait_for_host_file_content(&root.join("dir-0/created.txt"), "created\n")?;
+
+    let target = mountpoint.join("dir-0/file-0.txt");
+    fs::write(&target, "short\n")?;
+    wait_for_host_file_content(&root.join("dir-0/file-0.txt"), "short\n")?;
+
+    let mut offset_write = OpenOptions::new().write(true).open(&target)?;
+    offset_write.seek(SeekFrom::Start(3))?;
+    offset_write.write_all(b"++")?;
+    offset_write.flush()?;
+    drop(offset_write);
+    wait_for_host_file_content(&root.join("dir-0/file-0.txt"), "sho++\n")?;
+
+    unmount(&mountpoint);
+    mount.wait_or_kill()?;
+    export.kill();
+    export.wait_or_kill()?;
+    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(&mountpoint);
+    let _ = fs::remove_file(descriptor);
+    Ok(())
+}
+
+#[test]
+#[ignore = "host-gated: requires /dev/fuse, fusermount, and user mount permission"]
+fn fuse_mount_replays_read_only_open_handle_after_export_restart() -> io::Result<()> {
+    if !host_can_run_fuse() {
+        return Ok(());
+    }
+
+    let root = unique_temp_dir("r9p-fuse-replay-export")?;
+    let mountpoint = unique_temp_dir("r9p-fuse-replay-mount")?;
+    let descriptor = root.with_extension("desc");
+    seed_tree(&root)?;
+
+    let mut export = ChildGuard::spawn(
+        Command::new(r9p_bin())
+            .arg("export")
+            .arg("--bind")
+            .arg("127.0.0.1:0")
+            .arg("--descriptor-file")
+            .arg(&descriptor)
+            .arg(&root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )?;
+    let endpoint = wait_for_descriptor_endpoint(&descriptor)?;
+
+    let mut mount = ChildGuard::spawn(
+        Command::new(r9p_bin())
+            .arg("mount")
+            .arg("--request-timeout")
+            .arg("1")
+            .arg("--control-timeout")
+            .arg("1")
+            .arg(&endpoint)
+            .arg(&mountpoint)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )?;
+    let mounted_file = mountpoint.join("dir-0/file-0.txt");
+    wait_for_mounted_file(&mounted_file)?;
+    let mut open_file = fs::File::open(&mounted_file)?;
+
+    export.kill();
+    export.wait_or_kill()?;
+    let mut restarted_export = ChildGuard::spawn(
+        Command::new(r9p_bin())
+            .arg("export")
+            .arg("--bind")
+            .arg(&endpoint)
+            .arg(&root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )?;
+    wait_for_mounted_file(&mounted_file)?;
+
+    let mut contents = String::new();
+    open_file.read_to_string(&mut contents)?;
+    if !contents.contains("dir=0 file=0") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "replayed open handle returned unexpected contents",
+        ));
+    }
+
+    unmount(&mountpoint);
+    mount.wait_or_kill()?;
+    restarted_export.kill();
+    restarted_export.wait_or_kill()?;
+    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(&mountpoint);
+    let _ = fs::remove_file(descriptor);
     Ok(())
 }
 
@@ -289,6 +426,25 @@ fn wait_for_mounted_file(path: &Path) -> io::Result<()> {
                 io::ErrorKind::TimedOut,
                 "mounted file did not become readable",
             ));
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn wait_for_host_file_content(path: &Path, expected: &str) -> io::Result<()> {
+    let started = Instant::now();
+    loop {
+        match fs::read_to_string(path) {
+            Ok(contents) if contents == expected => return Ok(()),
+            Ok(contents) if started.elapsed() > Duration::from_secs(5) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("unexpected host file contents {contents:?}"),
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if started.elapsed() > Duration::from_secs(5) => return Err(error),
+            Err(_) => {}
         }
         thread::sleep(Duration::from_millis(20));
     }

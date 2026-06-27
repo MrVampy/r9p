@@ -671,7 +671,7 @@ mod tests {
     fn namespace_shape_errors_are_reconnect_candidates() {
         assert!(is_namespace_shape_error(&Error::new(
             libc::ENOENT,
-            "walk failed after namespace reload",
+            "walk failed after namespace refresh",
         )));
         assert!(is_namespace_shape_error(&Error::new(
             libc::ESTALE,

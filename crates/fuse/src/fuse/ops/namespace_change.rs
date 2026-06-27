@@ -85,8 +85,8 @@ mod tests {
 
     #[test]
     fn control_writes_can_replay_after_namespace_refresh_only_from_start() {
-        let ctl = path(&[b"runtime", b"framework", b"candidates", b"full", b"ctl"]);
-        let command = path(&[b"runtime", b"framework", b"reload", b"requests", b"new"]);
+        let ctl = path(&[b"srv", b"example", b"ctl"]);
+        let command = path(&[b"commands", b"new"]);
         let file = path(&[b"entries", b"note"]);
 
         assert!(write_can_replay_after_namespace_refresh(&ctl, false, 0));

@@ -703,7 +703,7 @@ mod tests {
 
     #[test]
     fn rejects_namespace_service_paths() {
-        let error = namespace_service_path(Path::new("/tmp/namespace"), "runtime/recovery")
+        let error = namespace_service_path(Path::new("/tmp/namespace"), "example/service")
             .expect_err("service path should be rejected");
         assert_eq!(error.errno, libc::EINVAL);
         assert!(error.message().contains("single path element"));
@@ -766,13 +766,13 @@ mod tests {
         let _env = ENV_LOCK.lock().expect("env lock should not be poisoned");
         let namespace = unique_namespace_dir("namespace");
         fs::create_dir_all(&namespace).expect("namespace dir should be created");
-        let socket_path = namespace.join("runtime-recovery");
+        let socket_path = namespace.join("example-service");
         let previous = env::var("NAMESPACE").ok();
         env::set_var("NAMESPACE", &namespace);
         let server = spawn_unix_root_server(&socket_path);
 
         let client = Client::connect_with_timeout(
-            "namespace!runtime-recovery",
+            "namespace!example-service",
             "codex",
             "/",
             8192,

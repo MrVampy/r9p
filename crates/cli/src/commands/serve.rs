@@ -13,7 +13,7 @@ use crate::export_descriptor::{
     AuthBoundary, AuthClass, ExportDescriptor, ExportMode, Protocol, TransportClass,
     EXPORT_FORMAT_V1,
 };
-use fs::LocalTree;
+use fs::{LocalTree, LocalTreeConfig};
 use r9p::{
     codec,
     message::TMessage,
@@ -61,6 +61,7 @@ pub(crate) struct ServeConfig {
     pub(crate) aname: String,
     pub(crate) msize: u32,
     pub(crate) max_fids: usize,
+    pub(crate) writable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,6 +95,7 @@ pub(crate) fn parse_serve_config(global: Config, args: Vec<String>) -> CliResult
 
     let mut bind = None;
     let mut max_fids = DEFAULT_MAX_FIDS;
+    let mut writable = false;
     let mut positional = Vec::new();
     let mut index = 0_usize;
     while index < args.len() {
@@ -113,6 +115,9 @@ pub(crate) fn parse_serve_config(global: Config, args: Vec<String>) -> CliResult
                 max_fids = value
                     .parse::<usize>()
                     .map_err(|_| cli_error(format!("invalid max fid count {value}")))?;
+            }
+            "--writable" => {
+                writable = true;
             }
             "-h" | "--help" => serve_usage(0),
             arg if arg.starts_with('-') => {
@@ -136,6 +141,7 @@ pub(crate) fn parse_serve_config(global: Config, args: Vec<String>) -> CliResult
         aname: global.aname,
         msize: global.msize,
         max_fids,
+        writable,
     })
 }
 
@@ -148,6 +154,7 @@ pub(crate) fn parse_export_config(global: Config, args: Vec<String>) -> CliResul
 
     let mut bind = None;
     let mut max_fids = DEFAULT_MAX_FIDS;
+    let mut writable = false;
     let mut descriptor_file = None;
     let mut descriptor_format = "machine".to_string();
     let mut auth = AuthBoundary::none();
@@ -171,6 +178,9 @@ pub(crate) fn parse_export_config(global: Config, args: Vec<String>) -> CliResul
                 max_fids = value
                     .parse::<usize>()
                     .map_err(|_| cli_error(format!("invalid max fid count {value}")))?;
+            }
+            "--writable" => {
+                writable = true;
             }
             "--descriptor" => {
                 index += 1;
@@ -232,6 +242,7 @@ pub(crate) fn parse_export_config(global: Config, args: Vec<String>) -> CliResul
             aname: global.aname,
             msize: global.msize,
             max_fids,
+            writable,
         },
         descriptor_file,
         auth,
@@ -390,8 +401,13 @@ fn serve_connection<S>(mut stream: S, config: ServeConfig) -> CliResult<()>
 where
     S: Read + Write,
 {
-    let tree = LocalTree::open(&config.root)
-        .map_err(|error| cli_error(format!("open export root: {error}")))?;
+    let tree = LocalTree::open_with_config(
+        &config.root,
+        LocalTreeConfig {
+            writable: config.writable,
+        },
+    )
+    .map_err(|error| cli_error(format!("open export root: {error}")))?;
     let mut server = Server::with_config(
         tree,
         ServerConfig {
@@ -532,7 +548,11 @@ fn export_descriptor(config: &ExportConfig, bound: &BoundListener) -> CliResult<
         uname: config.serve.uname.clone(),
         exported_root: aname,
         transport_class: bound.transport_class(),
-        mode: ExportMode::ReadOnly,
+        mode: if config.serve.writable {
+            ExportMode::ReadWrite
+        } else {
+            ExportMode::ReadOnly
+        },
         auth: config.auth.clone(),
         pid: std::process::id(),
         protocol: Protocol::NineP2000,
@@ -559,13 +579,13 @@ fn write_descriptor(config: &ExportConfig, descriptor: &ExportDescriptor) -> Cli
 }
 
 fn serve_usage(code: i32) -> ! {
-    eprintln!("usage: r9p serve [--bind address] [--max-fids count] root");
+    eprintln!("usage: r9p serve [--bind address] [--max-fids count] [--writable] root");
     std::process::exit(code);
 }
 
 fn export_usage(code: i32) -> ! {
     eprintln!(
-        "usage: r9p export [--bind address] [--max-fids count] [--descriptor machine] [--descriptor-file path] [--auth boundary] [--descriptor-field key=value] root"
+        "usage: r9p export [--bind address] [--max-fids count] [--writable] [--descriptor machine] [--descriptor-file path] [--auth boundary] [--descriptor-field key=value] root"
     );
     std::process::exit(code);
 }
@@ -605,6 +625,7 @@ mod tests {
             BindTarget::Tcp("127.0.0.1:0".parse::<SocketAddr>().expect("socket address"))
         );
         assert_eq!(config.root, PathBuf::from("/tmp/export"));
+        assert!(!config.writable);
     }
 
     #[test]
@@ -735,5 +756,15 @@ mod tests {
                 .map(String::as_str),
             Some("/.vault/source-export.bundle")
         );
+    }
+
+    #[test]
+    fn parses_writable_export_mode() {
+        let config = parse_export_config(
+            global(),
+            vec!["--writable".to_string(), "/tmp/export".to_string()],
+        )
+        .expect("export config should parse");
+        assert!(config.serve.writable);
     }
 }

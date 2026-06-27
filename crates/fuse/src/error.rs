@@ -95,8 +95,6 @@ const PLAN9_ERRNO_PATTERNS: &[(&str, i32)] = &[
     ("directory", libc::ENOTDIR),
     ("not empty", libc::ENOTEMPTY),
     ("preflight", libc::EINVAL),
-    ("missing_import_closure", libc::EINVAL),
-    ("missing import closure", libc::EINVAL),
     ("rejected", libc::EINVAL),
     ("decode", libc::EINVAL),
     ("decode_failed", libc::EINVAL),
@@ -157,14 +155,11 @@ mod tests {
     }
 
     #[test]
-    fn reload_preflight_failure_is_invalid_argument() {
-        let message = concat!(
-            "runtime_framework_reload_activation_preflight_failed:",
-            "framework_reload_automatic_participant_activation_preflight_failed:",
-            "runtime-recovery:",
-            "runtime_participant_control_unsupported:runtime-recovery:restart"
+    fn preflight_failure_is_invalid_argument() {
+        assert_eq!(
+            errno_for_9p_error("namespace_preflight_failed:missing_required_field"),
+            libc::EINVAL
         );
-        assert_eq!(errno_for_9p_error(message), libc::EINVAL);
     }
 
     #[test]
@@ -182,30 +177,20 @@ mod tests {
     }
 
     #[test]
-    fn maps_vault_admission_and_reload_diagnostics() {
-        assert_eq!(
-            errno_for_9p_error(
-                "runtime_framework_reload_missing_import_closure:module:contracts@types"
-            ),
-            libc::EINVAL
-        );
-        assert_eq!(
-            errno_for_9p_error(
-                "framework_reload_automatic_participant_activation_preflight_failed"
-            ),
-            libc::EINVAL
-        );
+    fn maps_common_admission_diagnostics() {
+        assert_eq!(errno_for_9p_error("preflight failed"), libc::EINVAL);
+        assert_eq!(errno_for_9p_error("invalid request shape"), libc::EINVAL);
         assert_eq!(errno_for_9p_error("not writable"), libc::EACCES);
     }
 
     #[test]
-    fn maps_machine_style_vault_errors() {
+    fn maps_machine_style_errors() {
         assert_eq!(
-            errno_for_9p_error("r9p_client_command_timeout:read"),
+            errno_for_9p_error("client_command_timeout:read"),
             libc::ETIMEDOUT
         );
         assert_eq!(
-            errno_for_9p_error("remote_worktree_import_not_implemented"),
+            errno_for_9p_error("operation_not_implemented"),
             libc::ENOTSUP
         );
         assert_eq!(
@@ -219,7 +204,7 @@ mod tests {
     #[test]
     fn unknown_remote_error_stays_remote_io() {
         assert_eq!(
-            errno_for_9p_error("vault-specific gate failed"),
+            errno_for_9p_error("application-specific gate failed"),
             libc::EREMOTEIO
         );
     }

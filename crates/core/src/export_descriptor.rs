@@ -31,6 +31,7 @@ pub enum TransportClass {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportMode {
     ReadOnly,
+    ReadWrite,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,12 +226,14 @@ impl ExportMode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ReadOnly => "ro",
+            Self::ReadWrite => "rw",
         }
     }
 
     pub fn parse(value: &str) -> Result<Self> {
         match value {
             "ro" => Ok(Self::ReadOnly),
+            "rw" => Ok(Self::ReadWrite),
             _ => Err(Error::from(format!("unknown mode {value}"))),
         }
     }
@@ -480,6 +483,16 @@ mod tests {
     }
 
     #[test]
+    fn descriptor_round_trips_read_write_mode() {
+        let mut descriptor = descriptor();
+        descriptor.mode = ExportMode::ReadWrite;
+        let rendered = descriptor.render().expect("descriptor should render");
+        assert!(rendered.contains("mode\trw\n"));
+        let parsed = ExportDescriptor::parse(&rendered).expect("descriptor should parse");
+        assert_eq!(parsed.mode, ExportMode::ReadWrite);
+    }
+
+    #[test]
     fn descriptor_rejects_duplicate_fields() {
         let input = "format\tr9p-export.v1\nformat\tr9p-export.v1\n";
         assert!(ExportDescriptor::parse(input).is_err());
@@ -498,7 +511,7 @@ mod tests {
         assert!(ExportDescriptor::parse(&rendered).is_err());
 
         let mut rendered = descriptor().render().expect("descriptor should render");
-        rendered = rendered.replace("mode\tro", "mode\trw");
+        rendered = rendered.replace("mode\tro", "mode\tbad");
         assert!(ExportDescriptor::parse(&rendered).is_err());
     }
 

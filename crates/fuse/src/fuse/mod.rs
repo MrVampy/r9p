@@ -33,7 +33,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use util::duration_parts;
 use wire::{FuseAttr, FuseAttrOut, FuseEntryOut};
@@ -278,10 +278,17 @@ impl R9pFuse {
     pub(in crate::fuse) fn cached_node_stat_if_fresh(&self, nodeid: u64) -> Result<Option<Stat>> {
         let nodes = self.nodes()?;
         let node = nodes.node(nodeid)?;
-        match (node.fid, node.needs_rebind) {
-            (None, false) => Ok(Some(node.stat.clone())),
-            _ => Ok(None),
+        if node.needs_rebind || self.config.attr_timeout.is_zero() {
+            return Ok(None);
         }
+        if !stat_cache_valid_at(
+            node.stat_cached_at,
+            Instant::now(),
+            self.config.attr_timeout,
+        ) {
+            return Ok(None);
+        }
+        Ok(Some(node.stat.clone()))
     }
 
     pub(in crate::fuse) fn invalidate_namespace_bindings_after_reply(
@@ -527,6 +534,10 @@ fn normalize_config(config: &mut Config) {
     }
 }
 
+fn stat_cache_valid_at(cached_at: Instant, now: Instant, timeout: Duration) -> bool {
+    !timeout.is_zero() && now.duration_since(cached_at) <= timeout
+}
+
 #[cfg(test)]
 mod tests {
     use super::ops::encode_dirents;
@@ -536,14 +547,14 @@ mod tests {
     };
     use super::wire::FOPEN_DIRECT_IO;
     use super::{
-        change_feed, default_congestion_threshold, normalize_config, Config,
+        change_feed, default_congestion_threshold, normalize_config, stat_cache_valid_at, Config,
         DEFAULT_CHANGE_FEED_POLL_INTERVAL, DEFAULT_MAX_BACKGROUND, DEFAULT_MAX_WORKERS,
     };
     use crate::error::Error;
     use crate::node::DirEntry;
     use crate::p9::{ORDWR, OREAD, OTRUNC, OWRITE};
     use r9p::{qid::Qid, stat::Stat};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn maps_truncating_write_flags_to_9p_mode() {
@@ -748,6 +759,27 @@ mod tests {
             config.congestion_threshold,
             default_congestion_threshold(DEFAULT_MAX_BACKGROUND)
         );
+    }
+
+    #[test]
+    fn stat_cache_validity_obeys_configured_ttl() {
+        let cached_at = Instant::now();
+        assert!(!stat_cache_valid_at(cached_at, cached_at, Duration::ZERO));
+        assert!(stat_cache_valid_at(
+            cached_at,
+            cached_at + Duration::from_millis(999),
+            Duration::from_secs(1)
+        ));
+        assert!(stat_cache_valid_at(
+            cached_at,
+            cached_at + Duration::from_secs(1),
+            Duration::from_secs(1)
+        ));
+        assert!(!stat_cache_valid_at(
+            cached_at,
+            cached_at + Duration::from_millis(1001),
+            Duration::from_secs(1)
+        ));
     }
 
     fn linux_parse_dirent_names(bytes: &[u8]) -> Vec<String> {

@@ -63,7 +63,12 @@ impl R9pFuse {
         let input = read_struct::<FuseFlushIn>(payload)?;
         let handle = self.nodes()?.handle(input.fh)?.clone();
         let mut invalidate_after_reply = false;
-        if handle.write_on_release && handle.close_commit && !handle.close_commit_flushed {
+        if flush_should_close_commit(
+            handle.write_on_release,
+            handle.close_commit,
+            handle.close_commit_flushed,
+            handle.bytes_written,
+        ) {
             match handle
                 .client
                 .clunk_timeout(handle.fid, self.control_timeout())
@@ -120,7 +125,7 @@ impl R9pFuse {
     ) -> Result<()> {
         let input = read_struct::<FuseFsyncIn>(payload)?;
         self.ensure_handle_known(input.fh)?;
-        // There is no 9P2000 fsync verb to forward. Writable Vault backends
+        // There is no 9P2000 fsync verb to forward. Writable 9P services
         // expose durability through their own namespace control surfaces; the
         // FUSE bridge acknowledges fsync only after verifying the handle is
         // still live.
@@ -181,7 +186,7 @@ fn requested_access_is_allowed(mask: u32, mode: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::requested_access_is_allowed;
+    use super::{flush_should_close_commit, requested_access_is_allowed};
 
     #[test]
     fn access_masks_follow_synthesized_mode_bits() {
@@ -191,4 +196,22 @@ mod tests {
         assert!(!requested_access_is_allowed(libc::W_OK as u32, 0o444));
         assert!(!requested_access_is_allowed(libc::X_OK as u32, 0o644));
     }
+
+    #[test]
+    fn close_commit_flush_waits_until_handle_has_written_bytes() {
+        assert!(!flush_should_close_commit(true, true, false, 0));
+        assert!(flush_should_close_commit(true, true, false, 1));
+        assert!(!flush_should_close_commit(true, true, true, 1));
+        assert!(!flush_should_close_commit(true, false, false, 1));
+        assert!(!flush_should_close_commit(false, true, false, 1));
+    }
+}
+
+fn flush_should_close_commit(
+    write_on_release: bool,
+    close_commit: bool,
+    close_commit_flushed: bool,
+    bytes_written: u64,
+) -> bool {
+    write_on_release && close_commit && !close_commit_flushed && bytes_written > 0
 }

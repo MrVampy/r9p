@@ -464,11 +464,11 @@ mod tests {
     fn parses_fuse_connection_id_from_mountinfo() {
         let mountinfo = concat!(
             "42 28 0:37 / /sys/fs/fuse/connections rw - fusectl fusectl rw\n",
-            "68 30 0:57 / /home/mrvamp/Vault/.vault/live rw - fuse /dev/fuse rw,user_id=1000\n",
+            "68 30 0:57 / /home/mrvamp/example/.vault/live rw - fuse /dev/fuse rw,user_id=1000\n",
         );
         assert_eq!(
             Some(57),
-            parse_connection_id_from_mountinfo(mountinfo, "/home/mrvamp/Vault/.vault/live")
+            parse_connection_id_from_mountinfo(mountinfo, "/home/mrvamp/example/.vault/live")
         );
     }
 

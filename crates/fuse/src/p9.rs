@@ -696,9 +696,9 @@ mod tests {
 
     #[test]
     fn resolves_namespace_service_under_namespace_dir() {
-        let path = namespace_service_path(Path::new("/tmp/namespace"), "runtime-recovery")
+        let path = namespace_service_path(Path::new("/tmp/namespace"), "example-service")
             .expect("service should resolve");
-        assert_eq!(path, PathBuf::from("/tmp/namespace/runtime-recovery"));
+        assert_eq!(path, PathBuf::from("/tmp/namespace/example-service"));
     }
 
     #[test]

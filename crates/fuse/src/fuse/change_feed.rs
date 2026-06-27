@@ -1,8 +1,8 @@
 //! Runtime namespace-change feed consumer.
 //!
-//! The mount consumes generic path-change records only. Vault-specific domain
-//! events are projected into this shape by the runtime before they reach this
-//! Rust mechanism.
+//! The mount consumes generic path-change records only. Application-specific
+//! domain events are projected into this shape before they reach this Rust
+//! mechanism.
 
 use super::{
     invalidation::{notify_kernel_invalidations, KernelInvalidation},

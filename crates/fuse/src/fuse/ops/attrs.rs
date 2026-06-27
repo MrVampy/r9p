@@ -1,4 +1,4 @@
-//! `getattr` / `setattr` op handlers, including the Vault-specific truncate
+//! `getattr` / `setattr` op handlers, including the close-commit truncate
 //! fallback.
 
 use crate::{
@@ -12,7 +12,7 @@ use crate::{
         },
         R9pFuse,
     },
-    node::null_wstat,
+    node::{has_close_commit_mode, null_wstat},
     p9::{Client, OTRUNC, OWRITE},
 };
 use r9p::fid::Fid;
@@ -77,6 +77,14 @@ impl R9pFuse {
         header: FuseInHeader,
         input: FuseSetattrIn,
     ) -> Result<()> {
+        let close_commit_target = if input.valid & FATTR_SIZE != 0 && input.size == 0 {
+            let nodes = self.nodes()?;
+            has_close_commit_mode(&nodes.node(header.nodeid)?.stat)
+        } else {
+            false
+        };
+        let ignore_zero_truncate =
+            should_ignore_zero_truncate(input.valid, input.size, close_commit_target);
         let (client, fid) = {
             let nodes = self.nodes()?;
             if input.valid & FATTR_FH != 0 {
@@ -89,22 +97,29 @@ impl R9pFuse {
         };
 
         if input.valid & FATTR_SIZE != 0 {
-            let mut stat = null_wstat();
-            stat.length = input.size;
-            if let Err(error) = client.wstat_timeout(fid, stat, self.mutation_timeout()) {
-                if input.size == 0 {
-                    self.truncate_fallback(&client, fid)?;
-                } else {
-                    return Err(error);
+            if !ignore_zero_truncate {
+                let mut stat = null_wstat();
+                stat.length = input.size;
+                if let Err(error) = client.wstat_timeout(fid, stat, self.mutation_timeout()) {
+                    if input.size == 0 {
+                        self.truncate_fallback(&client, fid)?;
+                    } else {
+                        return Err(error);
+                    }
                 }
             }
         }
 
-        // Vault does not model Unix ownership, mode, atime, or mtime as
-        // durable namespace state. Accept those FUSE setattr fields for editor
-        // compatibility, but only translate size changes into 9P mutations.
+        // 9P2000 has no portable Unix owner/time/mode mutation shape. Accept
+        // those FUSE setattr fields for editor compatibility, but only
+        // translate size changes into 9P mutations.
         let _advisory_fields = input.valid & advisory_setattr_fields();
-        let stat = client.stat_timeout(fid, self.lookup_timeout())?;
+        let stat = if ignore_zero_truncate {
+            let nodes = self.nodes()?;
+            nodes.node(header.nodeid)?.stat.clone()
+        } else {
+            client.stat_timeout(fid, self.lookup_timeout())?
+        };
         let _ = self.nodes()?.update_stat(header.nodeid, stat.clone());
         let out = self.attr_out(&stat);
         reply_struct(file, header.unique, &out)
@@ -128,6 +143,10 @@ fn advisory_setattr_fields() -> u32 {
     FATTR_UID | FATTR_GID | FATTR_MODE | FATTR_ATIME | FATTR_MTIME
 }
 
+fn should_ignore_zero_truncate(valid: u32, size: u64, close_commit: bool) -> bool {
+    valid & FATTR_SIZE != 0 && size == 0 && close_commit
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,5 +160,18 @@ mod tests {
         assert_ne!(advisory & FATTR_MODE, 0);
         assert_ne!(advisory & FATTR_ATIME, 0);
         assert_ne!(advisory & FATTR_MTIME, 0);
+    }
+
+    #[test]
+    fn zero_truncate_is_ignored_only_for_close_commit_files() {
+        assert!(should_ignore_zero_truncate(FATTR_SIZE, 0, true));
+        assert!(should_ignore_zero_truncate(
+            FATTR_SIZE | FATTR_MODE,
+            0,
+            true
+        ));
+        assert!(!should_ignore_zero_truncate(FATTR_SIZE, 0, false));
+        assert!(!should_ignore_zero_truncate(FATTR_SIZE, 10, true));
+        assert!(!should_ignore_zero_truncate(FATTR_MODE, 0, true));
     }
 }

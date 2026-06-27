@@ -7,10 +7,18 @@ use r9p::{
     qid::{Qid, DMDIR, DMSYMLINK, QTDIR, QTSYMLINK},
     stat::Stat,
 };
-use std::{collections::BTreeMap, fmt, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    time::{Duration, Instant},
+};
 
 pub const ROOT_NODEID: u64 = 1;
 pub const CLOSE_COMMIT_MODE_FLAG: u32 = 0x0100_0000;
+
+pub fn has_close_commit_mode(stat: &Stat) -> bool {
+    stat.mode & CLOSE_COMMIT_MODE_FLAG != 0
+}
 
 #[derive(Debug, Clone)]
 pub struct Node {
@@ -18,6 +26,7 @@ pub struct Node {
     pub path: Vec<Vec<u8>>,
     pub qid: Qid,
     pub stat: Stat,
+    pub stat_cached_at: Instant,
     pub generation: u64,
     pub lookups: u64,
     pub needs_rebind: bool,
@@ -31,6 +40,7 @@ pub struct Handle {
     pub write_on_release: bool,
     pub close_commit: bool,
     pub close_commit_flushed: bool,
+    pub bytes_written: u64,
     pub dir_entries: Vec<DirEntry>,
 }
 
@@ -43,6 +53,7 @@ impl fmt::Debug for Handle {
             .field("write_on_release", &self.write_on_release)
             .field("close_commit", &self.close_commit)
             .field("close_commit_flushed", &self.close_commit_flushed)
+            .field("bytes_written", &self.bytes_written)
             .field("dir_entries", &self.dir_entries)
             .finish()
     }
@@ -79,6 +90,7 @@ pub struct NodeTable {
 
 impl NodeTable {
     pub fn new(root_fid: Fid, root_stat: Stat) -> Self {
+        let now = Instant::now();
         let mut nodes = BTreeMap::new();
         nodes.insert(
             ROOT_NODEID,
@@ -87,6 +99,7 @@ impl NodeTable {
                 path: Vec::new(),
                 qid: root_stat.qid,
                 stat: root_stat,
+                stat_cached_at: now,
                 generation: 1,
                 lookups: 1,
                 needs_rebind: false,
@@ -141,6 +154,7 @@ impl NodeTable {
     ) -> Result<InsertedNode> {
         let mut path = self.node(parent_nodeid)?.path.clone();
         path.push(name.to_vec());
+        let now = Instant::now();
         if let Some(nodeid) = self.nodeid_at_path(&path) {
             let node = self
                 .nodes
@@ -161,6 +175,7 @@ impl NodeTable {
             };
             node.qid = stat.qid;
             node.stat = stat;
+            node.stat_cached_at = now;
             if qid_changed {
                 node.generation = node.generation.saturating_add(1).max(1);
             }
@@ -177,6 +192,7 @@ impl NodeTable {
                 path,
                 qid: stat.qid,
                 stat,
+                stat_cached_at: now,
                 generation: 1,
                 lookups: 1,
                 needs_rebind: false,
@@ -215,6 +231,7 @@ impl NodeTable {
         node.fid = Some(fid);
         node.qid = stat.qid;
         node.stat = stat;
+        node.stat_cached_at = Instant::now();
         if identity_changed {
             node.generation = node.generation.saturating_add(1).max(1);
         }
@@ -226,6 +243,7 @@ impl NodeTable {
         let node = self.node_mut(nodeid)?;
         node.qid = stat.qid;
         node.stat = stat;
+        node.stat_cached_at = Instant::now();
         node.needs_rebind = false;
         Ok(())
     }
@@ -250,6 +268,7 @@ impl NodeTable {
                 write_on_release,
                 close_commit,
                 close_commit_flushed: false,
+                bytes_written: 0,
                 dir_entries,
             },
         );
@@ -305,6 +324,15 @@ impl NodeTable {
         current.fid = fid;
         current.close_commit_flushed = false;
         Ok(old)
+    }
+
+    pub fn note_handle_write(&mut self, handle: u64, count: u32) -> Result<()> {
+        let handle = self
+            .handles
+            .get_mut(&handle)
+            .ok_or_else(|| Error::new(libc::ESTALE, format!("unknown file handle {handle}")))?;
+        handle.bytes_written = handle.bytes_written.saturating_add(u64::from(count));
+        Ok(())
     }
 
     pub fn mark_close_commit_flushed(&mut self, handle: u64) -> Result<()> {

@@ -67,6 +67,11 @@ pub(crate) fn write_config_for_path(mut config: Config, path: &str) -> Config {
     config
 }
 
+pub(crate) fn operation_config(mut config: Config) -> Config {
+    config.request_timeout = config.control_timeout;
+    config
+}
+
 fn is_control_write_path(path: &str) -> bool {
     path.trim_end_matches('/')
         .rsplit('/')

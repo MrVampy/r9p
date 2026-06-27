@@ -123,6 +123,7 @@ r9p --machine [-a address] [-A aname] [-u uname] [-m msize] write path offset pa
 r9p --machine [-a address] [-A aname] [-u uname] [-m msize] write-at path offset
 r9p --machine [-a address] [-A aname] [-u uname] [-m msize] writefd path
 r9p --machine [-a address] [-A aname] [-u uname] [-m msize] write-from path offset local-path
+r9p --machine [-a address] [-A aname] [-u uname] [-m msize] rpc-hex path request-hex
 r9p --machine [-a address] [-A aname] [-u uname] [-m msize] script script-path
 r9p --machine [-A aname] [-u uname] [-m msize] script service script-path
 r9p --machine [-a address] [-A aname] [-u uname] [-m msize] create path perm mode
@@ -135,6 +136,9 @@ payloads: `readfd` writes raw bytes to stdout, `read-to` writes raw bytes to a
 local file and prints `read<TAB>count`, `writefd` reads stdin with truncating
 plan9port `writefd` semantics, `write-at` reads stdin at an explicit remote
 offset, and `write-from` streams a local file to an explicit remote offset.
+`rpc` and machine `rpc-hex` use `--control-timeout` rather than the shorter
+default request timeout, because a single-fid RPC may wait on external service
+work before the first response read returns.
 
 `script` runs a tab-separated operation file over one connection and attach.
 With `-a`, the command is `script script-path`; without `-a`, the command is

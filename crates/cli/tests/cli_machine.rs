@@ -32,6 +32,7 @@ struct SharedFile {
     data: Arc<Mutex<Vec<u8>>>,
     clunk_delay: Arc<Mutex<Option<Duration>>>,
     clunk_error: Arc<Mutex<Option<String>>>,
+    rpc_read_delay: Arc<Mutex<Option<Duration>>>,
     read_calls: Arc<AtomicUsize>,
     attach_calls: Arc<AtomicUsize>,
 }
@@ -42,6 +43,7 @@ impl SharedFile {
             data: Arc::new(Mutex::new(data)),
             clunk_delay: Arc::new(Mutex::new(None)),
             clunk_error: Arc::new(Mutex::new(None)),
+            rpc_read_delay: Arc::new(Mutex::new(None)),
             read_calls: Arc::new(AtomicUsize::new(0)),
             attach_calls: Arc::new(AtomicUsize::new(0)),
         }
@@ -57,6 +59,13 @@ impl SharedFile {
     fn with_clunk_error(self, error: impl Into<String>) -> Self {
         if let Ok(mut clunk_error) = self.clunk_error.lock() {
             *clunk_error = Some(error.into());
+        }
+        self
+    }
+
+    fn with_rpc_read_delay(self, delay: Duration) -> Self {
+        if let Ok(mut rpc_read_delay) = self.rpc_read_delay.lock() {
+            *rpc_read_delay = Some(delay);
         }
         self
     }
@@ -176,6 +185,17 @@ impl FileTree for MachineTree {
             return Ok(ReadData::Bytes(data[start..end].to_vec()));
         }
         if qid == self.rpc_qid {
+            if offset == 0 {
+                let delay = self
+                    .file
+                    .rpc_read_delay
+                    .lock()
+                    .map_err(|_| R9pError::from("shared file lock poisoned"))?
+                    .to_owned();
+                if let Some(delay) = delay {
+                    thread::sleep(delay);
+                }
+            }
             let response = self
                 .rpc_responses
                 .get(&fid)
@@ -368,6 +388,22 @@ fn machine_rpc_hex_writes_and_reads_same_fid() -> TestResult<()> {
     let (address, handle) = start_server(shared)?;
 
     let output = run_machine(&address, &["rpc-hex", "/rpc", "70696e67"], None)?;
+    assert_success(&output)?;
+    assert_stdout(&output, "rpc\t8\t7270633a70696e67\n")?;
+    join_server(handle)
+}
+
+#[test]
+fn machine_rpc_hex_uses_control_timeout_for_response() -> TestResult<()> {
+    let shared = SharedFile::new(Vec::new()).with_rpc_read_delay(Duration::from_millis(150));
+    let (address, handle) = start_server(shared)?;
+
+    let output = run_machine_with_global_options(
+        &address,
+        &["--request-timeout", "0.05", "--control-timeout", "0.5"],
+        &["rpc-hex", "/rpc", "70696e67"],
+        None,
+    )?;
     assert_success(&output)?;
     assert_stdout(&output, "rpc\t8\t7270633a70696e67\n")?;
     join_server(handle)

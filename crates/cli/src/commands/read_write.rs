@@ -11,7 +11,7 @@ use crate::io::{
     connect_path, copy_fid_to_file, copy_fid_to_stdout, copy_file_to_fid_at, copy_stdin_to_fid,
     copy_stdin_to_fid_at, open_path, parse_offset, read_all,
 };
-use crate::target::{write_config_for_path, Config, Target};
+use crate::target::{operation_config, write_config_for_path, Config, Target};
 use crate::usage;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -128,7 +128,7 @@ pub(crate) fn rpc_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
         }
     };
     let target = Target {
-        config: write_config_for_path(config, &args[0]),
+        config: operation_config(config),
         path: args[0].clone(),
     };
     let (mut client, fid) = open_path(&target, ORDWR)?;

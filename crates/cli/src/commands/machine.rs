@@ -11,7 +11,7 @@ use crate::commands::mutate::{remove_one, split_parent};
 use crate::errors::{cli_error, CliResult};
 use crate::format::{hex_decode, hex_encode};
 use crate::io::{connect_path, open_path, parse_offset, read_all, write_exact_count};
-use crate::target::{write_config_for_path, Config, Target};
+use crate::target::{operation_config, write_config_for_path, Config, Target};
 use crate::usage;
 
 pub(crate) fn machine_list_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
@@ -61,7 +61,7 @@ pub(crate) fn machine_rpc_hex_cmd(config: Config, args: Vec<String>) -> CliResul
     }
     let request = hex_decode(&args[1])?;
     let target = Target {
-        config: write_config_for_path(config, &args[0]),
+        config: operation_config(config),
         path: args[0].clone(),
     };
     let (mut client, fid) = open_path(&target, ORDWR)?;

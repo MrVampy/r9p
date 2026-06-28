@@ -40,6 +40,8 @@
               runHook preInstall
               install -Dm644 target/${pkgs.stdenv.hostPlatform.rust.rustcTarget}/release/libfront.so \
                 "$out/lib/libfront.so"
+              install -Dm644 crates/front/bindings/deno/front_sink.ts \
+                "$out/share/r9p/front/deno/front_sink.ts"
               runHook postInstall
             '';
           };

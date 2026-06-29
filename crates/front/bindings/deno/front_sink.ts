@@ -1,4 +1,4 @@
-export const SUPPORTED_ABI_VERSIONS = new Set([13]);
+export const SUPPORTED_ABI_VERSIONS = new Set([14]);
 
 const SYMBOLS = {
   r9p_front_abi_version: { parameters: [], result: "u32" },
@@ -105,7 +105,28 @@ const SYMBOLS = {
     ],
     result: "i32",
   },
-  r9p_front_last_error: { parameters: ["pointer", "buffer", "usize"], result: "isize" },
+  r9p_front_client_read: {
+    parameters: [
+      "pointer",
+      "buffer",
+      "usize",
+      "buffer",
+      "usize",
+      "buffer",
+      "usize",
+      "buffer",
+      "usize",
+      "u32",
+      "buffer",
+      "usize",
+      "buffer",
+    ],
+    result: "i32",
+  },
+  r9p_front_last_error: {
+    parameters: ["pointer", "buffer", "usize"],
+    result: "isize",
+  },
   r9p_front_stop: { parameters: ["pointer"], result: "i32" },
 } as const;
 
@@ -147,6 +168,15 @@ export interface ClientRpcOptions {
   aname: string;
   path: string;
   request: string;
+  msize?: number;
+  responseCapacity?: number;
+}
+
+export interface ClientReadOptions {
+  endpointBind: string;
+  uname: string;
+  aname: string;
+  path: string;
   msize?: number;
   responseCapacity?: number;
 }
@@ -265,7 +295,9 @@ export class FrontHost implements TransitionSink {
   }
 
   reconcileR9pExports(): void {
-    const status = this.library.symbols.r9p_front_reconcile_r9p_exports(this.handle);
+    const status = this.library.symbols.r9p_front_reconcile_r9p_exports(
+      this.handle,
+    );
     if (status !== 0) {
       throw new Error(
         `front reconcile_r9p_exports failed with status ${status}: ${this.lastError()}`,
@@ -279,7 +311,9 @@ export class FrontHost implements TransitionSink {
     const [aname, anameLen] = bytes(options.aname);
     const [path, pathLen] = bytes(options.path);
     const [request, requestLen] = bytes(options.request);
-    const response = new Uint8Array(new ArrayBuffer(options.responseCapacity ?? 65_536));
+    const response = new Uint8Array(
+      new ArrayBuffer(options.responseCapacity ?? 65_536),
+    );
     const responseLenOut = new Uint8Array(new ArrayBuffer(8));
     const status = this.library.symbols.r9p_front_client_rpc(
       this.handle,
@@ -298,7 +332,9 @@ export class FrontHost implements TransitionSink {
       BigInt(response.length),
       responseLenOut,
     );
-    const responseLen = Number(new DataView(responseLenOut.buffer).getBigUint64(0, true));
+    const responseLen = Number(
+      new DataView(responseLenOut.buffer).getBigUint64(0, true),
+    );
     if (status !== 0) {
       throw new Error(
         `front client_rpc(${options.path}) failed with status ${status}: ${this.lastError()}`,
@@ -307,6 +343,46 @@ export class FrontHost implements TransitionSink {
     if (responseLen > response.length) {
       throw new Error(
         `front client_rpc(${options.path}) response exceeded buffer: ${responseLen} > ${response.length}`,
+      );
+    }
+    return decoder.decode(response.slice(0, responseLen));
+  }
+
+  clientRead(options: ClientReadOptions): string {
+    const [endpoint, endpointLen] = bytes(options.endpointBind);
+    const [uname, unameLen] = bytes(options.uname);
+    const [aname, anameLen] = bytes(options.aname);
+    const [path, pathLen] = bytes(options.path);
+    const response = new Uint8Array(
+      new ArrayBuffer(options.responseCapacity ?? 65_536),
+    );
+    const responseLenOut = new Uint8Array(new ArrayBuffer(8));
+    const status = this.library.symbols.r9p_front_client_read(
+      this.handle,
+      endpoint,
+      endpointLen,
+      uname,
+      unameLen,
+      aname,
+      anameLen,
+      path,
+      pathLen,
+      options.msize ?? 65_536,
+      response,
+      BigInt(response.length),
+      responseLenOut,
+    );
+    const responseLen = Number(
+      new DataView(responseLenOut.buffer).getBigUint64(0, true),
+    );
+    if (status !== 0) {
+      throw new Error(
+        `front client_read(${options.path}) failed with status ${status}: ${this.lastError()}`,
+      );
+    }
+    if (responseLen > response.length) {
+      throw new Error(
+        `front client_read(${options.path}) response exceeded buffer: ${responseLen} > ${response.length}`,
       );
     }
     return decoder.decode(response.slice(0, responseLen));
@@ -353,7 +429,9 @@ export class FrontHost implements TransitionSink {
       bodyLen,
     );
     if (status !== 0) {
-      throw new Error(`front append_event(${path}) failed with status ${status}`);
+      throw new Error(
+        `front append_event(${path}) failed with status ${status}`,
+      );
     }
   }
 
@@ -365,7 +443,9 @@ export class FrontHost implements TransitionSink {
       prefixLen,
     );
     if (status !== 0) {
-      throw new Error(`front register_intake(${prefix}) failed with status ${status}`);
+      throw new Error(
+        `front register_intake(${prefix}) failed with status ${status}`,
+      );
     }
   }
 
@@ -377,7 +457,9 @@ export class FrontHost implements TransitionSink {
       pathLen,
     );
     if (status !== 0) {
-      throw new Error(`front register_rpc(${path}) failed with status ${status}`);
+      throw new Error(
+        `front register_rpc(${path}) failed with status ${status}`,
+      );
     }
   }
 
@@ -389,7 +471,9 @@ export class FrontHost implements TransitionSink {
       pathLen,
     );
     if (status !== 0) {
-      throw new Error(`front register_log(${path}) failed with status ${status}`);
+      throw new Error(
+        `front register_log(${path}) failed with status ${status}`,
+      );
     }
   }
 
@@ -427,7 +511,9 @@ export class FrontHost implements TransitionSink {
       BigInt(prefixLen),
     );
     if (Number(prefixCopied) !== prefixLen) {
-      throw new Error(`front request_prefix_copy returned ${prefixCopied}, expected ${prefixLen}`);
+      throw new Error(
+        `front request_prefix_copy returned ${prefixCopied}, expected ${prefixLen}`,
+      );
     }
     const buf = new Uint8Array(new ArrayBuffer(len));
     const copied = this.library.symbols.r9p_front_request_copy(
@@ -454,7 +540,9 @@ export class FrontHost implements TransitionSink {
       bodyLen,
     );
     if (status !== 0) {
-      throw new Error(`front complete_request(${prefix}) failed with status ${status}`);
+      throw new Error(
+        `front complete_request(${prefix}) failed with status ${status}`,
+      );
     }
   }
 
@@ -466,13 +554,19 @@ export class FrontHost implements TransitionSink {
 
   private lastError(): string {
     const empty = new Uint8Array(new ArrayBuffer(0));
-    const len = Number(this.library.symbols.r9p_front_last_error(this.handle, empty, 0n));
+    const len = Number(
+      this.library.symbols.r9p_front_last_error(this.handle, empty, 0n),
+    );
     if (len <= 0) {
       return "no ABI error detail";
     }
     const buf = new Uint8Array(new ArrayBuffer(len));
     const copied = Number(
-      this.library.symbols.r9p_front_last_error(this.handle, buf, BigInt(buf.length)),
+      this.library.symbols.r9p_front_last_error(
+        this.handle,
+        buf,
+        BigInt(buf.length),
+      ),
     );
     if (copied < 0) {
       return `last_error failed with status ${copied}`;
@@ -481,12 +575,15 @@ export class FrontHost implements TransitionSink {
   }
 }
 
-export function resolveFrontLibrary(flagValue: string | undefined): string | { error: string } {
+export function resolveFrontLibrary(
+  flagValue: string | undefined,
+): string | { error: string } {
   const fromEnv = Deno.env.get("R9P_FRONT_LIB");
   const path = flagValue ?? fromEnv;
   if (path === undefined || path === "") {
     return {
-      error: "front library path required: pass --front-lib <path> or set R9P_FRONT_LIB",
+      error:
+        "front library path required: pass --front-lib <path> or set R9P_FRONT_LIB",
     };
   }
   return path;

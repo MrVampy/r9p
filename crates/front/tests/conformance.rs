@@ -1,5 +1,5 @@
 use front::abi::{
-    r9p_front_abi_version, r9p_front_append_event, r9p_front_client_rpc,
+    r9p_front_abi_version, r9p_front_append_event, r9p_front_client_read, r9p_front_client_rpc,
     r9p_front_complete_request, r9p_front_complete_write, r9p_front_free, r9p_front_last_error,
     r9p_front_maintain_r9p_export, r9p_front_new, r9p_front_next_request,
     r9p_front_publish_r9p_export, r9p_front_reconcile_r9p_exports, r9p_front_register_intake,
@@ -53,7 +53,7 @@ fn request_context(handle: *mut front::abi::FrontAbi, request_id: u64) -> String
 
 #[test]
 fn abi_roundtrip_over_tcp() {
-    assert_eq!(r9p_front_abi_version(), 13);
+    assert_eq!(r9p_front_abi_version(), 14);
     let handle = r9p_front_new();
     let (path, path_len) = cstr("market/status");
     let (bytes, bytes_len) = cbytes(b"#M(\"state\" 'open)");
@@ -257,7 +257,7 @@ fn abi_roundtrip_over_tcp() {
 
 #[test]
 fn abi_publish_reports_last_error() {
-    assert_eq!(r9p_front_abi_version(), 13);
+    assert_eq!(r9p_front_abi_version(), 14);
     let handle = r9p_front_new();
     let (vault_bind, vault_bind_len) = cstr("127.0.0.1:1");
     let (vault_uname, vault_uname_len) = cstr("codex");
@@ -322,7 +322,7 @@ fn abi_publish_reports_last_error() {
 
 #[test]
 fn abi_reconcile_without_maintainers_is_ok() {
-    assert_eq!(r9p_front_abi_version(), 13);
+    assert_eq!(r9p_front_abi_version(), 14);
     let handle = r9p_front_new();
     assert_eq!(unsafe { r9p_front_reconcile_r9p_exports(handle) }, 0);
     unsafe { r9p_front_free(handle) };
@@ -330,7 +330,7 @@ fn abi_reconcile_without_maintainers_is_ok() {
 
 #[test]
 fn abi_client_rpc_writes_and_reads_same_fid() {
-    assert_eq!(r9p_front_abi_version(), 13);
+    assert_eq!(r9p_front_abi_version(), 14);
     let handle = r9p_front_new();
     let (rpc, rpc_len) = cstr("rpc");
     assert_eq!(unsafe { r9p_front_register_rpc(handle, rpc, rpc_len) }, 0);
@@ -400,8 +400,59 @@ fn abi_client_rpc_writes_and_reads_same_fid() {
 }
 
 #[test]
+fn abi_client_read_reads_namespace_file() {
+    assert_eq!(r9p_front_abi_version(), 14);
+    let handle = r9p_front_new();
+    let (path, path_len) = cstr("gateways/ibkr/api");
+    let (body, body_len) =
+        cbytes(br#"{"endpoint":{"host":"192.168.0.21","port":4002},"mode":"paper"}"#);
+    assert_eq!(
+        unsafe { r9p_front_set(handle, path, path_len, body, body_len) },
+        0
+    );
+    let (bind, bind_len) = cstr("127.0.0.1:0");
+    let mut port = 0u16;
+    assert_eq!(
+        unsafe { r9p_front_serve_tcp(handle, bind, bind_len, &mut port) },
+        0
+    );
+    let address = format!("127.0.0.1:{port}");
+    let (endpoint, endpoint_len) = cstr(&address);
+    let (uname, uname_len) = cstr("codex");
+    let (aname, aname_len) = cstr("/");
+    let (read_path, read_path_len) = cstr("/gateways/ibkr/api");
+    let mut response = vec![0_u8; 128];
+    let mut response_len = 0_usize;
+    let status = unsafe {
+        r9p_front_client_read(
+            handle,
+            endpoint,
+            endpoint_len,
+            uname,
+            uname_len,
+            aname,
+            aname_len,
+            read_path,
+            read_path_len,
+            65_536,
+            response.as_mut_ptr(),
+            response.len(),
+            &mut response_len,
+        )
+    };
+    assert_eq!(status, 0);
+    response.truncate(response_len);
+    assert_eq!(
+        response,
+        br#"{"endpoint":{"host":"192.168.0.21","port":4002},"mode":"paper"}"#.to_vec()
+    );
+    assert_eq!(unsafe { r9p_front_stop(handle) }, 0);
+    unsafe { r9p_front_free(handle) };
+}
+
+#[test]
 fn abi_door_rehearsal_principal_root_and_write_relay() {
-    assert_eq!(r9p_front_abi_version(), 13);
+    assert_eq!(r9p_front_abi_version(), 14);
     let handle = r9p_front_new();
     let (status_path, status_path_len) = cstr("views/alice/status");
     let (status_body, status_body_len) = cbytes(b"#M(\"served_state\" \"fresh\")");
@@ -492,7 +543,7 @@ fn abi_door_rehearsal_principal_root_and_write_relay() {
 
 #[test]
 fn abi_v11_pushed_metadata_aname_gate_and_request_context() {
-    assert_eq!(r9p_front_abi_version(), 13);
+    assert_eq!(r9p_front_abi_version(), 14);
     let handle = r9p_front_new();
     assert_eq!(
         unsafe { r9p_front_set_protocol_limits(handle, 65_536, 4096) },
@@ -753,7 +804,7 @@ fn door_rehearsal_relayed_write_reports_unavailable_when_brain_absent() {
 
 #[test]
 fn abi_maintain_reports_initial_publish_error() {
-    assert_eq!(r9p_front_abi_version(), 13);
+    assert_eq!(r9p_front_abi_version(), 14);
     let handle = r9p_front_new();
     let (vault_bind, vault_bind_len) = cstr("127.0.0.1:1");
     let (vault_uname, vault_uname_len) = cstr("codex");

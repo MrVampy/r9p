@@ -11,12 +11,12 @@ use std::time::Duration;
 mod client;
 mod publication;
 
-pub use client::r9p_front_client_rpc;
+pub use client::{r9p_front_client_read, r9p_front_client_rpc};
 pub use publication::{
     r9p_front_maintain_r9p_export, r9p_front_publish_r9p_export, r9p_front_reconcile_r9p_exports,
 };
 
-pub const ABI_VERSION: u32 = 13;
+pub const ABI_VERSION: u32 = 14;
 
 const OK: i32 = 0;
 const TIMEOUT: i32 = 1;

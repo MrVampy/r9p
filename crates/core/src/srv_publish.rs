@@ -435,8 +435,9 @@ fn create_and_write<S: std::io::Read + std::io::Write>(
     service_name: &str,
     descriptor: &str,
 ) -> Result<()> {
-    let parent = client.walk_path("/srv")?;
-    let (fid, _) = client.create(parent, service_name.as_bytes(), 0o666, OWRITE)?;
+    let (parent_path, leaf_name) = srv_parent_and_leaf(service_name)?;
+    let parent = client.walk_path(&parent_path)?;
+    let (fid, _) = client.create(parent, leaf_name.as_bytes(), 0o666, OWRITE)?;
     let write_result = client.write(fid, 0, descriptor.as_bytes());
     let clunk_result = client.clunk(fid);
     write_result?;
@@ -492,12 +493,41 @@ fn field_value(report: &str, field: &str) -> Option<String> {
 }
 
 fn validate_service_name(service_name: &str) -> Result<()> {
-    if service_name.is_empty() || service_name.contains('/') {
+    if service_name.is_empty() || service_name.trim() != service_name {
+        return Err(Error::from(format!(
+            "invalid srv service name {service_name}"
+        )));
+    }
+    let segments: Vec<&str> = service_name.split('/').collect();
+    if segments.first().copied() == Some("wait")
+        || segments.iter().any(|segment| {
+            segment.is_empty()
+                || segment.trim() != *segment
+                || *segment == "."
+                || *segment == ".."
+                || segment.contains('\n')
+                || segment.contains('\r')
+        })
+    {
         return Err(Error::from(format!(
             "invalid srv service name {service_name}"
         )));
     }
     Ok(())
+}
+
+fn srv_parent_and_leaf(service_name: &str) -> Result<(String, &str)> {
+    validate_service_name(service_name)?;
+    let mut segments = service_name.split('/').collect::<Vec<_>>();
+    let leaf = segments
+        .pop()
+        .ok_or_else(|| Error::from(format!("invalid srv service name {service_name}")))?;
+    let parent = if segments.is_empty() {
+        "/srv".to_string()
+    } else {
+        format!("/srv/{}", segments.join("/"))
+    };
+    Ok((parent, leaf))
 }
 
 fn looks_missing(error: &Error) -> bool {
@@ -623,9 +653,44 @@ mod tests {
             "/srv/wait/polymarket/state"
         );
         assert_eq!(
+            srv_wait_state_path("kalshi/demo/actuator"),
+            "/srv/wait/kalshi/demo/actuator/state"
+        );
+        assert_eq!(
             srv_wait_changed_after_path("polymarket", "token-1"),
             "/srv/wait/polymarket/changed-after/token-1"
         );
+        assert_eq!(
+            srv_wait_changed_after_path("kalshi/demo/actuator", "token-1"),
+            "/srv/wait/kalshi/demo/actuator/changed-after/token-1"
+        );
+    }
+
+    #[test]
+    fn nested_srv_publication_uses_parent_path_and_leaf_name() {
+        assert_eq!(
+            srv_parent_and_leaf("kalshi/demo/actuator").expect("valid nested name"),
+            ("/srv/kalshi/demo".to_string(), "actuator")
+        );
+    }
+
+    #[test]
+    fn publishes_missing_nested_srv_entry() {
+        let tree = SharedSrvTree::new();
+        tree.ensure_srv_dir_path(&["kalshi", "demo"]);
+        let address = serve_tree(tree.clone());
+        let mut publication = publication(&address);
+        publication.vault_endpoint_bind = address;
+        publication.service_name = "kalshi/demo/actuator".to_string();
+
+        let outcome = publish_r9p_export(&publication).expect("publish should succeed");
+
+        assert_eq!(outcome, PublishOutcome::Registered);
+        let descriptor = tree
+            .content_path(&["kalshi", "demo", "actuator"])
+            .expect("descriptor should be written");
+        assert!(descriptor.contains("format\tr9p-export.v1\n"));
+        assert!(descriptor.contains("endpoint_bind\t192.168.0.21:19590\n"));
     }
 
     #[test]
@@ -734,6 +799,21 @@ mod tests {
                 .lock()
                 .expect("tree lock")
                 .remove_file(name.as_bytes());
+        }
+
+        fn ensure_srv_dir_path(&self, segments: &[&str]) {
+            self.inner
+                .lock()
+                .expect("tree lock")
+                .ensure_srv_dir_path(segments);
+        }
+
+        fn content_path(&self, segments: &[&str]) -> Option<String> {
+            self.inner
+                .lock()
+                .expect("tree lock")
+                .file_content_path(segments)
+                .map(|bytes| String::from_utf8(bytes).expect("utf-8 content"))
         }
     }
 
@@ -918,8 +998,47 @@ mod tests {
             );
         }
 
+        fn ensure_srv_dir_path(&mut self, segments: &[&str]) {
+            let mut current = SRV;
+            for segment in segments {
+                current = match self.child(current, segment.as_bytes()) {
+                    Some(id) => id,
+                    None => self.insert_dir(current, segment.as_bytes()),
+                };
+            }
+        }
+
+        fn insert_dir(&mut self, parent: u64, name: &[u8]) -> u64 {
+            let id = self.next_id;
+            self.next_id += 1;
+            if let Some(TestNode {
+                body: TestBody::Dir(children),
+                ..
+            }) = self.nodes.get_mut(&parent)
+            {
+                children.insert(name.to_vec(), id);
+            }
+            self.nodes.insert(
+                id,
+                TestNode {
+                    name: name.to_vec(),
+                    parent,
+                    body: TestBody::Dir(BTreeMap::new()),
+                },
+            );
+            id
+        }
+
         fn file_content(&self, name: &[u8]) -> Option<Vec<u8>> {
             let id = self.child(SRV, name)?;
+            match &self.nodes.get(&id)?.body {
+                TestBody::File(bytes) => Some(bytes.clone()),
+                TestBody::Dir(_) => None,
+            }
+        }
+
+        fn file_content_path(&self, segments: &[&str]) -> Option<Vec<u8>> {
+            let id = self.child_path(SRV, segments)?;
             match &self.nodes.get(&id)?.body {
                 TestBody::File(bytes) => Some(bytes.clone()),
                 TestBody::Dir(_) => None,
@@ -1023,6 +1142,14 @@ mod tests {
                 return None;
             };
             children.get(name).copied()
+        }
+
+        fn child_path(&self, start: u64, segments: &[&str]) -> Option<u64> {
+            let mut current = start;
+            for segment in segments {
+                current = self.child(current, segment.as_bytes())?;
+            }
+            Some(current)
         }
     }
 

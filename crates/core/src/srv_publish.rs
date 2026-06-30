@@ -1,6 +1,7 @@
 use crate::{
     blocking::{Client, OREAD, OWRITE},
     export_descriptor::ExportDescriptor,
+    qid::DMDIR,
     Error, Result,
 };
 use std::{
@@ -392,19 +393,41 @@ fn publish_with_client<S: std::io::Read + std::io::Write>(
     client: &mut Client<S>,
 ) -> Result<PublishOutcome> {
     let srv_path = srv_path(&publication.service_name);
-    match read_file(client, &srv_path) {
-        Ok(summary) if ready_summary_matches(&summary, publication)? => {
+    match inspect_srv_path(client, &srv_path) {
+        Ok(SrvPathState::File(summary)) if ready_summary_matches(&summary, publication)? => {
             Ok(PublishOutcome::AlreadyReady)
         }
-        Ok(_) => {
+        Ok(SrvPathState::File(_)) => {
             write_existing(client, &srv_path, descriptor)?;
             Ok(PublishOutcome::Updated)
+        }
+        Ok(SrvPathState::Missing) => {
+            create_and_write(client, &publication.service_name, descriptor)?;
+            Ok(PublishOutcome::Registered)
         }
         Err(error) if looks_missing(&error) => {
             create_and_write(client, &publication.service_name, descriptor)?;
             Ok(PublishOutcome::Registered)
         }
         Err(error) => Err(Error::from(format!("inspect {srv_path}: {error}"))),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SrvPathState {
+    File(String),
+    Missing,
+}
+
+fn inspect_srv_path<S: std::io::Read + std::io::Write>(
+    client: &mut Client<S>,
+    path: &str,
+) -> Result<SrvPathState> {
+    match client.stat_path(path) {
+        Ok(stat) if stat.mode & DMDIR != 0 => Ok(SrvPathState::Missing),
+        Ok(_) => read_file(client, path).map(SrvPathState::File),
+        Err(error) if looks_missing(&error) => Ok(SrvPathState::Missing),
+        Err(error) => Err(error),
     }
 }
 
@@ -672,6 +695,20 @@ mod tests {
             srv_parent_and_leaf("kalshi/demo/actuator").expect("valid nested name"),
             ("/srv/kalshi/demo".to_string(), "actuator")
         );
+    }
+
+    #[test]
+    fn srv_directory_at_registration_path_is_missing_registration() {
+        let tree = SharedSrvTree::new();
+        tree.ensure_srv_dir_path(&["kalshi", "demo", "actuator"]);
+        let address = serve_tree(tree.clone());
+        let mut client =
+            Client::connect_tcp(&address, "codex", "/", 65_536).expect("connect test client");
+
+        let state = inspect_srv_path(&mut client, "/srv/kalshi/demo/actuator")
+            .expect("inspect should succeed");
+
+        assert_eq!(state, SrvPathState::Missing);
     }
 
     #[test]

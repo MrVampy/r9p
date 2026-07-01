@@ -413,6 +413,7 @@ fn publish_with_client<S: std::io::Read + std::io::Write>(
     let srv_path = srv_path(&publication.service_name);
     match inspect_srv_path(client, &srv_path) {
         Ok(SrvPathState::File(summary)) if ready_summary_matches(&summary, publication)? => {
+            write_keepalive(client, &srv_path, &summary)?;
             Ok(PublishOutcome::AlreadyReady)
         }
         Ok(SrvPathState::File(_)) => {
@@ -500,6 +501,25 @@ fn write_existing<S: std::io::Read + std::io::Write>(
     Ok(())
 }
 
+fn write_keepalive<S: std::io::Read + std::io::Write>(
+    client: &mut Client<S>,
+    path: &str,
+    summary: &str,
+) -> Result<()> {
+    let Some(lease_id) = field_value(summary, "lease_id") else {
+        return Err(Error::from(format!("srv summary missing lease_id: {path}")));
+    };
+    let ttl_ms = field_value(summary, "lease_ttl_ms")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(300_000);
+    let keepalive = format!(
+        "#M(\"command\" \"keepalive\" \"lease_id\" {} \"ttl_ms\" {} \"health\" \"ready\")",
+        lfe_string(&lease_id),
+        ttl_ms,
+    );
+    write_existing(client, path, &keepalive)
+}
+
 fn read_file<S: std::io::Read + std::io::Write>(
     client: &mut Client<S>,
     path: &str,
@@ -531,6 +551,11 @@ fn field_value(report: &str, field: &str) -> Option<String> {
     report
         .lines()
         .find_map(|line| line.strip_prefix(&prefix).map(str::to_string))
+}
+
+fn lfe_string(value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
 }
 
 fn validate_service_name(service_name: &str) -> Result<()> {
@@ -657,11 +682,12 @@ mod tests {
         let outcome = publish_r9p_export(&publication).expect("publish should succeed");
 
         assert_eq!(outcome, PublishOutcome::AlreadyReady);
-        assert_eq!(
-            tree.content("polymarket")
-                .expect("ready summary should remain"),
-            ready_summary("192.168.0.21:19590")
-        );
+        let content = tree
+            .content("polymarket")
+            .expect("keepalive should be written");
+        assert!(content.starts_with(
+            "#M(\"command\" \"keepalive\" \"lease_id\" \"srv-lease:polymarket:r9p-export:polymarket\" \"ttl_ms\" 300000 \"health\" \"ready\")",
+        ));
     }
 
     #[test]
@@ -788,6 +814,11 @@ mod tests {
         assert!(!looks_timeout(&Error::from("file does not exist")));
     }
 
+    #[test]
+    fn lfe_string_escapes_keepalive_values() {
+        assert_eq!(lfe_string("lease\\\"id"), "\"lease\\\\\\\"id\"");
+    }
+
     fn publication(vault_endpoint_bind: &str) -> R9pExportPublication {
         R9pExportPublication {
             vault_endpoint_bind: vault_endpoint_bind.to_string(),
@@ -824,6 +855,8 @@ mod tests {
             ),
             "aname: /",
             "exported_root: /",
+            "lease_id: srv-lease:polymarket:r9p-export:polymarket",
+            "lease_ttl_ms: 300000",
             "created_at_ms: 1",
             "attached_at_ms: 2",
             "",

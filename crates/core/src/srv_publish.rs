@@ -15,6 +15,7 @@ use std::{
 };
 
 pub const DEFAULT_MAINTAIN_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+pub const DEFAULT_MAINTAIN_RENEW_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct R9pExportPublication {
@@ -221,7 +222,9 @@ fn maintain_loop(
             Ok(outcome) => {
                 status.record_success(outcome);
                 match wait_for_srv_change(&publication, &signal) {
-                    MaintenanceWait::Changed | MaintenanceWait::Interrupted => {}
+                    MaintenanceWait::Changed
+                    | MaintenanceWait::Interrupted
+                    | MaintenanceWait::Renew => {}
                     MaintenanceWait::Failed(error) => {
                         status.record_failure(&error);
                         if !wait_for_retry(&signal, config.retry_interval) {
@@ -244,6 +247,7 @@ fn maintain_loop(
 enum MaintenanceWait {
     Changed,
     Interrupted,
+    Renew,
     Failed(Error),
 }
 
@@ -276,10 +280,19 @@ fn wait_for_srv_change(
     publication: &R9pExportPublication,
     signal: &MaintenanceSignal,
 ) -> MaintenanceWait {
-    let (mut client, interrupt_stream) = match connect_interruptible_client(publication) {
-        Ok(client) => client,
-        Err(error) => return MaintenanceWait::Failed(error),
-    };
+    wait_for_srv_change_for(publication, signal, DEFAULT_MAINTAIN_RENEW_INTERVAL)
+}
+
+fn wait_for_srv_change_for(
+    publication: &R9pExportPublication,
+    signal: &MaintenanceSignal,
+    renew_interval: Duration,
+) -> MaintenanceWait {
+    let (mut client, interrupt_stream) =
+        match connect_interruptible_client(publication, Some(renew_interval)) {
+            Ok(client) => client,
+            Err(error) => return MaintenanceWait::Failed(error),
+        };
     if !activate_wait(signal, interrupt_stream) {
         return MaintenanceWait::Interrupted;
     }
@@ -290,6 +303,7 @@ fn wait_for_srv_change(
     }
     match result {
         Ok(()) => MaintenanceWait::Changed,
+        Err(error) if looks_timeout(&error) => MaintenanceWait::Renew,
         Err(error) => MaintenanceWait::Failed(error),
     }
 }
@@ -320,6 +334,7 @@ fn wait_for_srv_change_with_client<S: std::io::Read + std::io::Write>(
 
 fn connect_interruptible_client(
     publication: &R9pExportPublication,
+    read_timeout: Option<Duration>,
 ) -> Result<(Client<TcpStream>, TcpStream)> {
     let stream = TcpStream::connect(&publication.vault_endpoint_bind).map_err(|error| {
         Error::from(format!(
@@ -330,6 +345,9 @@ fn connect_interruptible_client(
     stream
         .set_nodelay(true)
         .map_err(|error| Error::from(format!("set TCP_NODELAY: {error}")))?;
+    stream
+        .set_read_timeout(read_timeout)
+        .map_err(|error| Error::from(format!("set read timeout: {error}")))?;
     let interrupt_stream = stream
         .try_clone()
         .map_err(|error| Error::from(format!("clone wait stream: {error}")))?;
@@ -562,6 +580,11 @@ fn looks_missing(error: &Error) -> bool {
         || message.contains("does not exist")
 }
 
+fn looks_timeout(error: &Error) -> bool {
+    let message = error.display_lossy().to_ascii_lowercase();
+    message.contains("transport timeout") || message.contains("would-block")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -752,6 +775,17 @@ mod tests {
         assert!(status.success_count >= 2);
         assert_eq!(status.last_error, None);
         maintainer.shutdown();
+    }
+
+    #[test]
+    fn wait_transport_timeout_requests_renewal_without_failure() {
+        assert!(looks_timeout(&Error::from(
+            "read response: 9P transport timeout or would-block: timed out",
+        )));
+        assert!(looks_timeout(&Error::from(
+            "read response: 9P transport timeout or would-block: operation would block",
+        )));
+        assert!(!looks_timeout(&Error::from("file does not exist")));
     }
 
     fn publication(vault_endpoint_bind: &str) -> R9pExportPublication {

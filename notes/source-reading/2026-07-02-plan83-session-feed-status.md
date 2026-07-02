@@ -27,6 +27,23 @@ Question: how should the session control surface start consuming the namespace c
 - Add `r9p session serve --change-feed PATH` flags.
 - Extend the session-control integration fixture with `/events/namespace/recent` and prove status reaches `last_event_id="e1"` and `last_generation=42`.
 
+## Live Proof
+
+After committing the code slice, a temporary local session manager was started against M7:
+
+```bash
+target/debug/r9p -a 192.168.0.30:9564 -u codex -A / -m 65536 session serve --socket "$sock" --change-feed /events/namespace/recent --change-feed-cursor-template '/events/namespace/since/{event_id}' --change-feed-poll-interval 0.1
+```
+
+`target/debug/r9p session status --socket "$sock"` returned `session.status.v1` with:
+
+- `endpoint`: `192.168.0.30:9564`
+- `msize`: `65536`
+- `feed.state`: `connected`
+- `feed.last_event_id`: `5kvwlr7caxtx46gy5p7urvncgdp5dknl:0000000000000009`
+- `feed.last_generation`: `881388`
+- `feed.last_error`: `null`
+
 ## Open Questions
 
 - The worker still uses poll/read cycles. The next slice should use the blocking `/events/namespace/stream` posture as primary and keep `since/<id>` or recent polling as degraded fallback.

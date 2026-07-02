@@ -1,4 +1,5 @@
 mod json;
+mod options;
 mod query;
 mod request;
 mod server;

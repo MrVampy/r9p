@@ -63,6 +63,19 @@ fn session_control_verbs_use_local_socket() -> TestResult<()> {
     assert_stdout_contains(&direct_query, "\"kind\":\"session.stat.v1\"")?;
     assert_stdout_contains(&direct_query, "\"path\":\"/data\"")?;
 
+    let filtered_query = run_session_until_success(&[
+        "-a",
+        &format!("unix!{socket_arg}"),
+        "rpc",
+        "/query",
+        r#"{"op":"snapshot","path":"/","depth":1,"include":"files","fields":["path","kind","length"],"budget":1}"#,
+    ])?;
+    assert_stdout_contains(&filtered_query, "\"kind\":\"session.snapshot.v1\"")?;
+    assert_stdout_contains(&filtered_query, "\"path\":\"/data\"")?;
+    assert_stdout_contains(&filtered_query, "\"kind\":\"file\"")?;
+    assert_stdout_contains(&filtered_query, "\"length\":6")?;
+    assert_stdout_contains(&filtered_query, "\"reason\":\"budget_truncated\"")?;
+
     let snapshot = run_session_until_success(&[
         "session",
         "snapshot",

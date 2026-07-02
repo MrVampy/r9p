@@ -1,8 +1,27 @@
-use super::{json, snapshot, status_json, ControlConfig, ControlRequest};
+use super::{json, options, snapshot, status_json, ControlConfig};
 use crate::{Client, Result};
 use serde_json::{Map, Value};
 
-pub(super) fn parse_json(data: &[u8]) -> std::result::Result<ControlRequest, String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum QueryRequest {
+    Status,
+    Snapshot {
+        path: String,
+        depth: usize,
+        options: options::SnapshotOptions,
+    },
+    Stat {
+        path: String,
+    },
+    List {
+        path: String,
+    },
+    Read {
+        path: String,
+    },
+}
+
+pub(super) fn parse_json(data: &[u8]) -> std::result::Result<QueryRequest, String> {
     let value = serde_json::from_slice::<Value>(data)
         .map_err(|error| format!("invalid query JSON: {error}"))?;
     let object = value
@@ -12,30 +31,34 @@ pub(super) fn parse_json(data: &[u8]) -> std::result::Result<ControlRequest, Str
     match op {
         "status" => {
             reject_unknown_fields(object, &["op"])?;
-            Ok(ControlRequest::Status)
+            Ok(QueryRequest::Status)
         }
         "snapshot" => {
-            reject_unknown_fields(object, &["op", "path", "depth"])?;
-            Ok(ControlRequest::Snapshot {
+            reject_unknown_fields(
+                object,
+                &["op", "path", "depth", "include", "fields", "budget"],
+            )?;
+            Ok(QueryRequest::Snapshot {
                 path: optional_string_field(object, "path")?.unwrap_or_else(|| "/".to_string()),
                 depth: optional_usize_field(object, "depth")?.unwrap_or(1),
+                options: snapshot_options(object)?,
             })
         }
         "stat" => {
             reject_unknown_fields(object, &["op", "path"])?;
-            Ok(ControlRequest::Stat {
+            Ok(QueryRequest::Stat {
                 path: optional_string_field(object, "path")?.unwrap_or_else(|| "/".to_string()),
             })
         }
         "list" => {
             reject_unknown_fields(object, &["op", "path"])?;
-            Ok(ControlRequest::List {
+            Ok(QueryRequest::List {
                 path: optional_string_field(object, "path")?.unwrap_or_else(|| "/".to_string()),
             })
         }
         "read" => {
             reject_unknown_fields(object, &["op", "path"])?;
-            Ok(ControlRequest::Read {
+            Ok(QueryRequest::Read {
                 path: string_field(object, "path")?.to_string(),
             })
         }
@@ -46,7 +69,7 @@ pub(super) fn parse_json(data: &[u8]) -> std::result::Result<ControlRequest, Str
 pub(super) fn response_json(
     client: &Client,
     config: &ControlConfig,
-    request: ControlRequest,
+    request: QueryRequest,
 ) -> String {
     match response_json_result(client, config, request) {
         Ok(response) => response,
@@ -57,17 +80,35 @@ pub(super) fn response_json(
 fn response_json_result(
     client: &Client,
     config: &ControlConfig,
-    request: ControlRequest,
+    request: QueryRequest,
 ) -> Result<String> {
     match request {
-        ControlRequest::Status => status_json(client, config),
-        ControlRequest::Snapshot { path, depth } => {
-            snapshot::snapshot_json(client, &path, depth, config.request_timeout)
-        }
-        ControlRequest::Stat { path } => snapshot::stat_json(client, &path, config.request_timeout),
-        ControlRequest::List { path } => snapshot::list_json(client, &path, config.request_timeout),
-        ControlRequest::Read { path } => snapshot::read_json(client, &path, config.request_timeout),
+        QueryRequest::Status => status_json(client, config),
+        QueryRequest::Snapshot {
+            path,
+            depth,
+            options,
+        } => snapshot::snapshot_json_with_options(
+            client,
+            &path,
+            depth,
+            config.request_timeout,
+            &options,
+        ),
+        QueryRequest::Stat { path } => snapshot::stat_json(client, &path, config.request_timeout),
+        QueryRequest::List { path } => snapshot::list_json(client, &path, config.request_timeout),
+        QueryRequest::Read { path } => snapshot::read_json(client, &path, config.request_timeout),
     }
+}
+
+fn snapshot_options(
+    object: &Map<String, Value>,
+) -> std::result::Result<options::SnapshotOptions, String> {
+    Ok(options::SnapshotOptions {
+        include: optional_include_field(object, "include")?.unwrap_or(options::IncludeKind::Both),
+        fields: optional_fields_field(object, "fields")?.unwrap_or_else(options::EntryFields::all),
+        budget: optional_usize_field(object, "budget")?,
+    })
 }
 
 fn string_field<'a>(
@@ -110,6 +151,38 @@ fn optional_usize_field(
     }
 }
 
+fn optional_include_field(
+    object: &Map<String, Value>,
+    field: &str,
+) -> std::result::Result<Option<options::IncludeKind>, String> {
+    let Some(value) = optional_string_field(object, field)? else {
+        return Ok(None);
+    };
+    options::IncludeKind::from_str(&value)
+        .map(Some)
+        .ok_or_else(|| format!("query field {field} must be one of both, dirs, files"))
+}
+
+fn optional_fields_field(
+    object: &Map<String, Value>,
+    field: &str,
+) -> std::result::Result<Option<options::EntryFields>, String> {
+    let Some(value) = object.get(field) else {
+        return Ok(None);
+    };
+    let array = value
+        .as_array()
+        .ok_or_else(|| format!("query field {field} must be an array"))?;
+    let mut names = Vec::with_capacity(array.len());
+    for item in array {
+        let Some(name) = item.as_str() else {
+            return Err(format!("query field {field} must contain strings"));
+        };
+        names.push(name.to_string());
+    }
+    options::EntryFields::from_names(&names).map(Some)
+}
+
 fn reject_unknown_fields(
     object: &Map<String, Value>,
     allowed: &[&str],
@@ -125,17 +198,48 @@ fn reject_unknown_fields(
 #[cfg(test)]
 mod tests {
     use super::parse_json;
-    use crate::control::ControlRequest;
+    use crate::control::{options::IncludeKind, query::QueryRequest};
 
     #[test]
     fn parses_snapshot_query() {
-        assert_eq!(
-            parse_json(br#"{"op":"snapshot","path":"/srv","depth":2}"#),
-            Ok(ControlRequest::Snapshot {
-                path: "/srv".to_string(),
-                depth: 2
-            })
-        );
+        let request =
+            parse_json(br#"{"op":"snapshot","path":"/srv","depth":2}"#).expect("snapshot query");
+        match request {
+            QueryRequest::Snapshot {
+                path,
+                depth,
+                options,
+            } => {
+                assert_eq!(path, "/srv");
+                assert_eq!(depth, 2);
+                assert_eq!(options.include, IncludeKind::Both);
+                assert_eq!(options.budget, None);
+            }
+            other => panic!("unexpected request {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_snapshot_query_options() {
+        let request = parse_json(
+            br#"{"op":"snapshot","path":"/srv","depth":2,"include":"files","fields":["path","kind","length"],"budget":4}"#,
+        )
+        .expect("snapshot query");
+        match request {
+            QueryRequest::Snapshot {
+                path,
+                depth,
+                options,
+            } => {
+                assert_eq!(path, "/srv");
+                assert_eq!(depth, 2);
+                assert_eq!(options.include, IncludeKind::Files);
+                assert_eq!(options.budget, Some(4));
+                assert!(options.fields.path());
+                assert!(!options.fields.qid());
+            }
+            other => panic!("unexpected request {other:?}"),
+        }
     }
 
     #[test]

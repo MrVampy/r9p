@@ -1,4 +1,4 @@
-use super::json;
+use super::{json, options::SnapshotOptions};
 use crate::{is_dir, is_symlink, read_open_directory_entries, Client, Result, OREAD};
 use r9p::blocking::DEFAULT_READ_CHUNK;
 use r9p::stat::Stat;
@@ -10,9 +10,19 @@ pub fn snapshot_json(
     depth: usize,
     timeout: Duration,
 ) -> Result<String> {
+    snapshot_json_with_options(client, path, depth, timeout, &SnapshotOptions::default())
+}
+
+pub fn snapshot_json_with_options(
+    client: &Client,
+    path: &str,
+    depth: usize,
+    timeout: Duration,
+    options: &SnapshotOptions,
+) -> Result<String> {
     let segments = parse_namespace_path(path);
     let mut report = SnapshotReport::default();
-    collect_snapshot(client, &segments, depth, timeout, &mut report)?;
+    collect_snapshot(client, &segments, depth, timeout, options, &mut report)?;
 
     let mut out = String::from("{\"ok\":true,\"kind\":\"session.snapshot.v1\",\"path\":");
     json::push_string(&mut out, &format_path(&segments));
@@ -23,7 +33,7 @@ pub fn snapshot_json(
         if index > 0 {
             out.push(',');
         }
-        push_snapshot_entry(&mut out, entry);
+        push_snapshot_entry(&mut out, entry, options);
     }
     out.push_str("],\"degraded\":[");
     for (index, degraded) in report.degraded.iter().enumerate() {
@@ -44,6 +54,7 @@ pub fn stat_json(client: &Client, path: &str, timeout: Duration) -> Result<Strin
         push_snapshot_entry(
             &mut out,
             &SnapshotEntry::from_stat(format_path(&segments), &stat),
+            &SnapshotOptions::default(),
         );
         out.push('}');
         Ok(out)
@@ -75,6 +86,7 @@ pub fn list_json(client: &Client, path: &str, timeout: Duration) -> Result<Strin
             push_snapshot_entry(
                 &mut out,
                 &SnapshotEntry::from_stat(format_path(&child_path), &entry.stat),
+                &SnapshotOptions::default(),
             );
         }
         out.push_str("]}");
@@ -110,13 +122,14 @@ fn collect_snapshot(
     segments: &[Vec<u8>],
     depth: usize,
     timeout: Duration,
+    options: &SnapshotOptions,
     report: &mut SnapshotReport,
 ) -> Result<()> {
     with_owned_fid(client, segments, timeout, |fid| {
         let stat = client.stat_timeout(fid, timeout)?;
         let path = format_path(segments);
         let is_directory = is_dir(&stat);
-        report.entries.push(SnapshotEntry {
+        let entry = SnapshotEntry {
             path,
             name: json::bytes_lossy(&stat.name),
             kind: kind(&stat),
@@ -125,9 +138,20 @@ fn collect_snapshot(
             qid_type: stat.qid.qtype,
             mode: stat.mode,
             length: stat.length,
-        });
+            mtime: stat.mtime,
+        };
+        let include_entry = options.include.includes(entry.kind);
+        if include_entry && !report.push_entry(entry, options) {
+            return Ok(());
+        }
 
         if is_directory && depth > 0 {
+            if report.entries_full(options) {
+                report
+                    .degraded
+                    .push(DegradedBranch::budget_truncated(format_path(segments)));
+                return Ok(());
+            }
             client.open_timeout(fid, OREAD, timeout)?;
             let children = read_open_directory_entries(client, fid, timeout)?;
             for child in children {
@@ -136,8 +160,14 @@ fn collect_snapshot(
                 }
                 let mut child_path = segments.to_vec();
                 child_path.push(child.name);
+                if report.entries_full(options) {
+                    report
+                        .degraded
+                        .push(DegradedBranch::budget_truncated(format_path(&child_path)));
+                    continue;
+                }
                 if let Err(error) =
-                    collect_snapshot(client, &child_path, depth - 1, timeout, report)
+                    collect_snapshot(client, &child_path, depth - 1, timeout, options, report)
                 {
                     report
                         .degraded
@@ -221,24 +251,82 @@ fn kind(stat: &Stat) -> &'static str {
     }
 }
 
-fn push_snapshot_entry(out: &mut String, entry: &SnapshotEntry) {
-    out.push_str("{\"path\":");
-    json::push_string(out, &entry.path);
-    out.push_str(",\"name\":");
-    json::push_string(out, &entry.name);
-    out.push_str(",\"kind\":");
-    json::push_string(out, entry.kind);
-    out.push_str(",\"qid\":{\"path\":");
-    out.push_str(&entry.qid_path.to_string());
-    out.push_str(",\"version\":");
-    out.push_str(&entry.qid_version.to_string());
-    out.push_str(",\"type\":");
-    out.push_str(&entry.qid_type.to_string());
-    out.push_str("},\"mode\":");
-    out.push_str(&entry.mode.to_string());
-    out.push_str(",\"length\":");
-    out.push_str(&entry.length.to_string());
+fn push_snapshot_entry(out: &mut String, entry: &SnapshotEntry, options: &SnapshotOptions) {
+    let mut first = true;
+    out.push('{');
+    push_entry_string_field(out, &mut first, "path", &entry.path, options.fields.path());
+    push_entry_string_field(out, &mut first, "name", &entry.name, options.fields.name());
+    push_entry_string_field(out, &mut first, "kind", entry.kind, options.fields.kind());
+    if options.fields.qid() {
+        push_entry_separator(out, &mut first);
+        out.push_str("\"qid\":{\"path\":");
+        out.push_str(&entry.qid_path.to_string());
+        out.push_str(",\"version\":");
+        out.push_str(&entry.qid_version.to_string());
+        out.push_str(",\"type\":");
+        out.push_str(&entry.qid_type.to_string());
+        out.push('}');
+    }
+    push_entry_number_field(
+        out,
+        &mut first,
+        "mode",
+        entry.mode.into(),
+        options.fields.mode(),
+    );
+    push_entry_number_field(
+        out,
+        &mut first,
+        "length",
+        entry.length,
+        options.fields.length(),
+    );
+    push_entry_number_field(
+        out,
+        &mut first,
+        "mtime",
+        entry.mtime.into(),
+        options.fields.mtime(),
+    );
     out.push('}');
+}
+
+fn push_entry_string_field(
+    out: &mut String,
+    first: &mut bool,
+    name: &str,
+    value: &str,
+    include: bool,
+) {
+    if include {
+        push_entry_separator(out, first);
+        json::push_string(out, name);
+        out.push(':');
+        json::push_string(out, value);
+    }
+}
+
+fn push_entry_number_field(
+    out: &mut String,
+    first: &mut bool,
+    name: &str,
+    value: u64,
+    include: bool,
+) {
+    if include {
+        push_entry_separator(out, first);
+        json::push_string(out, name);
+        out.push(':');
+        out.push_str(&value.to_string());
+    }
+}
+
+fn push_entry_separator(out: &mut String, first: &mut bool) {
+    if *first {
+        *first = false;
+    } else {
+        out.push(',');
+    }
 }
 
 fn push_degraded_branch(out: &mut String, branch: &DegradedBranch) {
@@ -257,6 +345,24 @@ struct SnapshotReport {
     degraded: Vec<DegradedBranch>,
 }
 
+impl SnapshotReport {
+    fn push_entry(&mut self, entry: SnapshotEntry, options: &SnapshotOptions) -> bool {
+        if self.entries_full(options) {
+            self.degraded
+                .push(DegradedBranch::budget_truncated(entry.path));
+            return false;
+        }
+        self.entries.push(entry);
+        true
+    }
+
+    fn entries_full(&self, options: &SnapshotOptions) -> bool {
+        options
+            .budget
+            .is_some_and(|budget| self.entries.len() >= budget)
+    }
+}
+
 struct SnapshotEntry {
     path: String,
     name: String,
@@ -266,6 +372,7 @@ struct SnapshotEntry {
     qid_type: u8,
     mode: u32,
     length: u64,
+    mtime: u32,
 }
 
 struct DegradedBranch {
@@ -285,6 +392,7 @@ impl SnapshotEntry {
             qid_type: stat.qid.qtype,
             mode: stat.mode,
             length: stat.length,
+            mtime: stat.mtime,
         }
     }
 }
@@ -295,6 +403,16 @@ impl DegradedBranch {
             path,
             reason: degraded_reason(error.errno),
             message: error.message().to_string(),
+        }
+    }
+}
+
+impl DegradedBranch {
+    fn budget_truncated(path: String) -> Self {
+        Self {
+            path,
+            reason: "budget_truncated",
+            message: "snapshot entry budget reached".to_string(),
         }
     }
 }

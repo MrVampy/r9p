@@ -1,15 +1,10 @@
 use crate::error::{Error, Result};
-use r9p::{
-    blocking::DEFAULT_READ_CHUNK,
-    fid::Fid,
-    qid::{Qid, DMDIR, DMSYMLINK, QTDIR, QTSYMLINK},
-    stat::{decode_dir_entries as decode_p9_dir_entries, Stat},
+use r9p::{fid::Fid, qid::Qid, stat::Stat};
+pub use session::{
+    is_dir, is_symlink, null_wstat, read_open_directory_entries, DirCache, DirEntry,
 };
-use session::Client;
-use std::{
-    collections::BTreeMap,
-    time::{Duration, Instant},
-};
+use session::{same_qid, Freshness, StaleReason};
+use std::collections::BTreeMap;
 
 mod handles;
 pub use handles::Handle;
@@ -27,24 +22,11 @@ pub struct Node {
     pub path: Vec<Vec<u8>>,
     pub qid: Qid,
     pub stat: Stat,
-    pub stat_cached_at: Instant,
+    pub stat_freshness: Freshness,
     pub dir_cache: Option<DirCache>,
     pub generation: u64,
     pub lookups: u64,
     pub needs_rebind: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct DirCache {
-    pub entries: Vec<DirEntry>,
-    pub cached_at: Instant,
-}
-
-#[derive(Debug, Clone)]
-pub struct DirEntry {
-    pub name: Vec<u8>,
-    pub qid: Qid,
-    pub stat: Stat,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,7 +53,6 @@ pub struct NodeTable {
 
 impl NodeTable {
     pub fn new(root_fid: Fid, root_stat: Stat) -> Self {
-        let now = Instant::now();
         let mut nodes = BTreeMap::new();
         nodes.insert(
             ROOT_NODEID,
@@ -80,7 +61,7 @@ impl NodeTable {
                 path: Vec::new(),
                 qid: root_stat.qid,
                 stat: root_stat,
-                stat_cached_at: now,
+                stat_freshness: Freshness::fresh_now(),
                 dir_cache: None,
                 generation: 1,
                 lookups: 1,
@@ -136,7 +117,6 @@ impl NodeTable {
     ) -> Result<InsertedNode> {
         let mut path = self.node(parent_nodeid)?.path.clone();
         path.push(name.to_vec());
-        let now = Instant::now();
         if let Some(nodeid) = self.nodeid_at_path(&path) {
             let node = self
                 .nodes
@@ -157,7 +137,7 @@ impl NodeTable {
             };
             node.qid = stat.qid;
             node.stat = stat;
-            node.stat_cached_at = now;
+            node.stat_freshness.mark_fresh();
             if qid_changed || !is_dir(&node.stat) {
                 node.dir_cache = None;
             }
@@ -177,7 +157,7 @@ impl NodeTable {
                 path,
                 qid: stat.qid,
                 stat,
-                stat_cached_at: now,
+                stat_freshness: Freshness::fresh_now(),
                 dir_cache: None,
                 generation: 1,
                 lookups: 1,
@@ -217,7 +197,7 @@ impl NodeTable {
         node.fid = Some(fid);
         node.qid = stat.qid;
         node.stat = stat;
-        node.stat_cached_at = Instant::now();
+        node.stat_freshness.mark_fresh();
         if identity_changed || !is_dir(&node.stat) {
             node.dir_cache = None;
         }
@@ -233,7 +213,7 @@ impl NodeTable {
         let identity_changed = !same_inode_identity(node, &stat);
         node.qid = stat.qid;
         node.stat = stat;
-        node.stat_cached_at = Instant::now();
+        node.stat_freshness.mark_fresh();
         if identity_changed || !is_dir(&node.stat) {
             node.dir_cache = None;
         }
@@ -246,10 +226,7 @@ impl NodeTable {
         if !is_dir(&node.stat) {
             return Err(Error::new(libc::ENOTDIR, "node is not a directory"));
         }
-        node.dir_cache = Some(DirCache {
-            entries,
-            cached_at: Instant::now(),
-        });
+        node.dir_cache = Some(DirCache::fresh(entries));
         Ok(())
     }
 
@@ -262,7 +239,7 @@ impl NodeTable {
                 }
                 node.qid = stat.qid;
                 node.stat = stat.clone();
-                node.stat_cached_at = Instant::now();
+                node.stat_freshness.mark_fresh();
                 if identity_changed || !is_dir(&node.stat) {
                     node.dir_cache = None;
                 }
@@ -291,7 +268,7 @@ impl NodeTable {
                 }
                 node.qid = stat.qid;
                 node.stat = stat;
-                node.stat_cached_at = Instant::now();
+                node.stat_freshness.mark_fresh();
                 if identity_changed || !is_dir(&node.stat) {
                     node.dir_cache = None;
                 }
@@ -379,6 +356,7 @@ impl NodeTable {
                     replaced.push(fid);
                 }
                 node.needs_rebind = true;
+                node.stat_freshness.mark_stale(StaleReason::Reconnect);
                 node.dir_cache = None;
             }
         }
@@ -391,7 +369,7 @@ impl NodeTable {
                 node.fid = Some(fid);
                 node.qid = stat.qid;
                 node.stat = stat;
-                node.stat_cached_at = Instant::now();
+                node.stat_freshness.mark_fresh();
                 if identity_changed || !is_dir(&node.stat) {
                     node.dir_cache = None;
                 }
@@ -454,6 +432,7 @@ impl NodeTable {
                 .unwrap_or_else(|| node.stat.name.clone());
             let fid = node.fid.take();
             node.needs_rebind = true;
+            node.stat_freshness.mark_stale(StaleReason::NamespaceChange);
             node.dir_cache = None;
             stale.push(StaleBinding {
                 nodeid: *nodeid,
@@ -470,14 +449,6 @@ pub fn qid_to_inode(qid: Qid) -> u64 {
     (qid.path & ((1_u64 << 55) - 1)) | (u64::from(qid.qtype) << 55)
 }
 
-pub fn is_dir(stat: &Stat) -> bool {
-    stat.qid.qtype & QTDIR != 0 || stat.mode & DMDIR != 0
-}
-
-pub fn is_symlink(stat: &Stat) -> bool {
-    stat.qid.qtype & QTSYMLINK != 0 || stat.mode & DMSYMLINK != 0
-}
-
 pub fn mode_kind(stat: &Stat) -> u32 {
     if is_dir(stat) {
         libc::S_IFDIR
@@ -486,57 +457,6 @@ pub fn mode_kind(stat: &Stat) -> u32 {
     } else {
         libc::S_IFREG
     }
-}
-
-pub fn read_open_directory_entries(
-    client: &Client,
-    fid: Fid,
-    timeout: Duration,
-) -> Result<Vec<DirEntry>> {
-    let mut offset = 0_u64;
-    let mut all = Vec::new();
-    loop {
-        let chunk = client.read_timeout(fid, offset, DEFAULT_READ_CHUNK, timeout)?;
-        if chunk.is_empty() {
-            break;
-        }
-        offset = offset.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
-        all.extend(chunk);
-    }
-    decode_dir_entries(&all)
-}
-
-pub fn decode_dir_entries(data: &[u8]) -> Result<Vec<DirEntry>> {
-    let entries = decode_p9_dir_entries(data)
-        .map_err(|error| Error::new(libc::EPROTO, format!("decode dir stat: {error}")))?
-        .into_iter()
-        .map(|stat| DirEntry {
-            name: stat.name.clone(),
-            qid: stat.qid,
-            stat,
-        })
-        .collect::<Vec<_>>();
-    Ok(entries)
-}
-
-pub fn null_wstat() -> Stat {
-    Stat {
-        type_: u16::MAX,
-        dev: u32::MAX,
-        qid: Qid::new(u8::MAX, u32::MAX, u64::MAX),
-        mode: u32::MAX,
-        atime: u32::MAX,
-        mtime: u32::MAX,
-        length: u64::MAX,
-        name: Vec::new(),
-        uid: Vec::new(),
-        gid: Vec::new(),
-        muid: Vec::new(),
-    }
-}
-
-fn same_qid(a: Qid, b: Qid) -> bool {
-    a.path == b.path && a.version == b.version && a.qtype == b.qtype
 }
 
 fn same_inode_identity(node: &Node, stat: &Stat) -> bool {
@@ -548,568 +468,4 @@ fn path_has_prefix(path: &[Vec<u8>], prefix: &[Vec<u8>]) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{mode_kind, qid_to_inode, DirEntry, NodeTable, ROOT_NODEID};
-    use r9p::qid::{Qid, DMSYMLINK};
-    use r9p::stat::Stat;
-
-    #[test]
-    fn inode_stays_under_signed_stat_boundary() {
-        let inode = qid_to_inode(Qid::new(0x80, 0, u64::MAX));
-        assert!(inode < (1_u64 << 63));
-    }
-
-    #[test]
-    fn symlink_stats_map_to_fuse_symlink_mode() {
-        let stat = Stat::new(
-            "link",
-            Qid::new(r9p::qid::QTSYMLINK, 0, 7),
-            DMSYMLINK | 0o777,
-        );
-
-        assert_eq!(
-            libc::S_IFLNK | 0o777,
-            mode_kind(&stat) | (stat.mode & 0o777)
-        );
-    }
-
-    #[test]
-    fn lookup_nodes_remember_path_lineage() {
-        let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
-        let docs = nodes
-            .insert_lookup(
-                ROOT_NODEID,
-                2,
-                Stat::new("docs", Qid::dir(2), 0o555),
-                b"docs",
-            )
-            .map(|inserted| inserted.nodeid)
-            .expect("docs node should insert");
-        let alpha = nodes
-            .insert_lookup(
-                docs,
-                3,
-                Stat::new("alpha.md", Qid::file(3), 0o444),
-                b"alpha.md",
-            )
-            .map(|inserted| inserted.nodeid)
-            .expect("alpha node should insert");
-
-        assert_eq!(nodes.node(docs).expect("docs").path, vec![b"docs".to_vec()]);
-        assert_eq!(
-            nodes.node(alpha).expect("alpha").path,
-            vec![b"docs".to_vec(), b"alpha.md".to_vec()]
-        );
-    }
-
-    #[test]
-    fn parent_nodeid_follows_path_lineage() {
-        let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
-        let docs = nodes
-            .insert_lookup(
-                ROOT_NODEID,
-                2,
-                Stat::new("docs", Qid::dir(2), 0o555),
-                b"docs",
-            )
-            .map(|inserted| inserted.nodeid)
-            .expect("docs node should insert");
-        let alpha = nodes
-            .insert_lookup(
-                docs,
-                3,
-                Stat::new("alpha.md", Qid::file(3), 0o444),
-                b"alpha.md",
-            )
-            .map(|inserted| inserted.nodeid)
-            .expect("alpha node should insert");
-
-        assert_eq!(
-            nodes.parent_nodeid(ROOT_NODEID).expect("root parent"),
-            ROOT_NODEID
-        );
-        assert_eq!(nodes.parent_nodeid(docs).expect("docs parent"), ROOT_NODEID);
-        assert_eq!(nodes.parent_nodeid(alpha).expect("alpha parent"), docs);
-    }
-
-    #[test]
-    fn lazy_lookup_nodes_keep_stat_without_a_fid_until_bound() {
-        let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
-        let docs = nodes
-            .insert_lookup_lazy(ROOT_NODEID, Stat::new("docs", Qid::dir(2), 0o555), b"docs")
-            .expect("docs node should insert");
-
-        let lazy = nodes.node(docs).expect("docs");
-        assert_eq!(lazy.fid, None);
-        assert_eq!(lazy.path, vec![b"docs".to_vec()]);
-        assert_eq!(lazy.stat.qid, Qid::dir(2));
-
-        let replaced = nodes
-            .replace_binding(docs, 2, Stat::new("docs", Qid::dir(3), 0o555))
-            .expect("docs node should bind");
-
-        assert_eq!(replaced, None);
-        let bound = nodes.node(docs).expect("docs");
-        assert_eq!(bound.fid, Some(2));
-        assert_eq!(bound.stat.qid, Qid::dir(3));
-    }
-
-    #[test]
-    fn replacing_binding_returns_superseded_fid() {
-        let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
-        let docs = nodes
-            .insert_lookup(
-                ROOT_NODEID,
-                2,
-                Stat::new("docs", Qid::dir(2), 0o555),
-                b"docs",
-            )
-            .map(|inserted| inserted.nodeid)
-            .expect("docs node should insert");
-
-        let replaced = nodes
-            .replace_binding(docs, 3, Stat::new("docs", Qid::dir(3), 0o555))
-            .expect("docs node should rebind");
-
-        assert_eq!(replaced, Some(2));
-        let rebound = nodes.node(docs).expect("docs");
-        assert_eq!(rebound.fid, Some(3));
-        assert_eq!(rebound.stat.qid, Qid::dir(3));
-    }
-
-    #[test]
-    fn rebinding_same_inode_keeps_generation_stable() {
-        let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
-        let docs = nodes
-            .insert_lookup(
-                ROOT_NODEID,
-                2,
-                Stat::new("docs", Qid::dir(2), 0o555),
-                b"docs",
-            )
-            .map(|inserted| inserted.nodeid)
-            .expect("docs node should insert");
-
-        let generation = nodes.node(docs).expect("docs").generation;
-        let replaced = nodes
-            .replace_binding(docs, 3, Stat::new("docs", Qid::dir(2), 0o555))
-            .expect("docs node should rebind");
-
-        assert_eq!(replaced, Some(2));
-        assert_eq!(nodes.node(docs).expect("docs").generation, generation);
-    }
-
-    #[test]
-    fn rebinding_new_inode_bumps_generation() {
-        let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
-        let docs = nodes
-            .insert_lookup(
-                ROOT_NODEID,
-                2,
-                Stat::new("docs", Qid::dir(2), 0o555),
-                b"docs",
-            )
-            .map(|inserted| inserted.nodeid)
-            .expect("docs node should insert");
-
-        let generation = nodes.node(docs).expect("docs").generation;
-        let _ = nodes
-            .replace_binding(docs, 3, Stat::new("docs", Qid::dir(3), 0o555))
-            .expect("docs node should rebind");
-
-        assert!(nodes.node(docs).expect("docs").generation > generation);
-    }
-
-    #[test]
-    fn directory_entry_cache_survives_same_directory_stat_refresh() {
-        let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
-        let docs = nodes
-            .insert_lookup(
-                ROOT_NODEID,
-                2,
-                Stat::new("docs", Qid::dir(2), 0o555),
-                b"docs",
-            )
-            .map(|inserted| inserted.nodeid)
-            .expect("docs node should insert");
-
-        nodes
-            .update_dir_cache(
-                docs,
-                vec![DirEntry {
-                    name: b"alpha.md".to_vec(),
-                    qid: Qid::file(3),
-                    stat: Stat::new("alpha.md", Qid::file(3), 0o444),
-                }],
-            )
-            .expect("directory cache should update");
-        nodes
-            .update_stat(docs, Stat::new("docs", Qid::dir(2), 0o555))
-            .expect("same directory stat should update");
-
-        assert_eq!(
-            nodes
-                .node(docs)
-                .expect("docs")
-                .dir_cache
-                .as_ref()
-                .expect("cache should survive")
-                .entries
-                .len(),
-            1
-        );
-    }
-
-    #[test]
-    fn directory_entry_cache_clears_when_directory_identity_changes() {
-        let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
-        let docs = nodes
-            .insert_lookup(
-                ROOT_NODEID,
-                2,
-                Stat::new("docs", Qid::dir(2), 0o555),
-                b"docs",
-            )
-            .map(|inserted| inserted.nodeid)
-            .expect("docs node should insert");
-
-        nodes
-            .update_dir_cache(docs, Vec::new())
-            .expect("directory cache should update");
-        nodes
-            .update_stat(docs, Stat::new("docs", Qid::dir(7), 0o555))
-            .expect("changed directory stat should update");
-
-        assert!(nodes.node(docs).expect("docs").dir_cache.is_none());
-    }
-
-    #[test]
-    fn directory_entry_cache_clears_when_marked_stale() {
-        let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
-        let docs = nodes
-            .insert_lookup(
-                ROOT_NODEID,
-                2,
-                Stat::new("docs", Qid::dir(2), 0o555),
-                b"docs",
-            )
-            .map(|inserted| inserted.nodeid)
-            .expect("docs node should insert");
-
-        nodes
-            .update_dir_cache(docs, Vec::new())
-            .expect("directory cache should update");
-        let stale = nodes.mark_path_stale(&[b"docs".to_vec()]);
-
-        assert_eq!(stale.len(), 1);
-        assert!(nodes.node(docs).expect("docs").dir_cache.is_none());
-    }
-
-    #[test]
-    fn forgetting_lazy_nodes_has_no_fid_to_clunk() {
-        let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
-        let docs = nodes
-            .insert_lookup_lazy(ROOT_NODEID, Stat::new("docs", Qid::dir(2), 0o555), b"docs")
-            .expect("docs node should insert");
-
-        assert_eq!(nodes.forget(docs, 1), None);
-        assert!(nodes.node(docs).is_err());
-    }
-
-    #[test]
-    fn forget_returns_removed_fid_without_clunking_under_lock() {
-        let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
-        let docs = nodes
-            .insert_lookup(
-                ROOT_NODEID,
-                2,
-                Stat::new("docs", Qid::dir(2), 0o555),
-                b"docs",
-            )
-            .map(|inserted| inserted.nodeid)
-            .expect("docs node should insert");
-
-        assert_eq!(nodes.forget(docs, 1), Some(2));
-        assert!(nodes.node(docs).is_err());
-    }
-
-    #[test]
-    fn lookup_reuses_path_and_discards_duplicate_fid() {
-        let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
-        let first = nodes
-            .insert_lookup(
-                ROOT_NODEID,
-                2,
-                Stat::new("docs", Qid::dir(2), 0o555),
-                b"docs",
-            )
-            .expect("first docs lookup should insert");
-        let second = nodes
-            .insert_lookup(
-                ROOT_NODEID,
-                3,
-                Stat::new("docs", Qid::dir(2), 0o555),
-                b"docs",
-            )
-            .expect("second docs lookup should reuse path");
-
-        assert_eq!(second.nodeid, first.nodeid);
-        assert_eq!(second.clunk_fid, Some(3));
-        let docs = nodes.node(second.nodeid).expect("docs");
-        assert_eq!(docs.fid, Some(2));
-        assert_eq!(docs.lookups, 2);
-    }
-
-    #[test]
-    fn remove_path_subtree_drops_cached_descendants() {
-        let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
-        let docs = nodes
-            .insert_lookup(
-                ROOT_NODEID,
-                2,
-                Stat::new("docs", Qid::dir(2), 0o555),
-                b"docs",
-            )
-            .map(|inserted| inserted.nodeid)
-            .expect("docs node should insert");
-        let alpha = nodes
-            .insert_lookup(
-                docs,
-                3,
-                Stat::new("alpha.md", Qid::file(3), 0o444),
-                b"alpha.md",
-            )
-            .map(|inserted| inserted.nodeid)
-            .expect("alpha node should insert");
-
-        let stale = nodes.remove_path_subtree(&[b"docs".to_vec()]);
-
-        assert_eq!(stale, vec![2, 3]);
-        assert!(nodes.node(docs).is_err());
-        assert!(nodes.node(alpha).is_err());
-        assert!(nodes.node(ROOT_NODEID).is_ok());
-    }
-
-    #[test]
-    fn move_path_prefix_moves_cached_descendants() {
-        let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
-        let docs = nodes
-            .insert_lookup(
-                ROOT_NODEID,
-                2,
-                Stat::new("docs", Qid::dir(2), 0o555),
-                b"docs",
-            )
-            .map(|inserted| inserted.nodeid)
-            .expect("docs node should insert");
-        let alpha = nodes
-            .insert_lookup(
-                docs,
-                3,
-                Stat::new("alpha.md", Qid::file(3), 0o444),
-                b"alpha.md",
-            )
-            .map(|inserted| inserted.nodeid)
-            .expect("alpha node should insert");
-
-        nodes.move_path_prefix(&[b"docs".to_vec()], &[b"notes".to_vec()]);
-
-        assert_eq!(
-            nodes.node(docs).expect("docs").path,
-            vec![b"notes".to_vec()]
-        );
-        assert_eq!(
-            nodes.node(alpha).expect("alpha").path,
-            vec![b"notes".to_vec(), b"alpha.md".to_vec()]
-        );
-    }
-
-    #[test]
-    fn rebind_paths_snapshots_paths_without_network_work() {
-        let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
-        let docs = nodes
-            .insert_lookup(
-                ROOT_NODEID,
-                2,
-                Stat::new("docs", Qid::dir(2), 0o555),
-                b"docs",
-            )
-            .map(|inserted| inserted.nodeid)
-            .expect("docs node should insert");
-        let alpha = nodes
-            .insert_lookup(
-                docs,
-                3,
-                Stat::new("alpha.md", Qid::file(3), 0o444),
-                b"alpha.md",
-            )
-            .map(|inserted| inserted.nodeid)
-            .expect("alpha node should insert");
-
-        let paths = nodes.rebind_paths();
-
-        assert_eq!(
-            paths,
-            vec![
-                (ROOT_NODEID, vec![]),
-                (docs, vec![b"docs".to_vec()]),
-                (alpha, vec![b"docs".to_vec(), b"alpha.md".to_vec()]),
-            ]
-        );
-    }
-
-    #[test]
-    fn apply_rebind_results_updates_fresh_nodes_and_marks_stale_nodes_for_lazy_rebind() {
-        let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
-        let docs = nodes
-            .insert_lookup(
-                ROOT_NODEID,
-                2,
-                Stat::new("docs", Qid::dir(2), 0o555),
-                b"docs",
-            )
-            .map(|inserted| inserted.nodeid)
-            .expect("docs node should insert");
-        let stale = nodes
-            .insert_lookup(
-                docs,
-                3,
-                Stat::new("stale.md", Qid::file(3), 0o444),
-                b"stale.md",
-            )
-            .map(|inserted| inserted.nodeid)
-            .expect("stale node should insert");
-
-        let replaced = nodes.apply_rebind_results(
-            vec![
-                (ROOT_NODEID, 10, Stat::new("", Qid::dir(10), 0o555)),
-                (docs, 11, Stat::new("docs", Qid::dir(11), 0o555)),
-            ],
-            vec![stale],
-        );
-
-        assert_eq!(replaced, vec![3, 1, 2]);
-        assert_eq!(nodes.node(ROOT_NODEID).expect("root").fid, Some(10));
-        assert_eq!(nodes.node(ROOT_NODEID).expect("root").qid, Qid::dir(10));
-        assert_eq!(nodes.node(docs).expect("docs").fid, Some(11));
-        assert_eq!(nodes.node(docs).expect("docs").qid, Qid::dir(11));
-        let stale_node = nodes.node(stale).expect("stale node");
-        assert_eq!(stale_node.fid, None);
-        assert!(stale_node.needs_rebind);
-    }
-
-    #[test]
-    fn apply_rebind_results_keeps_generation_for_same_inode_refresh() {
-        let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
-        let docs = nodes
-            .insert_lookup(
-                ROOT_NODEID,
-                2,
-                Stat::new("docs", Qid::dir(2), 0o555),
-                b"docs",
-            )
-            .map(|inserted| inserted.nodeid)
-            .expect("docs node should insert");
-        let generation = nodes.node(docs).expect("docs").generation;
-
-        let replaced = nodes.apply_rebind_results(
-            vec![(docs, 3, Stat::new("docs", Qid::dir(2), 0o555))],
-            vec![],
-        );
-
-        assert_eq!(replaced, vec![2]);
-        assert_eq!(nodes.node(docs).expect("docs").generation, generation);
-    }
-
-    #[test]
-    fn targeted_stale_marking_leaves_unrelated_nodes_fresh() {
-        let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
-        let a = nodes
-            .insert_lookup(ROOT_NODEID, 2, Stat::new("a", Qid::dir(2), 0o555), b"a")
-            .map(|inserted| inserted.nodeid)
-            .expect("a node should insert");
-        let b = nodes
-            .insert_lookup(ROOT_NODEID, 3, Stat::new("b", Qid::dir(3), 0o555), b"b")
-            .map(|inserted| inserted.nodeid)
-            .expect("b node should insert");
-        let child = nodes
-            .insert_lookup(a, 4, Stat::new("child", Qid::file(4), 0o444), b"child")
-            .map(|inserted| inserted.nodeid)
-            .expect("child node should insert");
-
-        let stale = nodes.mark_path_prefix_stale(&[b"a".to_vec()]);
-
-        assert_eq!(stale.len(), 2);
-        assert!(nodes.node(a).expect("a").needs_rebind);
-        assert!(nodes.node(child).expect("child").needs_rebind);
-        assert!(!nodes.node(b).expect("b").needs_rebind);
-        assert_eq!(
-            nodes.parent_entry(&[b"a".to_vec(), b"child".to_vec()]),
-            Some((a, b"child".to_vec()))
-        );
-    }
-
-    #[test]
-    fn forget_decrements_lookup_count_before_removing() {
-        let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
-        let docs = nodes
-            .insert_lookup(
-                ROOT_NODEID,
-                2,
-                Stat::new("docs", Qid::dir(2), 0o555),
-                b"docs",
-            )
-            .map(|inserted| inserted.nodeid)
-            .expect("docs node should insert");
-        nodes.node_mut(docs).expect("docs").lookups = 2;
-
-        assert_eq!(nodes.forget(docs, 1), None);
-        assert_eq!(nodes.node(docs).expect("docs").lookups, 1);
-        assert_eq!(nodes.forget(docs, 1), Some(2));
-    }
-
-    #[test]
-    fn namespace_mutation_marks_path_bindings_stale_without_network_rebind() {
-        let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
-        let docs = nodes
-            .insert_lookup(
-                ROOT_NODEID,
-                2,
-                Stat::new("docs", Qid::dir(2), 0o555),
-                b"docs",
-            )
-            .map(|inserted| inserted.nodeid)
-            .expect("docs node should insert");
-        let alpha = nodes
-            .insert_lookup(
-                docs,
-                3,
-                Stat::new("alpha.md", Qid::file(3), 0o444),
-                b"alpha.md",
-            )
-            .map(|inserted| inserted.nodeid)
-            .expect("alpha node should insert");
-
-        let stale = nodes.mark_path_bindings_stale();
-
-        assert_eq!(
-            stale.iter().map(|binding| binding.fid).collect::<Vec<_>>(),
-            vec![Some(2), Some(3)]
-        );
-        assert_eq!(stale[0].nodeid, docs);
-        assert_eq!(stale[0].parent_nodeid, Some(ROOT_NODEID));
-        assert_eq!(stale[0].name, b"docs".to_vec());
-        assert_eq!(stale[1].nodeid, alpha);
-        assert_eq!(stale[1].parent_nodeid, Some(docs));
-        assert_eq!(stale[1].name, b"alpha.md".to_vec());
-        let root = nodes.node(ROOT_NODEID).expect("root");
-        assert_eq!(root.fid, Some(1));
-        assert!(!root.needs_rebind);
-        let docs_node = nodes.node(docs).expect("docs");
-        assert_eq!(docs_node.fid, None);
-        assert!(docs_node.needs_rebind);
-        let alpha_node = nodes.node(alpha).expect("alpha");
-        assert_eq!(alpha_node.fid, None);
-        assert!(alpha_node.needs_rebind);
-    }
-}
+mod tests;

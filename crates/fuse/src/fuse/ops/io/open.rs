@@ -109,7 +109,7 @@ impl R9pFuse {
                 }
                 Err(error) => {
                     let _ = client.clunk_timeout(fid, self.control_timeout());
-                    return Err(error);
+                    return Err(error.into());
                 }
             }
         } else {

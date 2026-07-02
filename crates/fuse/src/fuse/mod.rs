@@ -308,11 +308,10 @@ impl R9pFuse {
         if node.needs_rebind || self.config.attr_timeout.is_zero() {
             return Ok(None);
         }
-        if !stat_cache_valid_at(
-            node.stat_cached_at,
-            Instant::now(),
-            self.config.attr_timeout,
-        ) {
+        if !node
+            .stat_freshness
+            .is_fresh_at(Instant::now(), self.config.attr_timeout)
+        {
             return Ok(None);
         }
         Ok(Some(node.stat.clone()))
@@ -330,7 +329,7 @@ impl R9pFuse {
         let Some(cache) = &node.dir_cache else {
             return Ok(None);
         };
-        if !stat_cache_valid_at(cache.cached_at, Instant::now(), self.config.entry_timeout) {
+        if !cache.is_fresh_at(Instant::now(), self.config.entry_timeout) {
             return Ok(None);
         }
         Ok(Some(cache.entries.clone()))
@@ -579,10 +578,6 @@ fn normalize_config(config: &mut Config) {
     }
 }
 
-fn stat_cache_valid_at(cached_at: Instant, now: Instant, timeout: Duration) -> bool {
-    !timeout.is_zero() && now.duration_since(cached_at) <= timeout
-}
-
 #[cfg(test)]
 mod tests {
     use super::ops::encode_dirents;
@@ -592,14 +587,14 @@ mod tests {
     };
     use super::wire::{FOPEN_CACHE_DIR, FOPEN_DIRECT_IO, FOPEN_KEEP_CACHE};
     use super::{
-        change_feed, default_congestion_threshold, normalize_config, stat_cache_valid_at, Config,
+        change_feed, default_congestion_threshold, normalize_config, Config,
         DEFAULT_CHANGE_FEED_POLL_INTERVAL, DEFAULT_MAX_BACKGROUND, DEFAULT_MAX_WORKERS,
     };
     use crate::error::Error;
     use crate::node::DirEntry;
     use r9p::{qid::Qid, stat::Stat};
     use session::{ORDWR, OREAD, OTRUNC, OWRITE};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     #[test]
     fn maps_truncating_write_flags_to_9p_mode() {
@@ -811,27 +806,6 @@ mod tests {
             config.congestion_threshold,
             default_congestion_threshold(DEFAULT_MAX_BACKGROUND)
         );
-    }
-
-    #[test]
-    fn stat_cache_validity_obeys_configured_ttl() {
-        let cached_at = Instant::now();
-        assert!(!stat_cache_valid_at(cached_at, cached_at, Duration::ZERO));
-        assert!(stat_cache_valid_at(
-            cached_at,
-            cached_at + Duration::from_millis(999),
-            Duration::from_secs(1)
-        ));
-        assert!(stat_cache_valid_at(
-            cached_at,
-            cached_at + Duration::from_secs(1),
-            Duration::from_secs(1)
-        ));
-        assert!(!stat_cache_valid_at(
-            cached_at,
-            cached_at + Duration::from_millis(1001),
-            Duration::from_secs(1)
-        ));
     }
 
     fn linux_parse_dirent_names(bytes: &[u8]) -> Vec<String> {

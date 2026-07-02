@@ -108,7 +108,18 @@ fn session_control_verbs_use_local_socket() -> TestResult<()> {
     assert_stdout_contains(&snapshot, "\"path\":\"/data\"")?;
     assert_stdout_contains(&snapshot, "\"path\":\"/docs\"")?;
     assert_stdout_contains(&snapshot, "\"path\":\"/denied\"")?;
-    assert_stdout_contains(&snapshot, "\"reason\":\"denied\"")?;
+
+    let denied_snapshot = run_session_until_success(&[
+        "session",
+        "snapshot",
+        "--socket",
+        &socket_arg,
+        "--depth",
+        "2",
+        "/",
+    ])?;
+    assert_stdout_contains(&denied_snapshot, "\"path\":\"/denied\"")?;
+    assert_stdout_contains(&denied_snapshot, "\"reason\":\"denied\"")?;
 
     let revalidated_snapshot = run_session_until_success(&[
         "-a",
@@ -199,7 +210,7 @@ impl FileTree for SessionTree {
     fn read(&mut self, _fid: Fid, qid: Qid, offset: u64, count: u32) -> R9pResult<ReadData> {
         if qid == Qid::dir(1) {
             return Ok(ReadData::Directory(vec![
-                Stat::new("data", Qid::file(2), 0o444),
+                data_stat(),
                 Stat::new("docs", Qid::dir(3), DMDIR | 0o555),
                 Stat::new("denied", Qid::dir(4), DMDIR | 0o555),
                 Stat::new("events", Qid::dir(5), DMDIR | 0o555),
@@ -229,9 +240,7 @@ impl FileTree for SessionTree {
 
     fn stat(&mut self, qid: Qid) -> R9pResult<Stat> {
         if qid == Qid::file(2) {
-            let mut stat = Stat::new("data", qid, 0o444);
-            stat.length = 6;
-            Ok(stat)
+            Ok(data_stat())
         } else if qid == Qid::dir(3) {
             Ok(Stat::new("docs", qid, DMDIR | 0o555))
         } else if qid == Qid::dir(5) {
@@ -250,6 +259,12 @@ impl FileTree for SessionTree {
             Ok(Stat::new(".", qid, DMDIR | 0o555))
         }
     }
+}
+
+fn data_stat() -> Stat {
+    let mut stat = Stat::new("data", Qid::file(2), 0o444);
+    stat.length = 6;
+    stat
 }
 
 fn slice_bytes(data: &[u8], offset: u64, count: u32) -> R9pResult<ReadData> {

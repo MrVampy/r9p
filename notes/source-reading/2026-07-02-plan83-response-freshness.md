@@ -27,6 +27,16 @@ Question: how should session responses start carrying freshness evidence now tha
 - Add `session_epoch`, `feed_generation`, and `fresh_instance` to `freshness` in status, stat, list, read, and snapshot responses.
 - Extend the integration proof so status contains a session epoch and query snapshots contain the synthetic feed generation.
 
+## Live Proof
+
+After committing the code slice, a temporary local session manager was started against M7 with `/events/namespace/recent` as the feed. `session status` returned:
+
+- `freshness.session_epoch`: `session:4053311:1783024730443562247`
+- `freshness.feed_generation`: `881388`
+- `freshness.fresh_instance`: `false`
+- `feed.state`: `connected`
+- `feed.last_event_id`: `5kvwlr7caxtx46gy5p7urvncgdp5dknl:0000000000000009`
+
 ## Open Questions
 
 - Reconnect should bump or replace the epoch when the session owner gains transport-reconnect behavior.

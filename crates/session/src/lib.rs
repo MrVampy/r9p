@@ -9,7 +9,7 @@ mod transport;
 
 pub use cache::{
     decode_dir_entries, is_dir, is_symlink, null_wstat, read_open_directory_entries, same_qid,
-    DirCache, DirEntry, Freshness, StaleReason,
+    DirCache, DirEntry, Freshness, NamespaceCache, NamespaceCacheStats, StaleReason,
 };
 pub use client::{Client, ORDWR, OREAD, OTRUNC, OWRITE};
 pub use error::{errno_for_9p_error, p9_error, Error, Result};

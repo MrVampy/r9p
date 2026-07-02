@@ -1,5 +1,5 @@
 use super::{freshness::ResponseFreshness, json, options, snapshot, status_json, ControlConfig};
-use crate::{feed::FeedState, Client, Result};
+use crate::{feed::FeedState, Client, NamespaceCache, Result};
 use serde_json::{Map, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,10 +70,11 @@ pub(super) fn response_json(
     client: &Client,
     config: &ControlConfig,
     feed_state: &FeedState,
+    cache: &NamespaceCache,
     session_epoch: &str,
     request: QueryRequest,
 ) -> String {
-    match response_json_result(client, config, feed_state, session_epoch, request) {
+    match response_json_result(client, config, feed_state, cache, session_epoch, request) {
         Ok(response) => response,
         Err(error) => json::error_response("session_error", error.message()),
     }
@@ -83,30 +84,44 @@ fn response_json_result(
     client: &Client,
     config: &ControlConfig,
     feed_state: &FeedState,
+    cache: &NamespaceCache,
     session_epoch: &str,
     request: QueryRequest,
 ) -> Result<String> {
     let freshness = ResponseFreshness::from_feed(session_epoch, feed_state);
+    let cache_reads_enabled = feed_state.snapshot().state == "connected";
     match request {
-        QueryRequest::Status => status_json(client, config, feed_state, session_epoch),
+        QueryRequest::Status => status_json(client, config, feed_state, cache, session_epoch),
         QueryRequest::Snapshot {
             path,
             depth,
             options,
         } => snapshot::snapshot_json_with_options(
             client,
+            cache,
             &path,
             depth,
             config.request_timeout,
             &options,
+            cache_reads_enabled,
             &freshness,
         ),
-        QueryRequest::Stat { path } => {
-            snapshot::stat_json(client, &path, config.request_timeout, &freshness)
-        }
-        QueryRequest::List { path } => {
-            snapshot::list_json(client, &path, config.request_timeout, &freshness)
-        }
+        QueryRequest::Stat { path } => snapshot::stat_json(
+            client,
+            cache,
+            &path,
+            config.request_timeout,
+            cache_reads_enabled,
+            &freshness,
+        ),
+        QueryRequest::List { path } => snapshot::list_json(
+            client,
+            cache,
+            &path,
+            config.request_timeout,
+            cache_reads_enabled,
+            &freshness,
+        ),
         QueryRequest::Read { path } => {
             snapshot::read_json(client, &path, config.request_timeout, &freshness)
         }

@@ -5,7 +5,11 @@ use r9p::{
     qid::{Qid, DMDIR, DMSYMLINK, QTDIR, QTSYMLINK},
     stat::{decode_dir_entries as decode_p9_dir_entries, Stat},
 };
-use std::time::{Duration, Instant};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StaleReason {
@@ -94,6 +98,159 @@ pub struct DirEntry {
     pub stat: Stat,
 }
 
+#[derive(Clone, Debug)]
+pub struct NamespaceCache {
+    inner: Arc<Mutex<NamespaceCacheInner>>,
+}
+
+#[derive(Debug, Default)]
+struct NamespaceCacheInner {
+    entries: BTreeMap<Vec<Vec<u8>>, CachedNode>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedNode {
+    stat: Stat,
+    stat_freshness: Freshness,
+    dir_cache: Option<DirCache>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NamespaceCacheStats {
+    pub entries: usize,
+    pub directories: usize,
+    pub stale_entries: usize,
+}
+
+impl NamespaceCache {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(NamespaceCacheInner::default())),
+        }
+    }
+
+    pub fn stat_if_fresh(&self, path: &[Vec<u8>]) -> Option<Stat> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|inner| inner.entries.get(path).cloned())
+            .filter(|node| !node.stat_freshness.is_stale())
+            .map(|node| node.stat)
+    }
+
+    pub fn directory_if_fresh(&self, path: &[Vec<u8>]) -> Option<Vec<DirEntry>> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|inner| inner.entries.get(path).cloned())
+            .filter(|node| !node.stat_freshness.is_stale())
+            .and_then(|node| node.dir_cache)
+            .filter(|cache| !cache.freshness.is_stale())
+            .map(|cache| cache.entries)
+    }
+
+    pub fn update_stat(&self, path: &[Vec<u8>], stat: Stat) {
+        if let Ok(mut inner) = self.inner.lock() {
+            let entry = inner
+                .entries
+                .entry(path.to_vec())
+                .or_insert_with(|| CachedNode {
+                    stat: stat.clone(),
+                    stat_freshness: Freshness::fresh_now(),
+                    dir_cache: None,
+                });
+            let identity_changed = !same_qid(entry.stat.qid, stat.qid);
+            entry.stat = stat;
+            entry.stat_freshness.mark_fresh();
+            if identity_changed || !is_dir(&entry.stat) {
+                entry.dir_cache = None;
+            }
+        }
+    }
+
+    pub fn update_directory(&self, path: &[Vec<u8>], entries: Vec<DirEntry>) {
+        if let Ok(mut inner) = self.inner.lock() {
+            let Some(entry) = inner.entries.get_mut(path) else {
+                return;
+            };
+            if is_dir(&entry.stat) && !entry.stat_freshness.is_stale() {
+                entry.dir_cache = Some(DirCache::fresh(entries));
+            }
+        }
+    }
+
+    pub fn mark_namespace_change(&self, path: &str, old_path: Option<&str>) {
+        match parse_absolute_path(path) {
+            Some(segments) => self.mark_path_stale(&segments, StaleReason::NamespaceChange),
+            None => self.mark_all_stale(StaleReason::Explicit(format!(
+                "invalid namespace change path {path}"
+            ))),
+        }
+        if let Some(old_path) = old_path {
+            match parse_absolute_path(old_path) {
+                Some(segments) => self.mark_path_stale(&segments, StaleReason::NamespaceChange),
+                None => self.mark_all_stale(StaleReason::Explicit(format!(
+                    "invalid namespace change old_path {old_path}"
+                ))),
+            }
+        }
+    }
+
+    pub fn mark_path_stale(&self, path: &[Vec<u8>], reason: StaleReason) {
+        if let Ok(mut inner) = self.inner.lock() {
+            if let Some(parent) = parent_path(path) {
+                if let Some(parent_node) = inner.entries.get_mut(parent) {
+                    parent_node.dir_cache = None;
+                }
+            }
+            for (entry_path, node) in inner.entries.iter_mut() {
+                if path_is_prefix(path, entry_path) {
+                    node.stat_freshness.mark_stale(reason.clone());
+                    node.dir_cache = None;
+                }
+            }
+        }
+    }
+
+    pub fn mark_all_stale(&self, reason: StaleReason) {
+        if let Ok(mut inner) = self.inner.lock() {
+            for node in inner.entries.values_mut() {
+                node.stat_freshness.mark_stale(reason.clone());
+                node.dir_cache = None;
+            }
+        }
+    }
+
+    pub fn stats(&self) -> NamespaceCacheStats {
+        self.inner
+            .lock()
+            .map(|inner| NamespaceCacheStats {
+                entries: inner.entries.len(),
+                directories: inner
+                    .entries
+                    .values()
+                    .filter(|node| node.dir_cache.is_some())
+                    .count(),
+                stale_entries: inner
+                    .entries
+                    .values()
+                    .filter(|node| node.stat_freshness.is_stale())
+                    .count(),
+            })
+            .unwrap_or(NamespaceCacheStats {
+                entries: 0,
+                directories: 0,
+                stale_entries: 0,
+            })
+    }
+}
+
+impl Default for NamespaceCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub fn read_open_directory_entries(
     client: &Client,
     fid: Fid,
@@ -153,9 +310,30 @@ pub fn null_wstat() -> Stat {
     }
 }
 
+fn parent_path(path: &[Vec<u8>]) -> Option<&[Vec<u8>]> {
+    if path.is_empty() {
+        None
+    } else {
+        Some(&path[..path.len() - 1])
+    }
+}
+
+fn path_is_prefix(prefix: &[Vec<u8>], path: &[Vec<u8>]) -> bool {
+    prefix.len() <= path.len() && path.iter().zip(prefix).all(|(path, prefix)| path == prefix)
+}
+
+fn parse_absolute_path(path: &str) -> Option<Vec<Vec<u8>>> {
+    path.starts_with('/').then(|| {
+        path.split('/')
+            .filter(|segment| !segment.is_empty())
+            .map(|segment| segment.as_bytes().to_vec())
+            .collect()
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{is_dir, same_qid, DirCache, DirEntry, Freshness, StaleReason};
+    use super::{is_dir, same_qid, DirCache, DirEntry, Freshness, NamespaceCache, StaleReason};
     use r9p::{qid::Qid, stat::Stat};
     use std::time::{Duration, Instant};
 
@@ -198,5 +376,49 @@ mod tests {
         assert!(is_dir(&Stat::new("docs", Qid::file(1), r9p::qid::DMDIR)));
         assert!(same_qid(Qid::file(1), Qid::file(1)));
         assert!(!same_qid(Qid::file(1), Qid::file(2)));
+    }
+
+    #[test]
+    fn namespace_cache_invalidates_changed_path_and_parent_directory() {
+        let cache = NamespaceCache::new();
+        let root = Vec::<Vec<u8>>::new();
+        let docs = vec![b"docs".to_vec()];
+        let alpha = vec![b"docs".to_vec(), b"alpha".to_vec()];
+
+        cache.update_stat(&root, Stat::new("", Qid::dir(1), 0o555));
+        cache.update_stat(&docs, Stat::new("docs", Qid::dir(2), 0o555));
+        cache.update_directory(
+            &docs,
+            vec![DirEntry {
+                name: b"alpha".to_vec(),
+                qid: Qid::file(3),
+                stat: Stat::new("alpha", Qid::file(3), 0o444),
+            }],
+        );
+        cache.update_stat(&alpha, Stat::new("alpha", Qid::file(3), 0o444));
+
+        assert!(cache.directory_if_fresh(&docs).is_some());
+        assert!(cache.stat_if_fresh(&alpha).is_some());
+
+        cache.mark_namespace_change("/docs/alpha", None);
+
+        assert!(cache.directory_if_fresh(&docs).is_none());
+        assert!(cache.stat_if_fresh(&alpha).is_none());
+        assert!(cache.stat_if_fresh(&root).is_some());
+    }
+
+    #[test]
+    fn namespace_cache_invalidates_renamed_old_and_new_paths() {
+        let cache = NamespaceCache::new();
+        let old_path = vec![b"docs".to_vec(), b"old".to_vec()];
+        let new_path = vec![b"docs".to_vec(), b"new".to_vec()];
+
+        cache.update_stat(&old_path, Stat::new("old", Qid::file(7), 0o444));
+        cache.update_stat(&new_path, Stat::new("new", Qid::file(8), 0o444));
+
+        cache.mark_namespace_change("/docs/new", Some("/docs/old"));
+
+        assert!(cache.stat_if_fresh(&old_path).is_none());
+        assert!(cache.stat_if_fresh(&new_path).is_none());
     }
 }

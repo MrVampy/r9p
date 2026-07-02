@@ -2,7 +2,7 @@ use super::{
     feed_poll_path, parse_namespace_change_record, parse_namespace_path, select_feed_records,
     FeedState,
 };
-use crate::{Client, Error, Result, OREAD};
+use crate::{Client, Error, NamespaceCache, Result, StaleReason, OREAD};
 use r9p::fid::Fid;
 use std::{
     sync::{
@@ -18,6 +18,7 @@ pub struct FeedWorkerConfig {
     pub path: String,
     pub stream_path: Option<String>,
     pub cursor_template: Option<String>,
+    pub cache: Option<NamespaceCache>,
     pub poll_interval: Duration,
     pub lookup_timeout: Duration,
     pub read_timeout: Duration,
@@ -198,6 +199,9 @@ fn process_feed_data(
             let selected =
                 select_feed_records(records, since_event_id, config.cursor_template.is_some());
             if selected.cursor_missed {
+                if let Some(cache) = &config.cache {
+                    cache.mark_all_stale(StaleReason::NamespaceChange);
+                }
                 state.mark_fresh_instance();
                 state.set_connected(mode.source(), selected.cursor_advanced_to.clone(), None);
                 return Ok(selected.cursor_advanced_to);
@@ -211,10 +215,18 @@ fn process_feed_data(
         config.backpressure_limit
     };
     if records.len() > backpressure_limit {
+        if let Some(cache) = &config.cache {
+            cache.mark_all_stale(StaleReason::Explicit(
+                "change feed backpressure limit exceeded".to_string(),
+            ));
+        }
         state.set_degraded("change feed backpressure limit exceeded");
         return Ok(records.last().map(|record| record.event_id.clone()));
     }
     for record in &records {
+        if let Some(cache) = &config.cache {
+            cache.mark_namespace_change(&record.path, record.old_path.as_deref());
+        }
         state.set_connected(
             mode.source(),
             Some(record.event_id.clone()),

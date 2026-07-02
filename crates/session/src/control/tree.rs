@@ -1,5 +1,5 @@
 use super::{freshness::ResponseFreshness, json, query, snapshot, status_json, ControlConfig};
-use crate::{feed::FeedState, Client, ORDWR, OREAD};
+use crate::{feed::FeedState, Client, NamespaceCache, ORDWR, OREAD};
 use r9p::{
     error::{Error as P9Error, EEXIST, EPERM},
     fid::Fid,
@@ -27,6 +27,7 @@ pub(super) struct ControlTree {
     client: Client,
     config: ControlConfig,
     feed_state: FeedState,
+    cache: NamespaceCache,
     session_epoch: String,
     nodes: BTreeMap<u64, ControlNode>,
     qids: BTreeMap<ControlNode, u64>,
@@ -56,12 +57,14 @@ impl ControlTree {
         client: Client,
         config: ControlConfig,
         feed_state: FeedState,
+        cache: NamespaceCache,
         session_epoch: String,
     ) -> Self {
         let mut tree = Self {
             client,
             config,
             feed_state,
+            cache,
             session_epoch,
             nodes: BTreeMap::new(),
             qids: BTreeMap::new(),
@@ -160,6 +163,7 @@ impl FileTree for ControlTree {
                     &self.client,
                     &self.config,
                     &self.feed_state,
+                    &self.cache,
                     &self.session_epoch,
                 )
                 .map_err(p9_error)?;
@@ -174,8 +178,10 @@ impl FileTree for ControlTree {
             ControlNode::Stat(path) => {
                 let response = snapshot::stat_json(
                     &self.client,
+                    &self.cache,
                     &namespace_path(&path),
                     self.config.request_timeout,
+                    self.cache_reads_enabled(),
                     &self.response_freshness(),
                 )
                 .map_err(p9_error)?;
@@ -184,8 +190,10 @@ impl FileTree for ControlTree {
             ControlNode::List(path) => {
                 let response = snapshot::list_json(
                     &self.client,
+                    &self.cache,
                     &namespace_path(&path),
                     self.config.request_timeout,
+                    self.cache_reads_enabled(),
                     &self.response_freshness(),
                 )
                 .map_err(p9_error)?;
@@ -204,9 +212,11 @@ impl FileTree for ControlTree {
             ControlNode::Snapshot { depth, path } => {
                 let response = snapshot::snapshot_json(
                     &self.client,
+                    &self.cache,
                     &namespace_path(&path),
                     depth,
                     self.config.request_timeout,
+                    self.cache_reads_enabled(),
                     &self.response_freshness(),
                 )
                 .map_err(p9_error)?;
@@ -231,6 +241,7 @@ impl FileTree for ControlTree {
                         &self.client,
                         &self.config,
                         &self.feed_state,
+                        &self.cache,
                         &self.session_epoch,
                         request,
                     ),
@@ -252,6 +263,10 @@ impl FileTree for ControlTree {
 impl ControlTree {
     fn response_freshness(&self) -> ResponseFreshness {
         ResponseFreshness::from_feed(&self.session_epoch, &self.feed_state)
+    }
+
+    fn cache_reads_enabled(&self) -> bool {
+        self.feed_state.snapshot().state == "connected"
     }
 }
 

@@ -1,5 +1,5 @@
 use super::{tree::ControlTree, ControlConfig};
-use crate::{feed::FeedState, Client, Error, Result};
+use crate::{feed::FeedState, Client, Error, NamespaceCache, Result};
 use r9p::{
     codec,
     message::TMessage,
@@ -14,13 +14,14 @@ pub(super) fn serve_control_connection<S>(
     client: Client,
     config: ControlConfig,
     feed_state: FeedState,
+    cache: NamespaceCache,
     session_epoch: String,
 ) -> Result<()>
 where
     S: Read + Write,
 {
     let mut server = Server::with_config(
-        ControlTree::new(client, config, feed_state, session_epoch),
+        ControlTree::new(client, config, feed_state, cache, session_epoch),
         ServerConfig {
             default_msize: CONTROL_MSIZE,
             max_msize: CONTROL_MSIZE,

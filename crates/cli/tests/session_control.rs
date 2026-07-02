@@ -103,6 +103,8 @@ fn session_control_verbs_use_local_socket() -> TestResult<()> {
         "/",
     ])?;
     assert_stdout_contains(&snapshot, "\"kind\":\"session.snapshot.v1\"")?;
+    assert_stdout_contains(&snapshot, "\"cache\":{\"enabled\":true")?;
+    assert_stdout_contains(&snapshot, "\"dir_hits\":1")?;
     assert_stdout_contains(&snapshot, "\"path\":\"/data\"")?;
     assert_stdout_contains(&snapshot, "\"path\":\"/docs\"")?;
     assert_stdout_contains(&snapshot, "\"path\":\"/denied\"")?;
@@ -128,6 +130,9 @@ fn session_control_verbs_use_local_socket() -> TestResult<()> {
 }
 
 struct SessionTree;
+
+const NAMESPACE_CHANGE: &[u8] =
+    b"namespace_change\tevent_id=e1\tgeneration=42\tscope=shared\tchange_kind=modified\tpath=/docs/changed\n";
 
 impl FileTree for SessionTree {
     fn attach(&mut self, _fid: Fid, _uname: &[u8], _aname: &[u8]) -> R9pResult<Qid> {
@@ -207,11 +212,7 @@ impl FileTree for SessionTree {
             ]));
         }
         if qid == Qid::file(7) || qid == Qid::file(8) {
-            return slice_bytes(
-                b"namespace_change\tevent_id=e1\tgeneration=42\tscope=shared\tchange_kind=modified\tpath=/data\n",
-                offset,
-                count,
-            );
+            return slice_bytes(NAMESPACE_CHANGE, offset, count);
         }
         slice_bytes(b"hello\n", offset, count)
     }
@@ -229,11 +230,11 @@ impl FileTree for SessionTree {
             Ok(Stat::new("namespace", qid, DMDIR | 0o555))
         } else if qid == Qid::file(7) {
             let mut stat = Stat::new("recent", qid, 0o444);
-            stat.length = 91;
+            stat.length = u64::try_from(NAMESPACE_CHANGE.len()).unwrap_or(u64::MAX);
             Ok(stat)
         } else if qid == Qid::file(8) {
             let mut stat = Stat::new("stream", qid, 0o444);
-            stat.length = 91;
+            stat.length = u64::try_from(NAMESPACE_CHANGE.len()).unwrap_or(u64::MAX);
             Ok(stat)
         } else {
             Ok(Stat::new(".", qid, DMDIR | 0o555))

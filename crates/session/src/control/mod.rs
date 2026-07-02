@@ -5,10 +5,12 @@ mod query;
 mod request;
 mod server;
 mod snapshot;
+mod snapshot_path;
+mod snapshot_report;
 mod tree;
 
 use crate::feed::{start_feed_worker, FeedState, FeedWorkerConfig};
-use crate::{Client, Error, Result};
+use crate::{Client, Error, NamespaceCache, Result};
 pub use request::{parse_request, ControlRequest};
 use std::{
     fs,
@@ -39,10 +41,12 @@ pub(super) fn status_json(
     client: &Client,
     config: &ControlConfig,
     feed_state: &FeedState,
+    cache: &NamespaceCache,
     session_epoch: &str,
 ) -> Result<String> {
     let root = client.stat_timeout(client.root_fid(), config.request_timeout)?;
     let feed = feed_state.snapshot();
+    let cache_stats = cache.stats();
     let response_freshness = freshness::ResponseFreshness::from_feed(session_epoch, feed_state);
     let mut out = String::from("{\"ok\":true,\"kind\":\"session.status.v1\",\"attached\":true");
     out.push_str(",\"endpoint\":");
@@ -85,6 +89,12 @@ pub(super) fn status_json(
         Some(error) => json::push_string(&mut out, &error),
         None => out.push_str("null"),
     }
+    out.push_str("},\"cache\":{\"entries\":");
+    out.push_str(&cache_stats.entries.to_string());
+    out.push_str(",\"directories\":");
+    out.push_str(&cache_stats.directories.to_string());
+    out.push_str(",\"stale_entries\":");
+    out.push_str(&cache_stats.stale_entries.to_string());
     out.push_str("}}");
     Ok(out)
 }
@@ -105,6 +115,7 @@ pub fn serve_control_socket(socket_path: &Path, config: ControlConfig) -> Result
         config.connect_timeout,
     )?;
     let feed_state = FeedState::new();
+    let cache = NamespaceCache::new();
     let session_epoch = new_session_epoch();
     let _feed_handle = if let Some(path) = config.change_feed_path.clone() {
         Some(start_feed_worker(
@@ -113,6 +124,7 @@ pub fn serve_control_socket(socket_path: &Path, config: ControlConfig) -> Result
                 path,
                 stream_path: config.change_feed_stream_path.clone(),
                 cursor_template: config.change_feed_cursor_template.clone(),
+                cache: Some(cache.clone()),
                 poll_interval: config.change_feed_poll_interval,
                 lookup_timeout: config.request_timeout,
                 read_timeout: config.request_timeout,
@@ -131,6 +143,7 @@ pub fn serve_control_socket(socket_path: &Path, config: ControlConfig) -> Result
                 let client = client.clone();
                 let config = config.clone();
                 let feed_state = feed_state.clone();
+                let cache = cache.clone();
                 let session_epoch = session_epoch.clone();
                 thread::spawn(move || {
                     if let Err(error) = server::serve_control_connection(
@@ -138,6 +151,7 @@ pub fn serve_control_socket(socket_path: &Path, config: ControlConfig) -> Result
                         client,
                         config,
                         feed_state,
+                        cache,
                         session_epoch,
                     ) {
                         eprintln!("r9p session control connection: {error}");

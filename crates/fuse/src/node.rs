@@ -394,10 +394,23 @@ impl NodeTable {
         self.mark_path_with(path, true)
     }
 
+    #[cfg(test)]
     pub fn parent_entry(&self, path: &[Vec<u8>]) -> Option<(u64, Vec<u8>)> {
         let (name, parent) = path.split_last()?;
         self.nodeid_at_path(parent)
             .map(|parent_nodeid| (parent_nodeid, name.clone()))
+    }
+
+    pub fn mark_parent_directory_cache_stale(
+        &mut self,
+        path: &[Vec<u8>],
+    ) -> Option<(u64, Vec<u8>)> {
+        let (name, parent) = path.split_last()?;
+        let parent_nodeid = self.nodeid_at_path(parent)?;
+        if let Some(parent_node) = self.nodes.get_mut(&parent_nodeid) {
+            parent_node.dir_cache = None;
+        }
+        Some((parent_nodeid, name.clone()))
     }
 
     fn mark_path_with(&mut self, path: &[Vec<u8>], include_descendants: bool) -> Vec<StaleBinding> {

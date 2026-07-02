@@ -96,11 +96,17 @@ impl R9pFuse {
             match change.change_kind.as_str() {
                 "created" => KernelInvalidation::path(
                     nodes.mark_path_stale(&path),
-                    nodes.parent_entry(&path).into_iter().collect(),
+                    nodes
+                        .mark_parent_directory_cache_stale(&path)
+                        .into_iter()
+                        .collect(),
                 ),
                 "removed" => KernelInvalidation::path(
                     nodes.mark_path_prefix_stale(&path),
-                    nodes.parent_entry(&path).into_iter().collect(),
+                    nodes
+                        .mark_parent_directory_cache_stale(&path)
+                        .into_iter()
+                        .collect(),
                 ),
                 "renamed" => {
                     let mut stale = old_path
@@ -110,14 +116,17 @@ impl R9pFuse {
                     stale.extend(nodes.mark_path_prefix_stale(&path));
                     let mut parent_entries = Vec::new();
                     if let Some(old) = old_path.as_deref() {
-                        parent_entries.extend(nodes.parent_entry(old));
+                        parent_entries.extend(nodes.mark_parent_directory_cache_stale(old));
                     }
-                    parent_entries.extend(nodes.parent_entry(&path));
+                    parent_entries.extend(nodes.mark_parent_directory_cache_stale(&path));
                     KernelInvalidation::path(stale, parent_entries)
                 }
                 "modified" => KernelInvalidation::path(
                     nodes.mark_path_stale(&path),
-                    nodes.parent_entry(&path).into_iter().collect(),
+                    nodes
+                        .mark_parent_directory_cache_stale(&path)
+                        .into_iter()
+                        .collect(),
                 ),
                 _ => {
                     return Err(Error::new(

@@ -255,6 +255,37 @@ fn directory_entry_cache_clears_when_marked_stale() {
 }
 
 #[test]
+fn parent_directory_cache_clears_for_child_namespace_change() {
+    let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
+    let docs = nodes
+        .insert_lookup(
+            ROOT_NODEID,
+            2,
+            Stat::new("docs", Qid::dir(2), 0o555),
+            b"docs",
+        )
+        .map(|inserted| inserted.nodeid)
+        .expect("docs node should insert");
+
+    nodes
+        .update_dir_cache(
+            docs,
+            vec![DirEntry {
+                name: b"old.md".to_vec(),
+                qid: Qid::file(3),
+                stat: Stat::new("old.md", Qid::file(3), 0o444),
+            }],
+        )
+        .expect("directory cache should update");
+
+    let parent_entry =
+        nodes.mark_parent_directory_cache_stale(&[b"docs".to_vec(), b"created.md".to_vec()]);
+
+    assert_eq!(parent_entry, Some((docs, b"created.md".to_vec())));
+    assert!(nodes.node(docs).expect("docs").dir_cache.is_none());
+}
+
+#[test]
 fn forgetting_lazy_nodes_has_no_fid_to_clunk() {
     let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
     let docs = nodes

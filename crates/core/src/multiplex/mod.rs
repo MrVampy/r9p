@@ -54,7 +54,7 @@ mod tests {
     };
     use std::io::Read;
     use std::net::{TcpListener, TcpStream};
-    use std::sync::{mpsc, Arc, Barrier};
+    use std::sync::{mpsc, Arc, Barrier, Mutex};
     use std::thread;
     use std::time::Duration;
 
@@ -221,6 +221,51 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn call_observer_sees_timeout_bound_operations() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .map_err(|error| io_error("bind test listener", error))?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| io_error("read listener address", error))?;
+        let server = thread::spawn(move || {
+            let (stream, _) = listener
+                .accept()
+                .map_err(|error| io_error("accept test connection", error))?;
+            scripted_single_stat_server(stream)
+        });
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observer_seen = Arc::clone(&observed);
+        let client = MultiplexedClient::connect(
+            TcpStream::connect(address).map_err(|error| io_error("connect test client", error))?,
+            "glenda",
+            "",
+            8192,
+        )?
+        .with_call_observer(move |tag| {
+            observer_seen
+                .lock()
+                .expect("observer lock should not be poisoned")
+                .push(tag);
+            Box::new(())
+        });
+
+        let stat = client.stat_timeout(client.root_fid(), Duration::from_secs(1))?;
+        assert_eq!(stat.name, b"observed".to_vec());
+        assert_eq!(
+            observed
+                .lock()
+                .expect("observer lock should not be poisoned")
+                .len(),
+            1
+        );
+
+        server
+            .join()
+            .map_err(|_| Error::from("server worker panicked"))??;
+        Ok(())
+    }
+
     fn scripted_out_of_order_server(mut stream: TcpStream) -> Result<()> {
         handshake(&mut stream)?;
 
@@ -366,6 +411,23 @@ mod tests {
             &RMessage::Stat {
                 tag: stat_tag,
                 stat: Stat::new("after-stale-read", Qid::file(10), 0o444),
+            },
+        )?;
+        Ok(())
+    }
+
+    fn scripted_single_stat_server(mut stream: TcpStream) -> Result<()> {
+        handshake(&mut stream)?;
+        let stat = read_tmessage(&mut stream)?;
+        let stat_tag = match stat {
+            TMessage::Stat { tag, .. } => tag,
+            other => return Err(Error::from(format!("expected Tstat, got {other:?}"))),
+        };
+        write_response(
+            &mut stream,
+            &RMessage::Stat {
+                tag: stat_tag,
+                stat: Stat::new("observed", Qid::file(11), 0o444),
             },
         )?;
         Ok(())

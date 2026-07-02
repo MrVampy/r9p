@@ -3,9 +3,10 @@ use crate::{
     p9::Client,
 };
 use r9p::{
+    blocking::DEFAULT_READ_CHUNK,
     fid::Fid,
     qid::{Qid, DMDIR, DMSYMLINK, QTDIR, QTSYMLINK},
-    stat::Stat,
+    stat::{decode_dir_entries as decode_p9_dir_entries, Stat},
 };
 use std::{
     collections::BTreeMap,
@@ -452,7 +453,7 @@ pub fn read_open_directory_entries(
     let mut offset = 0_u64;
     let mut all = Vec::new();
     loop {
-        let chunk = client.read_timeout(fid, offset, 64 * 1024, timeout)?;
+        let chunk = client.read_timeout(fid, offset, DEFAULT_READ_CHUNK, timeout)?;
         if chunk.is_empty() {
             break;
         }
@@ -463,31 +464,15 @@ pub fn read_open_directory_entries(
 }
 
 pub fn decode_dir_entries(data: &[u8]) -> Result<Vec<DirEntry>> {
-    let mut entries = Vec::new();
-    let mut offset = 0_usize;
-    while offset < data.len() {
-        if data.len().saturating_sub(offset) < 2 {
-            return Err(Error::new(
-                libc::EPROTO,
-                "truncated 9P stat in directory read",
-            ));
-        }
-        let size = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
-        let end = offset
-            .checked_add(size + 2)
-            .ok_or_else(|| Error::new(libc::EPROTO, "directory stat overflow"))?;
-        let bytes = data
-            .get(offset..end)
-            .ok_or_else(|| Error::new(libc::EPROTO, "truncated 9P stat in directory read"))?;
-        let stat = Stat::decode(bytes)
-            .map_err(|error| Error::new(libc::EPROTO, format!("decode dir stat: {error}")))?;
-        entries.push(DirEntry {
+    let entries = decode_p9_dir_entries(data)
+        .map_err(|error| Error::new(libc::EPROTO, format!("decode dir stat: {error}")))?
+        .into_iter()
+        .map(|stat| DirEntry {
             name: stat.name.clone(),
             qid: stat.qid,
             stat,
-        });
-        offset = end;
-    }
+        })
+        .collect::<Vec<_>>();
     Ok(entries)
 }
 

@@ -22,6 +22,9 @@ use std::{
 #[cfg(unix)]
 use std::{os::unix::net::UnixStream, path::Path};
 
+type CallObserver = dyn Fn(Tag) -> Box<dyn Send> + Send + Sync + 'static;
+type CallObserverGuard = Box<dyn Send>;
+
 use super::{
     reader::{call_message_sync, call_op_sync, reader_loop, ReplyResult, Waiters},
     util::{io_error, lock, op_fid, protocol_error, unexpected},
@@ -30,12 +33,14 @@ use super::{
 
 pub struct MultiplexedClient<S: MultiplexTransport> {
     inner: Arc<MultiplexedInner<S>>,
+    call_observer: Option<Arc<CallObserver>>,
 }
 
 impl<S: MultiplexTransport> Clone for MultiplexedClient<S> {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
+            call_observer: self.call_observer.clone(),
         }
     }
 }
@@ -136,7 +141,18 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
                 root_fid,
                 root_qid,
             }),
+            call_observer: None,
         })
+    }
+
+    pub fn with_call_observer<F>(&self, observer: F) -> Self
+    where
+        F: Fn(Tag) -> Box<dyn Send> + Send + Sync + 'static,
+    {
+        Self {
+            inner: Arc::clone(&self.inner),
+            call_observer: Some(Arc::new(observer)),
+        }
     }
 
     pub fn root_fid(&self) -> Fid {
@@ -572,6 +588,17 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
         }
     }
 
+    pub fn remove_timeout(&self, fid: Fid, timeout: Duration) -> Result<()> {
+        let op = {
+            let mut protocol = lock(&self.inner.protocol, "lock 9P protocol client")?;
+            protocol.remove(fid).map_err(protocol_error)?
+        };
+        match self.call_op_timeout(op, timeout)? {
+            Completion::Remove => Ok(()),
+            other => Err(unexpected("Rremove", other)),
+        }
+    }
+
     pub fn stat(&self, fid: Fid) -> Result<Stat> {
         let op = {
             let mut protocol = lock(&self.inner.protocol, "lock 9P protocol client")?;
@@ -605,9 +632,22 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
         }
     }
 
+    pub fn wstat_timeout(&self, fid: Fid, stat: Stat, timeout: Duration) -> Result<()> {
+        let op = {
+            let mut protocol = lock(&self.inner.protocol, "lock 9P protocol client")?;
+            protocol.wstat(fid, stat).map_err(protocol_error)?
+        };
+        match self.call_op_timeout(op, timeout)? {
+            Completion::Wstat => Ok(()),
+            other => Err(unexpected("Rwstat", other)),
+        }
+    }
+
     fn call_op(&self, op: Op) -> Result<Completion> {
         let expected_tag = op.tag;
-        match self.submit_op(op)?.wait()? {
+        let pending = self.submit_op(op)?;
+        let _guard = self.observe_call(expected_tag);
+        match pending.wait()? {
             ClientResponse::Completion { tag, completion } if tag == expected_tag => Ok(completion),
             ClientResponse::Error { tag, ename } if tag == expected_tag => Err(Error::new(ename)),
             other => Err(Error::from(format!(
@@ -617,7 +657,7 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
     }
 
     fn call_op_timeout(&self, op: Op, timeout: Duration) -> Result<Completion> {
-        self.call_op_timeout_inner(op, timeout, |_| {}, true)
+        self.call_op_timeout_inner(op, timeout, |tag| self.observe_call(tag), true)
     }
 
     pub fn call_timeout<F, G, H>(
@@ -687,6 +727,13 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
             .and_then(|mut waiters| waiters.remove(&tag));
         if let Some(sender) = sender {
             let _ = sender.send(Err(error));
+        }
+    }
+
+    fn observe_call(&self, tag: Tag) -> CallObserverGuard {
+        match &self.call_observer {
+            Some(observer) => observer(tag),
+            None => Box::new(()),
         }
     }
 }

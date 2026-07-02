@@ -20,18 +20,18 @@ mod wire;
 
 use crate::{
     diagnostics::{DiagnosticContext, DiagnosticRecord, Diagnostics, DEFAULT_DIAGNOSTICS_CAPACITY},
-    error::{Error, Result},
+    error::Result,
     node::{mode_kind, qid_to_inode, DirEntry, NodeTable, StaleBinding},
 };
 use invalidation::{notify_kernel_invalidations, KernelInvalidation};
 use mount::{block_termination_signals, mount_fuse};
 use r9p::stat::Stat;
-use session::Client;
+use session::{Client, ClientSlot};
 use status::MountStatus;
 use std::{
     fs::File,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
@@ -137,35 +137,6 @@ impl ShapeRecovery {
         self.failures = 0;
         self.window_start = None;
         true
-    }
-}
-
-#[derive(Clone)]
-struct ClientSlot {
-    current: Arc<RwLock<Client>>,
-}
-
-impl ClientSlot {
-    fn new(client: Client) -> Self {
-        Self {
-            current: Arc::new(RwLock::new(client)),
-        }
-    }
-
-    fn snapshot(&self) -> Result<Client> {
-        self.current
-            .read()
-            .map_err(|_| Error::new(libc::EIO, "9P client lock poisoned"))
-            .map(|client| client.clone())
-    }
-
-    fn replace(&self, client: Client) -> Result<()> {
-        let mut current = self
-            .current
-            .write()
-            .map_err(|_| Error::new(libc::EIO, "9P client lock poisoned"))?;
-        *current = client;
-        Ok(())
     }
 }
 
@@ -374,7 +345,7 @@ impl R9pFuse {
     }
 
     pub(in crate::fuse) fn client_snapshot(&self) -> Result<Client> {
-        self.client.snapshot()
+        Ok(self.client.snapshot()?)
     }
 
     pub(in crate::fuse) fn lookup_timeout(&self) -> Duration {

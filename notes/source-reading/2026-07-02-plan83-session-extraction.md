@@ -29,6 +29,7 @@ Effect on code:
 
 - Add a new `crates/session` crate that depends on `r9p` and `libc`, not on `fuse`.
 - Move the current generic 9P client wrapper, address parsing, request tracker, and error mapping from `crates/fuse/src/p9.rs` into `crates/session`.
+- Move the generic current-client slot into `crates/session/src/slot.rs` so FUSE can share client snapshot and replacement mechanics without owning the lock wrapper. Keep path rebind recovery in FUSE until the path table boundary moves further, because it still depends on FUSE node ids and stale-binding handling.
 - Keep `crates/fuse` behavior unchanged by importing `session::{Client, OREAD, OWRITE, ORDWR, OTRUNC, with_fuse_unique}` and converting `session::Error` into the FUSE error type.
 - Leave the FUSE node table, handle table, reconnect rebind, change-feed invalidation, and mount lifecycle in `crates/fuse` for later Plan 83 slices.
 

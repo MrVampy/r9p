@@ -65,6 +65,8 @@ fn session_control_verbs_use_local_socket() -> TestResult<()> {
     assert_stdout_contains(&snapshot, "\"kind\":\"session.snapshot.v1\"")?;
     assert_stdout_contains(&snapshot, "\"path\":\"/data\"")?;
     assert_stdout_contains(&snapshot, "\"path\":\"/docs\"")?;
+    assert_stdout_contains(&snapshot, "\"path\":\"/denied\"")?;
+    assert_stdout_contains(&snapshot, "\"reason\":\"denied\"")?;
 
     let stat = run_session_until_success(&["session", "stat", "--socket", &socket_arg, "/data"])?;
     assert_stdout_contains(&stat, "\"kind\":\"session.stat.v1\"")?;
@@ -103,6 +105,9 @@ impl FileTree for SessionTree {
             [] => Ok(Vec::new()),
             [name] if start == Qid::dir(1) && name == b"data" => Ok(vec![Qid::file(2)]),
             [name] if start == Qid::dir(1) && name == b"docs" => Ok(vec![Qid::dir(3)]),
+            [name] if start == Qid::dir(1) && name == b"denied" => {
+                Err(R9pError::from("permission denied"))
+            }
             _ => Ok(Vec::new()),
         }
     }
@@ -116,6 +121,7 @@ impl FileTree for SessionTree {
             return Ok(ReadData::Directory(vec![
                 Stat::new("data", Qid::file(2), 0o444),
                 Stat::new("docs", Qid::dir(3), DMDIR | 0o555),
+                Stat::new("denied", Qid::dir(4), DMDIR | 0o555),
             ]));
         }
         if qid == Qid::dir(3) {

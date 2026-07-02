@@ -11,19 +11,26 @@ pub fn snapshot_json(
     timeout: Duration,
 ) -> Result<String> {
     let segments = parse_namespace_path(path);
-    let mut entries = Vec::new();
-    collect_snapshot(client, &segments, depth, timeout, &mut entries)?;
+    let mut report = SnapshotReport::default();
+    collect_snapshot(client, &segments, depth, timeout, &mut report)?;
 
     let mut out = String::from("{\"ok\":true,\"kind\":\"session.snapshot.v1\",\"path\":");
     json::push_string(&mut out, &format_path(&segments));
     out.push_str(",\"depth\":");
     out.push_str(&depth.to_string());
     out.push_str(",\"freshness\":{\"state\":\"fresh\"},\"entries\":[");
-    for (index, entry) in entries.iter().enumerate() {
+    for (index, entry) in report.entries.iter().enumerate() {
         if index > 0 {
             out.push(',');
         }
         push_snapshot_entry(&mut out, entry);
+    }
+    out.push_str("],\"degraded\":[");
+    for (index, degraded) in report.degraded.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        push_degraded_branch(&mut out, degraded);
     }
     out.push_str("]}");
     Ok(out)
@@ -103,13 +110,13 @@ fn collect_snapshot(
     segments: &[Vec<u8>],
     depth: usize,
     timeout: Duration,
-    entries: &mut Vec<SnapshotEntry>,
+    report: &mut SnapshotReport,
 ) -> Result<()> {
     with_owned_fid(client, segments, timeout, |fid| {
         let stat = client.stat_timeout(fid, timeout)?;
         let path = format_path(segments);
         let is_directory = is_dir(&stat);
-        entries.push(SnapshotEntry {
+        report.entries.push(SnapshotEntry {
             path,
             name: json::bytes_lossy(&stat.name),
             kind: kind(&stat),
@@ -129,7 +136,13 @@ fn collect_snapshot(
                 }
                 let mut child_path = segments.to_vec();
                 child_path.push(child.name);
-                collect_snapshot(client, &child_path, depth - 1, timeout, entries)?;
+                if let Err(error) =
+                    collect_snapshot(client, &child_path, depth - 1, timeout, report)
+                {
+                    report
+                        .degraded
+                        .push(DegradedBranch::from_error(format_path(&child_path), &error));
+                }
             }
         }
         Ok(())
@@ -228,6 +241,22 @@ fn push_snapshot_entry(out: &mut String, entry: &SnapshotEntry) {
     out.push('}');
 }
 
+fn push_degraded_branch(out: &mut String, branch: &DegradedBranch) {
+    out.push_str("{\"path\":");
+    json::push_string(out, &branch.path);
+    out.push_str(",\"reason\":");
+    json::push_string(out, branch.reason);
+    out.push_str(",\"message\":");
+    json::push_string(out, &branch.message);
+    out.push('}');
+}
+
+#[derive(Default)]
+struct SnapshotReport {
+    entries: Vec<SnapshotEntry>,
+    degraded: Vec<DegradedBranch>,
+}
+
 struct SnapshotEntry {
     path: String,
     name: String,
@@ -237,6 +266,12 @@ struct SnapshotEntry {
     qid_type: u8,
     mode: u32,
     length: u64,
+}
+
+struct DegradedBranch {
+    path: String,
+    reason: &'static str,
+    message: String,
 }
 
 impl SnapshotEntry {
@@ -254,9 +289,29 @@ impl SnapshotEntry {
     }
 }
 
+impl DegradedBranch {
+    fn from_error(path: String, error: &crate::Error) -> Self {
+        Self {
+            path,
+            reason: degraded_reason(error.errno),
+            message: error.message().to_string(),
+        }
+    }
+}
+
+fn degraded_reason(errno: i32) -> &'static str {
+    match errno {
+        libc::EACCES | libc::EPERM => "denied",
+        libc::ENOENT | libc::ENOTDIR => "missing",
+        libc::ETIMEDOUT | libc::EAGAIN => "timed_out",
+        libc::ESTALE => "stale",
+        _ => "unavailable",
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_namespace_path;
+    use super::{degraded_reason, parse_namespace_path};
 
     #[test]
     fn parses_absolute_namespace_path_segments() {
@@ -265,5 +320,13 @@ mod tests {
             vec![b"srv".to_vec(), b"data".to_vec()]
         );
         assert!(parse_namespace_path("/").is_empty());
+    }
+
+    #[test]
+    fn maps_errno_to_degraded_reason() {
+        assert_eq!(degraded_reason(libc::EACCES), "denied");
+        assert_eq!(degraded_reason(libc::ENOENT), "missing");
+        assert_eq!(degraded_reason(libc::ETIMEDOUT), "timed_out");
+        assert_eq!(degraded_reason(libc::ESTALE), "stale");
     }
 }

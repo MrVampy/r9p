@@ -16,6 +16,9 @@ pub(crate) fn session_cmd(config: Config, mut args: Vec<String>) -> CliResult<()
         "serve" => session_serve_cmd(config, args),
         "status" => session_status_cmd(config, args),
         "snapshot" => session_snapshot_cmd(config, args),
+        "stat" => session_path_request_cmd(config, args, "stat", Some("/")),
+        "list" => session_path_request_cmd(config, args, "list", Some("/")),
+        "read" => session_path_request_cmd(config, args, "read", None),
         _ => Err(cli_error(format!("unknown session command {command}"))),
     }
 }
@@ -75,6 +78,24 @@ fn session_snapshot_cmd(config: Config, mut args: Vec<String>) -> CliResult<()> 
     Ok(())
 }
 
+fn session_path_request_cmd(
+    config: Config,
+    mut args: Vec<String>,
+    request_name: &str,
+    default_path: Option<&str>,
+) -> CliResult<()> {
+    let socket = take_socket(&mut args)?;
+    let path = session_path_arg(request_name, args, default_path)?;
+    let request = format!("{request_name}\t{path}");
+    let response = request_control_socket(
+        &socket,
+        &request,
+        timeout_or_default(config.request_timeout),
+    )?;
+    print_response(&response);
+    Ok(())
+}
+
 fn take_socket(args: &mut Vec<String>) -> CliResult<PathBuf> {
     let mut socket = None;
     let mut rest = Vec::new();
@@ -97,6 +118,23 @@ fn take_socket(args: &mut Vec<String>) -> CliResult<PathBuf> {
     }
     *args = rest;
     socket.ok_or_else(|| cli_error("missing --socket PATH"))
+}
+
+fn session_path_arg(
+    request_name: &str,
+    args: Vec<String>,
+    default_path: Option<&str>,
+) -> CliResult<String> {
+    match (args.as_slice(), default_path) {
+        ([], Some(path)) => Ok(path.to_string()),
+        ([], None) => Err(cli_error(format!(
+            "session {request_name} requires one namespace path"
+        ))),
+        ([path], _) => Ok(path.clone()),
+        _ => Err(cli_error(format!(
+            "session {request_name} takes at most one namespace path"
+        ))),
+    }
 }
 
 fn take_depth(args: &mut Vec<String>) -> CliResult<usize> {

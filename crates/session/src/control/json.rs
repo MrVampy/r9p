@@ -28,6 +28,14 @@ pub fn bytes_lossy(value: &[u8]) -> String {
     String::from_utf8_lossy(value).to_string()
 }
 
+pub fn push_hex(out: &mut String, bytes: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+}
+
 pub fn error_response(code: &str, message: &str) -> String {
     let mut out = String::from("{\"ok\":false,\"error\":{\"code\":");
     push_string(&mut out, code);

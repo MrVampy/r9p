@@ -22,7 +22,7 @@ use r9p::{
 type TestResult<T> = Result<T, Box<dyn Error>>;
 
 #[test]
-fn session_status_and_snapshot_use_local_socket() -> TestResult<()> {
+fn session_control_verbs_use_local_socket() -> TestResult<()> {
     let (address, server) = start_server()?;
     let socket = temp_path("r9p-session-control.sock");
     let socket_arg = socket.to_string_lossy().into_owned();
@@ -61,6 +61,20 @@ fn session_status_and_snapshot_use_local_socket() -> TestResult<()> {
     assert_stdout_contains(&snapshot, "\"kind\":\"session.snapshot.v1\"")?;
     assert_stdout_contains(&snapshot, "\"path\":\"/data\"")?;
     assert_stdout_contains(&snapshot, "\"path\":\"/docs\"")?;
+
+    let stat = run_session_until_success(&["session", "stat", "--socket", &socket_arg, "/data"])?;
+    assert_stdout_contains(&stat, "\"kind\":\"session.stat.v1\"")?;
+    assert_stdout_contains(&stat, "\"path\":\"/data\"")?;
+    assert_stdout_contains(&stat, "\"length\":6")?;
+
+    let list = run_session_until_success(&["session", "list", "--socket", &socket_arg, "/"])?;
+    assert_stdout_contains(&list, "\"kind\":\"session.list.v1\"")?;
+    assert_stdout_contains(&list, "\"path\":\"/docs\"")?;
+
+    let read = run_session_until_success(&["session", "read", "--socket", &socket_arg, "/data"])?;
+    assert_stdout_contains(&read, "\"kind\":\"session.read.v1\"")?;
+    assert_stdout_contains(&read, "\"bytes\":6")?;
+    assert_stdout_contains(&read, "\"data_hex\":\"68656c6c6f0a\"")?;
 
     session.stop();
     let _ = fs::remove_file(socket);

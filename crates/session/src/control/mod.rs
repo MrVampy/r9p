@@ -1,7 +1,9 @@
 mod json;
+mod request;
 mod snapshot;
 
 use crate::{Client, Error, Result};
+pub use request::{parse_request, ControlRequest};
 use std::{
     fs,
     io::{Read, Write},
@@ -22,37 +24,6 @@ pub struct ControlConfig {
     pub request_timeout: Duration,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ControlRequest {
-    Status,
-    Snapshot { path: String, depth: usize },
-}
-
-pub fn parse_request(line: &str) -> std::result::Result<ControlRequest, String> {
-    let fields = line
-        .trim_end_matches(['\r', '\n'])
-        .split('\t')
-        .collect::<Vec<_>>();
-    match fields.as_slice() {
-        ["status"] => Ok(ControlRequest::Status),
-        ["snapshot", path, depth] => {
-            let depth = depth
-                .parse::<usize>()
-                .map_err(|_| format!("invalid snapshot depth {depth}"))?;
-            Ok(ControlRequest::Snapshot {
-                path: (*path).to_string(),
-                depth,
-            })
-        }
-        ["snapshot", path] => Ok(ControlRequest::Snapshot {
-            path: (*path).to_string(),
-            depth: 1,
-        }),
-        [command, ..] => Err(format!("unknown session control request {command}")),
-        [] => Err("empty session control request".to_string()),
-    }
-}
-
 pub fn response_json(client: &Client, config: &ControlConfig, request: ControlRequest) -> String {
     match response_json_result(client, config, request) {
         Ok(response) => response,
@@ -70,6 +41,9 @@ fn response_json_result(
         ControlRequest::Snapshot { path, depth } => {
             snapshot::snapshot_json(client, &path, depth, config.request_timeout)
         }
+        ControlRequest::Stat { path } => snapshot::stat_json(client, &path, config.request_timeout),
+        ControlRequest::List { path } => snapshot::list_json(client, &path, config.request_timeout),
+        ControlRequest::Read { path } => snapshot::read_json(client, &path, config.request_timeout),
     }
 }
 
@@ -191,25 +165,4 @@ pub fn request_control_socket(
         libc::ENOTSUP,
         "session control sockets require Unix sockets",
     ))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{parse_request, ControlRequest};
-
-    #[test]
-    fn parses_status_request() {
-        assert_eq!(parse_request("status\n"), Ok(ControlRequest::Status));
-    }
-
-    #[test]
-    fn parses_snapshot_request() {
-        assert_eq!(
-            parse_request("snapshot\t/srv\t2\n"),
-            Ok(ControlRequest::Snapshot {
-                path: "/srv".to_string(),
-                depth: 2
-            })
-        );
-    }
 }

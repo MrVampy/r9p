@@ -240,6 +240,9 @@ pub(crate) fn usage() -> ! {
     eprintln!("  session serve --socket path [endpoint]");
     eprintln!("  session status --socket path");
     eprintln!("  session snapshot --socket path [--depth n] [namespace-path]");
+    eprintln!("  session stat --socket path [namespace-path]");
+    eprintln!("  session list --socket path [namespace-path]");
+    eprintln!("  session read --socket path namespace-path");
     eprintln!("  mount [--aname aname] [--uname uname] endpoint mountpoint");
     eprintln!("  mount ensure|status|stop --mountpoint path [--unit name]");
     eprintln!("  serve [--bind address] root");

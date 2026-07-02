@@ -411,7 +411,18 @@ fn join_server(handle: JoinHandle<Result<(), String>>) -> TestResult<()> {
 fn r9p_bin() -> PathBuf {
     std::env::var_os("CARGO_BIN_EXE_r9p")
         .map(PathBuf::from)
+        .or_else(r9p_bin_next_to_current_test)
         .unwrap_or_else(|| PathBuf::from("target/debug/r9p"))
+}
+
+fn r9p_bin_next_to_current_test() -> Option<PathBuf> {
+    let mut path = std::env::current_exe().ok()?;
+    path.pop();
+    if path.file_name().is_some_and(|name| name == "deps") {
+        path.pop();
+    }
+    path.push(format!("r9p{}", std::env::consts::EXE_SUFFIX));
+    path.exists().then_some(path)
 }
 
 fn temp_path(label: &str) -> PathBuf {

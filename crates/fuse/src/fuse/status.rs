@@ -17,6 +17,7 @@ pub(super) struct MountStatus {
 struct State {
     path: Option<PathBuf>,
     change_feed: &'static str,
+    source: Option<&'static str>,
     last_event_id: Option<String>,
     last_error: Option<String>,
 }
@@ -27,6 +28,7 @@ impl MountStatus {
             state: Arc::new(Mutex::new(State {
                 path,
                 change_feed: "disabled",
+                source: None,
                 last_event_id: None,
                 last_error: None,
             })),
@@ -36,6 +38,7 @@ impl MountStatus {
     pub(super) fn set_change_feed(
         &self,
         change_feed: &'static str,
+        source: Option<&'static str>,
         last_event_id: Option<String>,
         last_error: Option<String>,
     ) {
@@ -44,6 +47,7 @@ impl MountStatus {
                 return;
             };
             state.change_feed = change_feed;
+            state.source = source;
             if last_event_id.is_some() {
                 state.last_event_id = last_event_id;
             }
@@ -70,11 +74,19 @@ fn write_status(state: State) -> Result<()> {
 
 fn status_json(state: &State) -> String {
     format!(
-        "{{\"change_feed\":\"{}\",\"last_event_id\":{},\"last_error\":{}}}",
+        "{{\"change_feed\":\"{}\",\"source\":{},\"last_event_id\":{},\"last_error\":{}}}",
         state.change_feed,
+        optional_static_json(state.source),
         optional_json(&state.last_event_id),
         optional_json(&state.last_error)
     )
+}
+
+fn optional_static_json(value: Option<&str>) -> String {
+    match value {
+        Some(value) => format!("\"{}\"", escape_json(value)),
+        None => "null".to_string(),
+    }
 }
 
 fn optional_json(value: &Option<String>) -> String {
@@ -111,10 +123,12 @@ mod tests {
         let json = status_json(&State {
             path: None,
             change_feed: "degraded",
+            source: Some("stream"),
             last_event_id: Some("event-1".to_string()),
             last_error: Some("feed missing".to_string()),
         });
         assert!(json.contains("\"change_feed\":\"degraded\""));
+        assert!(json.contains("\"source\":\"stream\""));
         assert!(json.contains("\"last_event_id\":\"event-1\""));
         assert!(json.contains("\"last_error\":\"feed missing\""));
     }

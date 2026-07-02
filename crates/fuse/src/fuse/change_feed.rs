@@ -56,9 +56,10 @@ impl Drop for ChangeFeedHandle {
 impl R9pFuse {
     pub(super) fn start_change_feed(&self, file: &File) -> Result<Option<ChangeFeedHandle>> {
         let Some(path) = self.config.change_feed_path.clone() else {
-            self.status.set_change_feed("disabled", None, None);
+            self.status.set_change_feed("disabled", None, None, None);
             return Ok(None);
         };
+        let stream_path = self.config.change_feed_stream_path.clone();
         let mut file = file
             .try_clone()
             .map_err(|error| Error::io("clone /dev/fuse for change feed", error))?;
@@ -67,7 +68,7 @@ impl R9pFuse {
         let mut fs = self.clone();
         let handle = thread::Builder::new()
             .name("r9p-fuse-change-feed".to_string())
-            .spawn(move || change_feed_loop(&mut fs, &mut file, path, thread_stop))
+            .spawn(move || change_feed_loop(&mut fs, &mut file, path, stream_path, thread_stop))
             .map_err(|error| Error::io("spawn namespace change-feed consumer", error))?;
         Ok(Some(ChangeFeedHandle {
             stop,
@@ -75,7 +76,12 @@ impl R9pFuse {
         }))
     }
 
-    fn apply_namespace_change(&mut self, file: &mut File, change: NamespaceChange) -> Result<()> {
+    fn apply_namespace_change(
+        &mut self,
+        file: &mut File,
+        change: NamespaceChange,
+        source: &'static str,
+    ) -> Result<()> {
         if !scope_matches(self.config.change_feed_scope.as_deref(), &change.scope) {
             return Ok(());
         }
@@ -124,7 +130,7 @@ impl R9pFuse {
         notify_kernel_invalidations(file, &invalidation);
         self.clunk_stale_bindings(invalidation.stale_bindings);
         self.status
-            .set_change_feed("connected", Some(change.event_id), None);
+            .set_change_feed("connected", Some(source), Some(change.event_id), None);
         Ok(())
     }
 
@@ -142,17 +148,28 @@ impl R9pFuse {
     }
 }
 
-fn change_feed_loop(fs: &mut R9pFuse, file: &mut File, path: String, stop: Arc<AtomicBool>) {
-    fs.status.set_change_feed("connecting", None, None);
+fn change_feed_loop(
+    fs: &mut R9pFuse,
+    file: &mut File,
+    path: String,
+    stream_path: Option<String>,
+    stop: Arc<AtomicBool>,
+) {
+    fs.status.set_change_feed("connecting", None, None, None);
     let mut feed_client = None;
     let mut data_client_stale = false;
+    let mut since_event_id = None;
     while !stop.load(Ordering::SeqCst) {
         let client = match change_feed_client(fs, &mut feed_client) {
             Ok(client) => client,
             Err(error) => {
                 data_client_stale = true;
-                fs.status
-                    .set_change_feed("degraded", None, Some(error.message().to_string()));
+                fs.status.set_change_feed(
+                    "degraded",
+                    None,
+                    None,
+                    Some(error.message().to_string()),
+                );
                 fs.record_mount_diagnostic(
                     "change_feed_disconnected",
                     error.errno,
@@ -170,8 +187,12 @@ fn change_feed_loop(fs: &mut R9pFuse, file: &mut File, path: String, stop: Arc<A
                     fs.record_mount_diagnostic("change_feed_data_reconnect", 0, "reconnected");
                 }
                 Err(error) => {
-                    fs.status
-                        .set_change_feed("degraded", None, Some(error.message().to_string()));
+                    fs.status.set_change_feed(
+                        "degraded",
+                        None,
+                        None,
+                        Some(error.message().to_string()),
+                    );
                     fs.record_mount_diagnostic(
                         "change_feed_data_reconnect_failed",
                         error.errno,
@@ -183,11 +204,51 @@ fn change_feed_loop(fs: &mut R9pFuse, file: &mut File, path: String, stop: Arc<A
                 }
             }
         }
-        match consume_feed_until_error(fs, file, &path, &stop, &client) {
+        if let Some(stream_path) = stream_path.as_deref() {
+            match consume_stream_until_error(
+                fs,
+                file,
+                stream_path,
+                &stop,
+                &client,
+                &mut since_event_id,
+            ) {
+                Ok(()) => {
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    fs.status.set_change_feed(
+                        "degraded",
+                        Some("stream"),
+                        None,
+                        Some(error.message().to_string()),
+                    );
+                    fs.record_mount_diagnostic(
+                        "change_feed_stream_disconnected",
+                        error.errno,
+                        error.message(),
+                    );
+                    fs.apply_coarse_invalidation(file, "change feed stream degraded");
+                    if feed_error_requires_data_reconnect(&error) {
+                        feed_client = None;
+                        data_client_stale = true;
+                        sleep_interruptible(fs.config.change_feed_poll_interval, &stop);
+                        continue;
+                    }
+                }
+            }
+        }
+        match consume_poll_once(fs, file, &path, &client, &mut since_event_id) {
             Ok(()) => {}
             Err(error) => {
-                fs.status
-                    .set_change_feed("degraded", None, Some(error.message().to_string()));
+                fs.status.set_change_feed(
+                    "degraded",
+                    Some("poll"),
+                    None,
+                    Some(error.message().to_string()),
+                );
                 fs.record_mount_diagnostic(
                     "change_feed_disconnected",
                     error.errno,
@@ -198,9 +259,9 @@ fn change_feed_loop(fs: &mut R9pFuse, file: &mut File, path: String, stop: Arc<A
                     feed_client = None;
                     data_client_stale = true;
                 }
-                sleep_interruptible(fs.config.change_feed_poll_interval, &stop);
             }
         }
+        sleep_interruptible(fs.config.change_feed_poll_interval, &stop);
     }
 }
 
@@ -219,59 +280,91 @@ fn change_feed_client(fs: &R9pFuse, slot: &mut Option<Client>) -> Result<Client>
     Ok(client)
 }
 
-fn consume_feed_until_error(
+fn consume_poll_once(
+    fs: &mut R9pFuse,
+    file: &mut File,
+    path: &str,
+    client: &Client,
+    since_event_id: &mut Option<String>,
+) -> Result<()> {
+    fs.status.set_change_feed("connecting", None, None, None);
+    let poll_path = feed_poll_path(
+        path,
+        since_event_id.as_deref(),
+        fs.config.change_feed_cursor_template.as_deref(),
+    );
+    let fid = match open_feed(client, &poll_path, fs.lookup_timeout()) {
+        Ok(fid) => fid,
+        Err(error) if is_feed_poll_timeout(&error) => {
+            fs.status
+                .set_change_feed("connected", Some("poll"), None, None);
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    match client.read_timeout(fid, 0, 64 * 1024, fs.read_timeout()) {
+        Ok(data) if data.is_empty() => {
+            let _ = client.clunk_timeout(fid, fs.control_timeout());
+            fs.status
+                .set_change_feed("connected", Some("poll"), None, None);
+        }
+        Ok(data) => {
+            let _ = client.clunk_timeout(fid, fs.control_timeout());
+            if let Some(event_id) =
+                apply_feed_chunk(fs, file, &data, FeedReadMode::Poll { since_event_id })?
+            {
+                *since_event_id = Some(event_id);
+            }
+            fs.status
+                .set_change_feed("connected", Some("poll"), None, None);
+        }
+        Err(error) if error.errno == libc::ETIMEDOUT => {
+            let _ = client.clunk_timeout(fid, fs.control_timeout());
+            fs.status
+                .set_change_feed("connected", Some("poll"), None, None);
+        }
+        Err(error) => {
+            let _ = client.clunk_timeout(fid, fs.control_timeout());
+            return Err(error.into());
+        }
+    }
+    Ok(())
+}
+
+fn consume_stream_until_error(
     fs: &mut R9pFuse,
     file: &mut File,
     path: &str,
     stop: &AtomicBool,
     client: &Client,
+    since_event_id: &mut Option<String>,
 ) -> Result<()> {
-    fs.status.set_change_feed("connecting", None, None);
-    let mut since_event_id = None;
+    fs.status.set_change_feed("connecting", None, None, None);
+    let fid = open_feed(client, path, fs.lookup_timeout())?;
     while !stop.load(Ordering::SeqCst) {
-        let poll_path = feed_poll_path(
-            path,
-            since_event_id.as_deref(),
-            fs.config.change_feed_cursor_template.as_deref(),
-        );
-        let fid = match open_feed(client, &poll_path, fs.lookup_timeout()) {
-            Ok(fid) => fid,
-            Err(error) if is_feed_poll_timeout(&error) => {
-                fs.status.set_change_feed("connected", None, None);
-                sleep_interruptible(fs.config.change_feed_poll_interval, stop);
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
         match client.read_timeout(fid, 0, 64 * 1024, fs.read_timeout()) {
             Ok(data) if data.is_empty() => {
-                let _ = client.clunk_timeout(fid, fs.control_timeout());
-                fs.status.set_change_feed("connected", None, None);
+                fs.status
+                    .set_change_feed("connected", Some("stream"), None, None);
             }
             Ok(data) => {
-                let _ = client.clunk_timeout(fid, fs.control_timeout());
-                if let Some(event_id) = apply_feed_chunk(
-                    fs,
-                    file,
-                    &data,
-                    since_event_id.as_deref(),
-                    fs.config.change_feed_cursor_template.is_some(),
-                )? {
-                    since_event_id = Some(event_id);
+                if let Some(event_id) = apply_feed_chunk(fs, file, &data, FeedReadMode::Stream)? {
+                    *since_event_id = Some(event_id);
                 }
-                fs.status.set_change_feed("connected", None, None);
+                fs.status
+                    .set_change_feed("connected", Some("stream"), None, None);
             }
             Err(error) if error.errno == libc::ETIMEDOUT => {
-                let _ = client.clunk_timeout(fid, fs.control_timeout());
-                fs.status.set_change_feed("connected", None, None);
+                fs.status
+                    .set_change_feed("connected", Some("stream"), None, None);
             }
             Err(error) => {
                 let _ = client.clunk_timeout(fid, fs.control_timeout());
                 return Err(error.into());
             }
         }
-        sleep_interruptible(fs.config.change_feed_poll_interval, stop);
     }
+    let _ = client.clunk_timeout(fid, fs.control_timeout());
     Ok(())
 }
 
@@ -293,33 +386,57 @@ fn open_feed(client: &Client, path: &str, timeout: Duration) -> Result<Fid> {
     Ok(fid)
 }
 
+enum FeedReadMode<'a> {
+    Stream,
+    Poll {
+        since_event_id: &'a mut Option<String>,
+    },
+}
+
+impl FeedReadMode<'_> {
+    fn source(&self) -> &'static str {
+        match self {
+            FeedReadMode::Stream => "stream",
+            FeedReadMode::Poll { .. } => "poll",
+        }
+    }
+}
+
 fn apply_feed_chunk(
     fs: &mut R9pFuse,
     file: &mut File,
     data: &[u8],
-    since_event_id: Option<&str>,
-    cursor_template_configured: bool,
+    mode: FeedReadMode<'_>,
 ) -> Result<Option<String>> {
+    let source = mode.source();
     let text = String::from_utf8_lossy(data);
-    let parsed_records = text
+    let records = text
         .lines()
         .filter_map(parse_namespace_change_record)
         .collect::<Vec<_>>();
-    let selected = select_feed_records(parsed_records, since_event_id, cursor_template_configured);
-    if selected.cursor_missed {
-        fs.apply_coarse_invalidation(file, "change feed cursor fell outside recent window");
-    }
-    let records = selected.records;
+    let (records, cursor_advanced_to) = match mode {
+        FeedReadMode::Stream => (records, None),
+        FeedReadMode::Poll { since_event_id } => {
+            let selected = select_feed_records(
+                records,
+                since_event_id.as_ref().map(String::as_str),
+                fs.config.change_feed_cursor_template.is_some(),
+            );
+            if selected.cursor_missed {
+                fs.apply_coarse_invalidation(file, "change feed cursor fell outside recent window");
+            }
+            (selected.records, selected.cursor_advanced_to)
+        }
+    };
     if records.len() > fs.config.change_feed_backpressure_limit {
         let last_event_id = records.last().map(|record| record.event_id.clone());
         fs.apply_coarse_invalidation(file, "change feed backpressure limit exceeded");
         return Ok(last_event_id);
     }
-    let last_event_id = selected
-        .cursor_advanced_to
-        .or_else(|| records.last().map(|record| record.event_id.clone()));
+    let last_event_id =
+        cursor_advanced_to.or_else(|| records.last().map(|record| record.event_id.clone()));
     for record in records {
-        fs.apply_namespace_change(file, record)?;
+        fs.apply_namespace_change(file, record, source)?;
     }
     Ok(last_event_id)
 }

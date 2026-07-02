@@ -30,9 +30,16 @@ pub struct Node {
     pub qid: Qid,
     pub stat: Stat,
     pub stat_cached_at: Instant,
+    pub dir_cache: Option<DirCache>,
     pub generation: u64,
     pub lookups: u64,
     pub needs_rebind: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct DirCache {
+    pub entries: Vec<DirEntry>,
+    pub cached_at: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +83,7 @@ impl NodeTable {
                 qid: root_stat.qid,
                 stat: root_stat,
                 stat_cached_at: now,
+                dir_cache: None,
                 generation: 1,
                 lookups: 1,
                 needs_rebind: false,
@@ -152,6 +160,9 @@ impl NodeTable {
             node.qid = stat.qid;
             node.stat = stat;
             node.stat_cached_at = now;
+            if qid_changed || !is_dir(&node.stat) {
+                node.dir_cache = None;
+            }
             if qid_changed {
                 node.generation = node.generation.saturating_add(1).max(1);
             }
@@ -169,6 +180,7 @@ impl NodeTable {
                 qid: stat.qid,
                 stat,
                 stat_cached_at: now,
+                dir_cache: None,
                 generation: 1,
                 lookups: 1,
                 needs_rebind: false,
@@ -208,6 +220,9 @@ impl NodeTable {
         node.qid = stat.qid;
         node.stat = stat;
         node.stat_cached_at = Instant::now();
+        if identity_changed || !is_dir(&node.stat) {
+            node.dir_cache = None;
+        }
         if identity_changed {
             node.generation = node.generation.saturating_add(1).max(1);
         }
@@ -217,10 +232,26 @@ impl NodeTable {
 
     pub fn update_stat(&mut self, nodeid: u64, stat: Stat) -> Result<()> {
         let node = self.node_mut(nodeid)?;
+        let identity_changed = !same_inode_identity(node, &stat);
         node.qid = stat.qid;
         node.stat = stat;
         node.stat_cached_at = Instant::now();
+        if identity_changed || !is_dir(&node.stat) {
+            node.dir_cache = None;
+        }
         node.needs_rebind = false;
+        Ok(())
+    }
+
+    pub fn update_dir_cache(&mut self, nodeid: u64, entries: Vec<DirEntry>) -> Result<()> {
+        let node = self.node_mut(nodeid)?;
+        if !is_dir(&node.stat) {
+            return Err(Error::new(libc::ENOTDIR, "node is not a directory"));
+        }
+        node.dir_cache = Some(DirCache {
+            entries,
+            cached_at: Instant::now(),
+        });
         Ok(())
     }
 
@@ -233,6 +264,10 @@ impl NodeTable {
                 }
                 node.qid = stat.qid;
                 node.stat = stat.clone();
+                node.stat_cached_at = Instant::now();
+                if identity_changed || !is_dir(&node.stat) {
+                    node.dir_cache = None;
+                }
                 if identity_changed {
                     node.generation = node.generation.saturating_add(1).max(1);
                 }
@@ -258,6 +293,10 @@ impl NodeTable {
                 }
                 node.qid = stat.qid;
                 node.stat = stat;
+                node.stat_cached_at = Instant::now();
+                if identity_changed || !is_dir(&node.stat) {
+                    node.dir_cache = None;
+                }
                 if identity_changed {
                     node.generation = node.generation.saturating_add(1).max(1);
                 }
@@ -342,6 +381,7 @@ impl NodeTable {
                     replaced.push(fid);
                 }
                 node.needs_rebind = true;
+                node.dir_cache = None;
             }
         }
         for (nodeid, fid, stat) in rebound {
@@ -353,6 +393,10 @@ impl NodeTable {
                 node.fid = Some(fid);
                 node.qid = stat.qid;
                 node.stat = stat;
+                node.stat_cached_at = Instant::now();
+                if identity_changed || !is_dir(&node.stat) {
+                    node.dir_cache = None;
+                }
                 if identity_changed {
                     node.generation = node.generation.saturating_add(1).max(1);
                 }
@@ -412,6 +456,7 @@ impl NodeTable {
                 .unwrap_or_else(|| node.stat.name.clone());
             let fid = node.fid.take();
             node.needs_rebind = true;
+            node.dir_cache = None;
             stale.push(StaleBinding {
                 nodeid: *nodeid,
                 parent_nodeid,
@@ -506,7 +551,7 @@ fn path_has_prefix(path: &[Vec<u8>], prefix: &[Vec<u8>]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{mode_kind, qid_to_inode, NodeTable, ROOT_NODEID};
+    use super::{mode_kind, qid_to_inode, DirEntry, NodeTable, ROOT_NODEID};
     use r9p::qid::{Qid, DMSYMLINK};
     use r9p::stat::Stat;
 
@@ -675,6 +720,91 @@ mod tests {
             .expect("docs node should rebind");
 
         assert!(nodes.node(docs).expect("docs").generation > generation);
+    }
+
+    #[test]
+    fn directory_entry_cache_survives_same_directory_stat_refresh() {
+        let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
+        let docs = nodes
+            .insert_lookup(
+                ROOT_NODEID,
+                2,
+                Stat::new("docs", Qid::dir(2), 0o555),
+                b"docs",
+            )
+            .map(|inserted| inserted.nodeid)
+            .expect("docs node should insert");
+
+        nodes
+            .update_dir_cache(
+                docs,
+                vec![DirEntry {
+                    name: b"alpha.md".to_vec(),
+                    qid: Qid::file(3),
+                    stat: Stat::new("alpha.md", Qid::file(3), 0o444),
+                }],
+            )
+            .expect("directory cache should update");
+        nodes
+            .update_stat(docs, Stat::new("docs", Qid::dir(2), 0o555))
+            .expect("same directory stat should update");
+
+        assert_eq!(
+            nodes
+                .node(docs)
+                .expect("docs")
+                .dir_cache
+                .as_ref()
+                .expect("cache should survive")
+                .entries
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn directory_entry_cache_clears_when_directory_identity_changes() {
+        let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
+        let docs = nodes
+            .insert_lookup(
+                ROOT_NODEID,
+                2,
+                Stat::new("docs", Qid::dir(2), 0o555),
+                b"docs",
+            )
+            .map(|inserted| inserted.nodeid)
+            .expect("docs node should insert");
+
+        nodes
+            .update_dir_cache(docs, Vec::new())
+            .expect("directory cache should update");
+        nodes
+            .update_stat(docs, Stat::new("docs", Qid::dir(7), 0o555))
+            .expect("changed directory stat should update");
+
+        assert!(nodes.node(docs).expect("docs").dir_cache.is_none());
+    }
+
+    #[test]
+    fn directory_entry_cache_clears_when_marked_stale() {
+        let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
+        let docs = nodes
+            .insert_lookup(
+                ROOT_NODEID,
+                2,
+                Stat::new("docs", Qid::dir(2), 0o555),
+                b"docs",
+            )
+            .map(|inserted| inserted.nodeid)
+            .expect("docs node should insert");
+
+        nodes
+            .update_dir_cache(docs, Vec::new())
+            .expect("directory cache should update");
+        let stale = nodes.mark_path_stale(&[b"docs".to_vec()]);
+
+        assert_eq!(stale.len(), 1);
+        assert!(nodes.node(docs).expect("docs").dir_cache.is_none());
     }
 
     #[test]

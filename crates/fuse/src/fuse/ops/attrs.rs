@@ -89,7 +89,7 @@ impl R9pFuse {
             let nodes = self.nodes()?;
             if input.valid & FATTR_FH != 0 {
                 let handle = nodes.handle(input.fh)?;
-                (handle.client.clone(), handle.fid)
+                (handle.client.clone(), handle.require_fid()?)
             } else {
                 drop(nodes);
                 self.bound_node_fid(header.nodeid)?

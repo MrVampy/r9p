@@ -59,12 +59,16 @@ pub(super) const FUSE_EXPORT_SUPPORT: u32 = 1 << 4;
 pub(super) const FUSE_BIG_WRITES: u32 = 1 << 5;
 pub(super) const FUSE_DONT_MASK: u32 = 1 << 6;
 pub(super) const FUSE_AUTO_INVAL_DATA: u32 = 1 << 12;
+pub(super) const FUSE_DO_READDIRPLUS: u32 = 1 << 13;
+pub(super) const FUSE_READDIRPLUS_AUTO: u32 = 1 << 14;
 pub(super) const FUSE_PARALLEL_DIROPS: u32 = 1 << 18;
 
 pub(super) const FUSE_NOTIFY_INVAL_INODE: i32 = 2;
 pub(super) const FUSE_NOTIFY_INVAL_ENTRY: i32 = 3;
 
 pub(super) const FOPEN_DIRECT_IO: u32 = 1 << 0;
+pub(super) const FOPEN_KEEP_CACHE: u32 = 1 << 1;
+pub(super) const FOPEN_CACHE_DIR: u32 = 1 << 3;
 
 pub(super) const FUSE_KERNEL_VERSION: u32 = 7;
 pub(super) const FUSE_KERNEL_MINOR_VERSION: u32 = 31;

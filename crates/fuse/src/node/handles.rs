@@ -9,7 +9,7 @@ use std::fmt;
 #[derive(Clone)]
 pub struct Handle {
     pub client: Client,
-    pub fid: Fid,
+    pub fid: Option<Fid>,
     pub is_dir: bool,
     pub write_on_release: bool,
     pub close_commit: bool,
@@ -33,11 +33,18 @@ impl fmt::Debug for Handle {
     }
 }
 
+impl Handle {
+    pub fn require_fid(&self) -> Result<Fid> {
+        self.fid
+            .ok_or_else(|| Error::new(libc::ESTALE, "file handle has no 9P fid"))
+    }
+}
+
 impl NodeTable {
     pub fn open_handle(
         &mut self,
         client: Client,
-        fid: Fid,
+        fid: Option<Fid>,
         is_dir: bool,
         write_on_release: bool,
         close_commit: bool,
@@ -85,7 +92,7 @@ impl NodeTable {
         }
         let old = current.clone();
         current.client = client;
-        current.fid = fid;
+        current.fid = Some(fid);
         Ok(old)
     }
 
@@ -107,7 +114,7 @@ impl NodeTable {
         }
         let old = current.clone();
         current.client = client;
-        current.fid = fid;
+        current.fid = Some(fid);
         current.close_commit_flushed = false;
         Ok(old)
     }

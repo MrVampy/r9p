@@ -58,7 +58,7 @@ impl R9pFuse {
                 let nodeid = inserted.nodeid;
                 let handle = nodes.open_handle(
                     client.clone(),
-                    open_fid,
+                    Some(open_fid),
                     false,
                     mode != OREAD,
                     false,
@@ -73,7 +73,7 @@ impl R9pFuse {
                 let nodeid = nodes.insert_lookup_lazy(header.nodeid, stat.clone(), name)?;
                 let handle = nodes.open_handle(
                     client.clone(),
-                    open_fid,
+                    Some(open_fid),
                     false,
                     mode != OREAD,
                     false,

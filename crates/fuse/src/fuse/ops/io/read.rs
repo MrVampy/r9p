@@ -62,37 +62,47 @@ impl R9pFuse {
             return reply_bytes(file, header.unique, &[]);
         }
         let handle = self.nodes()?.handle(input.fh)?.clone();
-        let data = match handle.client.read_timeout(
-            handle.fid,
-            input.offset,
-            input.size,
-            self.read_timeout(),
-        ) {
-            Ok(data) => data,
-            Err(error)
-                if is_transport_error(&error)
-                    && read_handle_is_replayable(handle.is_dir, handle.write_on_release) =>
+        let fid = handle.require_fid()?;
+        let data =
+            match handle
+                .client
+                .read_timeout(fid, input.offset, input.size, self.read_timeout())
             {
-                self.reconnect()?;
-                self.read_from_reopened_handle(header.nodeid, input.fh, input.offset, input.size)?
-            }
-            Err(error) if is_transport_error(&error) => {
-                self.reconnect()?;
-                return Err(Error::new(libc::ESTALE, "file handle is not replayable"));
-            }
-            Err(error)
-                if is_namespace_shape_error(&error)
-                    && read_handle_is_replayable(handle.is_dir, handle.write_on_release) =>
-            {
-                self.recover_namespace_shape(header.nodeid)?;
-                self.read_from_reopened_handle(header.nodeid, input.fh, input.offset, input.size)?
-            }
-            Err(error) if is_namespace_shape_error(&error) => {
-                self.recover_namespace_shape(header.nodeid)?;
-                return Err(Error::new(libc::ESTALE, "file handle is not replayable"));
-            }
-            Err(error) => return Err(error),
-        };
+                Ok(data) => data,
+                Err(error)
+                    if is_transport_error(&error)
+                        && read_handle_is_replayable(handle.is_dir, handle.write_on_release) =>
+                {
+                    self.reconnect()?;
+                    self.read_from_reopened_handle(
+                        header.nodeid,
+                        input.fh,
+                        input.offset,
+                        input.size,
+                    )?
+                }
+                Err(error) if is_transport_error(&error) => {
+                    self.reconnect()?;
+                    return Err(Error::new(libc::ESTALE, "file handle is not replayable"));
+                }
+                Err(error)
+                    if is_namespace_shape_error(&error)
+                        && read_handle_is_replayable(handle.is_dir, handle.write_on_release) =>
+                {
+                    self.recover_namespace_shape(header.nodeid)?;
+                    self.read_from_reopened_handle(
+                        header.nodeid,
+                        input.fh,
+                        input.offset,
+                        input.size,
+                    )?
+                }
+                Err(error) if is_namespace_shape_error(&error) => {
+                    self.recover_namespace_shape(header.nodeid)?;
+                    return Err(Error::new(libc::ESTALE, "file handle is not replayable"));
+                }
+                Err(error) => return Err(error),
+            };
         reply_bytes(file, header.unique, &data)
     }
 
@@ -122,7 +132,7 @@ impl R9pFuse {
             };
         let _ = old_handle
             .client
-            .clunk_timeout(old_handle.fid, self.control_timeout());
+            .clunk_timeout(old_handle.require_fid()?, self.control_timeout());
         client.read_timeout(fid, offset, size, self.read_timeout())
     }
 }

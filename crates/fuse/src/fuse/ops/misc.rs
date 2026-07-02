@@ -69,10 +69,8 @@ impl R9pFuse {
             handle.close_commit_flushed,
             handle.bytes_written,
         ) {
-            match handle
-                .client
-                .clunk_timeout(handle.fid, self.control_timeout())
-            {
+            let fid = handle.require_fid()?;
+            match handle.client.clunk_timeout(fid, self.control_timeout()) {
                 Ok(()) => {}
                 Err(error) if is_transport_error(&error) => {
                     self.reconnect()?;

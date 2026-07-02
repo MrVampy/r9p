@@ -21,7 +21,7 @@ mod wire;
 use crate::{
     diagnostics::{DiagnosticContext, DiagnosticRecord, Diagnostics, DEFAULT_DIAGNOSTICS_CAPACITY},
     error::{Error, Result},
-    node::{mode_kind, qid_to_inode, NodeTable, StaleBinding},
+    node::{mode_kind, qid_to_inode, DirEntry, NodeTable, StaleBinding},
     p9::Client,
 };
 use invalidation::{notify_kernel_invalidations, KernelInvalidation};
@@ -318,6 +318,24 @@ impl R9pFuse {
         Ok(Some(node.stat.clone()))
     }
 
+    pub(in crate::fuse) fn cached_dir_entries_if_fresh(
+        &self,
+        nodeid: u64,
+    ) -> Result<Option<Vec<DirEntry>>> {
+        let nodes = self.nodes()?;
+        let node = nodes.node(nodeid)?;
+        if node.needs_rebind || self.config.entry_timeout.is_zero() {
+            return Ok(None);
+        }
+        let Some(cache) = &node.dir_cache else {
+            return Ok(None);
+        };
+        if !stat_cache_valid_at(cache.cached_at, Instant::now(), self.config.entry_timeout) {
+            return Ok(None);
+        }
+        Ok(Some(cache.entries.clone()))
+    }
+
     pub(in crate::fuse) fn invalidate_namespace_bindings_after_reply(
         &self,
         file: &mut File,
@@ -572,7 +590,7 @@ mod tests {
         dirent_size, flags_to_9p_mode, fuse_name_offset, fuse_open_flags, is_namespace_shape_error,
         is_transport_error,
     };
-    use super::wire::FOPEN_DIRECT_IO;
+    use super::wire::{FOPEN_CACHE_DIR, FOPEN_DIRECT_IO, FOPEN_KEEP_CACHE};
     use super::{
         change_feed, default_congestion_threshold, normalize_config, stat_cache_valid_at, Config,
         DEFAULT_CHANGE_FEED_POLL_INTERVAL, DEFAULT_MAX_BACKGROUND, DEFAULT_MAX_WORKERS,
@@ -670,7 +688,14 @@ mod tests {
         assert_eq!(fuse_open_flags(false, OWRITE), 0);
         assert_eq!(fuse_open_flags(false, ORDWR), 0);
         assert_eq!(fuse_open_flags(false, OWRITE | OTRUNC), 0);
-        assert_eq!(fuse_open_flags(true, OREAD), 0);
+    }
+
+    #[test]
+    fn directory_opens_allow_kernel_readdir_cache() {
+        assert_eq!(
+            fuse_open_flags(true, OREAD),
+            FOPEN_KEEP_CACHE | FOPEN_CACHE_DIR
+        );
     }
 
     #[test]

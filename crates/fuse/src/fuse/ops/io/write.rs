@@ -38,9 +38,10 @@ impl R9pFuse {
         } else {
             self.write_timeout()
         };
+        let fid = handle.require_fid()?;
         let count = match handle
             .client
-            .write_timeout(handle.fid, input.offset, data, write_timeout)
+            .write_timeout(fid, input.offset, data, write_timeout)
         {
             Ok(count) => count,
             Err(error) if is_transport_error(&error) => {
@@ -126,7 +127,7 @@ impl R9pFuse {
             };
         let _ = old_handle
             .client
-            .clunk_timeout(old_handle.fid, self.control_timeout());
+            .clunk_timeout(old_handle.require_fid()?, self.control_timeout());
         client.write_timeout(fid, offset, data, write_timeout)
     }
 
@@ -146,10 +147,10 @@ impl R9pFuse {
             invalidate_after_reply = handle.write_on_release
                 && handle.close_commit
                 && close_commit_refreshes_namespace_bindings(handle.close_commit);
-            match handle
-                .client
-                .clunk_timeout(handle.fid, self.control_timeout())
-            {
+            let Some(fid) = handle.fid else {
+                return reply_empty(file, header.unique);
+            };
+            match handle.client.clunk_timeout(fid, self.control_timeout()) {
                 Ok(()) => {}
                 Err(_) if !handle.write_on_release => {
                     return reply_empty(file, header.unique);

@@ -58,6 +58,19 @@ impl R9pFuse {
             return reply_error(file, header.unique, libc::ENOTDIR);
         }
         let client = self.client_snapshot()?;
+        if is_dir_open {
+            if let Some(dir_entries) = self.cached_dir_entries_if_fresh(header.nodeid)? {
+                let handle =
+                    self.nodes()?
+                        .open_handle(client, None, true, false, false, dir_entries);
+                let out = FuseOpenOut {
+                    fh: handle,
+                    open_flags: fuse_open_flags(true, OREAD),
+                    padding: 0,
+                };
+                return reply_struct(file, header.unique, &out);
+            }
+        }
         let open_timeout = if flags_to_9p_mode(input.flags) == OREAD || is_dir_open {
             self.lookup_timeout()
         } else {
@@ -89,7 +102,11 @@ impl R9pFuse {
         }
         let dir_entries = if is_dir_open {
             match read_open_directory_entries(&client, fid, self.control_timeout()) {
-                Ok(entries) => entries,
+                Ok(entries) => {
+                    self.nodes()?
+                        .update_dir_cache(header.nodeid, entries.clone())?;
+                    entries
+                }
                 Err(error) => {
                     let _ = client.clunk_timeout(fid, self.control_timeout());
                     return Err(error);
@@ -102,7 +119,7 @@ impl R9pFuse {
         let close_commit = write_on_release && close_commit_target;
         let handle = self.nodes()?.open_handle(
             client.clone(),
-            fid,
+            Some(fid),
             is_dir_open,
             write_on_release,
             close_commit,

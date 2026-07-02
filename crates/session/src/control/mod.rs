@@ -10,14 +10,9 @@ mod snapshot_report;
 mod tree;
 
 use crate::feed::{start_feed_worker, FeedEventBus, FeedState, FeedWorkerConfig, FeedWorkerHandle};
-use crate::{Client, ClientSlot, Error, NamespaceCache, Result};
+use crate::{Client, ClientSlot, Error, NamespaceCache, Result, SessionEpoch};
 pub use request::{parse_request, ControlRequest};
-use std::{
-    fs,
-    path::Path,
-    thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::{fs, path::Path, thread, time::Duration};
 
 #[cfg(unix)]
 use std::os::unix::net::UnixListener;
@@ -41,7 +36,7 @@ pub struct ControlRuntime {
     client: ClientSlot,
     feed_state: FeedState,
     cache: NamespaceCache,
-    session_epoch: String,
+    session_epoch: SessionEpoch,
     feed_events: FeedEventBus,
     _feed_handle: Option<FeedWorkerHandle>,
 }
@@ -55,10 +50,10 @@ impl ControlRuntime {
             config.msize,
             config.connect_timeout,
         )?;
-        let client = ClientSlot::new(client);
+        let session_epoch = SessionEpoch::new();
+        let client = ClientSlot::new_with_epoch(client, session_epoch.clone());
         let feed_state = FeedState::new();
         let cache = NamespaceCache::new();
-        let session_epoch = new_session_epoch();
         let feed_events = FeedEventBus::new(config.change_feed_backpressure_limit);
         let feed_handle = if let Some(path) = config.change_feed_path.clone() {
             Some(start_feed_worker(
@@ -105,12 +100,12 @@ pub(super) fn status_json(
     config: &ControlConfig,
     feed_state: &FeedState,
     cache: &NamespaceCache,
-    session_epoch: &str,
+    session_epoch: &SessionEpoch,
 ) -> Result<String> {
     let root = client.stat_timeout(client.root_fid(), config.request_timeout)?;
     let feed = feed_state.snapshot();
     let cache_stats = cache.stats();
-    let response_freshness = freshness::ResponseFreshness::from_feed(session_epoch, feed_state);
+    let response_freshness = freshness::ResponseFreshness::from_feed(session_epoch, feed_state)?;
     let mut out = String::from("{\"ok\":true,\"kind\":\"session.status.v1\",\"attached\":true");
     out.push_str(",\"endpoint\":");
     json::push_string(&mut out, &config.address);
@@ -210,14 +205,6 @@ pub fn serve_control_socket_with_runtime(
         }
     }
     Ok(())
-}
-
-fn new_session_epoch() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    format!("session:{}:{nanos}", std::process::id())
 }
 
 #[cfg(not(unix))]

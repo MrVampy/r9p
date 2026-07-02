@@ -1,5 +1,5 @@
 use super::{freshness::ResponseFreshness, json, options, snapshot, status_json, ControlConfig};
-use crate::{feed::FeedState, Client, NamespaceCache, Result};
+use crate::{feed::FeedState, Client, NamespaceCache, Result, SessionEpoch};
 use serde_json::{Map, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,7 +85,7 @@ pub(super) fn response_json(
     config: &ControlConfig,
     feed_state: &FeedState,
     cache: &NamespaceCache,
-    session_epoch: &str,
+    session_epoch: &SessionEpoch,
     request: QueryRequest,
 ) -> String {
     match response_json_result(client, config, feed_state, cache, session_epoch, request) {
@@ -99,10 +99,10 @@ fn response_json_result(
     config: &ControlConfig,
     feed_state: &FeedState,
     cache: &NamespaceCache,
-    session_epoch: &str,
+    session_epoch: &SessionEpoch,
     request: QueryRequest,
 ) -> Result<String> {
-    let response_freshness = ResponseFreshness::from_feed(session_epoch, feed_state);
+    let response_freshness = ResponseFreshness::from_feed(session_epoch, feed_state)?;
     let feed_cache_reads_enabled = feed_state.snapshot().state == "connected";
     match request {
         QueryRequest::Status => status_json(client, config, feed_state, cache, session_epoch),

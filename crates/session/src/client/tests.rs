@@ -108,6 +108,46 @@ fn connects_namespace_socket() {
     let _ = fs::remove_dir(namespace);
 }
 
+#[test]
+fn client_slot_replacement_bumps_session_epoch() {
+    let first_socket = unique_socket_path("slot-first");
+    let first_server = spawn_unix_root_server(&first_socket);
+    let first_client = Client::connect_with_timeout(
+        &format!("unix!{}", first_socket.display()),
+        "codex",
+        "/",
+        8192,
+        Duration::ZERO,
+    )
+    .expect("first client should connect");
+    let slot = crate::ClientSlot::new(first_client);
+    let first_epoch = slot.session_epoch().expect("first epoch");
+
+    let second_socket = unique_socket_path("slot-second");
+    let second_server = spawn_unix_root_server(&second_socket);
+    let second_client = Client::connect_with_timeout(
+        &format!("unix!{}", second_socket.display()),
+        "codex",
+        "/",
+        8192,
+        Duration::ZERO,
+    )
+    .expect("second client should connect");
+
+    slot.replace(second_client).expect("replace client");
+    let second_epoch = slot.session_epoch().expect("second epoch");
+
+    assert_ne!(first_epoch, second_epoch);
+
+    drop(slot);
+    first_server.join().expect("first server should not panic");
+    second_server
+        .join()
+        .expect("second server should not panic");
+    let _ = fs::remove_file(first_socket);
+    let _ = fs::remove_file(second_socket);
+}
+
 struct RootOnly;
 
 impl FileTree for RootOnly {

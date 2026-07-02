@@ -1,5 +1,5 @@
 use super::{tree::ControlTree, ControlConfig};
-use crate::{feed::FeedState, ClientSlot, Error, NamespaceCache, Result};
+use crate::{feed::FeedState, ClientSlot, Error, NamespaceCache, Result, SessionEpoch};
 use r9p::{
     codec,
     message::TMessage,
@@ -15,7 +15,7 @@ pub(super) fn serve_control_connection<S>(
     config: ControlConfig,
     feed_state: FeedState,
     cache: NamespaceCache,
-    session_epoch: String,
+    session_epoch: SessionEpoch,
 ) -> Result<()>
 where
     S: Read + Write,

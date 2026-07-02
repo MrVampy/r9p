@@ -1,6 +1,7 @@
 mod cache;
 mod client;
 pub mod control;
+mod epoch;
 mod error;
 pub mod feed;
 mod request;
@@ -12,6 +13,7 @@ pub use cache::{
     DirCache, DirEntry, Freshness, NamespaceCache, NamespaceCacheStats, StaleReason,
 };
 pub use client::{Client, ORDWR, OREAD, OTRUNC, OWRITE};
+pub use epoch::SessionEpoch;
 pub use error::{errno_for_9p_error, p9_error, Error, Result};
 pub use request::{with_fuse_unique, RequestTracker};
 pub use slot::ClientSlot;

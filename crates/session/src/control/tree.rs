@@ -1,5 +1,5 @@
 use super::{freshness::ResponseFreshness, json, query, snapshot, status_json, ControlConfig};
-use crate::{feed::FeedState, ClientSlot, NamespaceCache, ORDWR, OREAD};
+use crate::{feed::FeedState, ClientSlot, NamespaceCache, SessionEpoch, ORDWR, OREAD};
 use r9p::{
     error::{Error as P9Error, EEXIST, EPERM},
     fid::Fid,
@@ -28,7 +28,7 @@ pub(super) struct ControlTree {
     config: ControlConfig,
     feed_state: FeedState,
     cache: NamespaceCache,
-    session_epoch: String,
+    session_epoch: SessionEpoch,
     nodes: BTreeMap<u64, ControlNode>,
     qids: BTreeMap<ControlNode, u64>,
     query_responses: BTreeMap<Fid, Vec<u8>>,
@@ -58,7 +58,7 @@ impl ControlTree {
         config: ControlConfig,
         feed_state: FeedState,
         cache: NamespaceCache,
-        session_epoch: String,
+        session_epoch: SessionEpoch,
     ) -> Self {
         let mut tree = Self {
             client,
@@ -184,7 +184,7 @@ impl FileTree for ControlTree {
                     &namespace_path(&path),
                     self.config.request_timeout,
                     self.cache_reads_enabled(),
-                    &self.response_freshness(),
+                    &self.response_freshness().map_err(p9_error)?,
                 )
                 .map_err(p9_error)?;
                 read_bytes(response.as_bytes(), offset, count)
@@ -197,7 +197,7 @@ impl FileTree for ControlTree {
                     &namespace_path(&path),
                     self.config.request_timeout,
                     self.cache_reads_enabled(),
-                    &self.response_freshness(),
+                    &self.response_freshness().map_err(p9_error)?,
                 )
                 .map_err(p9_error)?;
                 read_bytes(response.as_bytes(), offset, count)
@@ -208,7 +208,7 @@ impl FileTree for ControlTree {
                     &client,
                     &namespace_path(&path),
                     self.config.request_timeout,
-                    &self.response_freshness(),
+                    &self.response_freshness().map_err(p9_error)?,
                 )
                 .map_err(p9_error)?;
                 read_bytes(response.as_bytes(), offset, count)
@@ -222,7 +222,7 @@ impl FileTree for ControlTree {
                     depth,
                     self.config.request_timeout,
                     self.cache_reads_enabled(),
-                    &self.response_freshness(),
+                    &self.response_freshness().map_err(p9_error)?,
                 )
                 .map_err(p9_error)?;
                 read_bytes(response.as_bytes(), offset, count)
@@ -267,7 +267,7 @@ impl FileTree for ControlTree {
 }
 
 impl ControlTree {
-    fn response_freshness(&self) -> ResponseFreshness {
+    fn response_freshness(&self) -> crate::Result<ResponseFreshness> {
         ResponseFreshness::from_feed(&self.session_epoch, &self.feed_state)
     }
 

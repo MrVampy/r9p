@@ -1,5 +1,6 @@
 use super::json;
 use crate::feed::FeedState;
+use crate::{Result, SessionEpoch};
 
 #[derive(Clone, Debug)]
 pub(super) struct ResponseFreshness {
@@ -9,13 +10,13 @@ pub(super) struct ResponseFreshness {
 }
 
 impl ResponseFreshness {
-    pub(super) fn from_feed(session_epoch: &str, feed_state: &FeedState) -> Self {
+    pub(super) fn from_feed(session_epoch: &SessionEpoch, feed_state: &FeedState) -> Result<Self> {
         let feed = feed_state.snapshot();
-        Self {
-            session_epoch: session_epoch.to_string(),
+        Ok(Self {
+            session_epoch: session_epoch.current()?,
             feed_generation: feed.last_generation,
             fresh_instance: feed.fresh_instance,
-        }
+        })
     }
 }
 

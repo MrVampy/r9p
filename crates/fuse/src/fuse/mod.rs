@@ -673,10 +673,11 @@ mod tests {
     }
 
     #[test]
-    fn read_only_file_opens_use_direct_io_for_unknown_size_reads() {
+    fn read_capable_file_opens_use_direct_io_for_unknown_size_reads() {
         assert_eq!(fuse_open_flags(false, OREAD), FOPEN_DIRECT_IO);
+        assert_eq!(fuse_open_flags(false, ORDWR), FOPEN_DIRECT_IO);
+        assert_eq!(fuse_open_flags(false, ORDWR | OTRUNC), FOPEN_DIRECT_IO);
         assert_eq!(fuse_open_flags(false, OWRITE), 0);
-        assert_eq!(fuse_open_flags(false, ORDWR), 0);
         assert_eq!(fuse_open_flags(false, OWRITE | OTRUNC), 0);
     }
 

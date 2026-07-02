@@ -45,11 +45,15 @@ pub(super) fn flags_to_9p_mode(flags: u32) -> u8 {
 pub(super) fn fuse_open_flags(is_dir_open: bool, mode: u8) -> u32 {
     if is_dir_open {
         FOPEN_KEEP_CACHE | FOPEN_CACHE_DIR
-    } else if mode == OREAD {
+    } else if open_mode_reads(mode) {
         FOPEN_DIRECT_IO
     } else {
         0
     }
+}
+
+fn open_mode_reads(mode: u8) -> bool {
+    matches!(mode & 0x03, OREAD | ORDWR)
 }
 
 pub(super) fn is_transport_error(error: &impl ErrorView) -> bool {

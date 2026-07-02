@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs::{self, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
     net::{TcpListener, TcpStream},
@@ -13,13 +14,14 @@ use std::{
 };
 
 use r9p::{
+    blocking::ORDWR,
     codec,
     fid::Fid,
     message::TMessage,
     qid::{Qid, DMDIR},
     server::{FileTree, OpenFile, ReadData, Server},
     stat::Stat,
-    Result as R9pResult,
+    Error as R9pError, Result as R9pResult,
 };
 
 #[test]
@@ -158,6 +160,55 @@ fn fuse_mount_supports_create_truncate_and_offset_writes() -> io::Result<()> {
     let _ = fs::remove_dir_all(&root);
     let _ = fs::remove_dir_all(&mountpoint);
     let _ = fs::remove_file(descriptor);
+    Ok(())
+}
+
+#[test]
+#[ignore = "host-gated: requires /dev/fuse, fusermount, and user mount permission"]
+fn fuse_mount_supports_same_fid_rpc_files() -> io::Result<()> {
+    if !host_can_run_fuse() {
+        return Ok(());
+    }
+
+    let mountpoint = unique_temp_dir("r9p-fuse-rpc-mount")?;
+    let server = RpcServer::start()?;
+
+    let mut mount = ChildGuard::spawn(
+        Command::new(r9p_bin())
+            .arg("mount")
+            .arg("--request-timeout")
+            .arg("1")
+            .arg("--read-timeout")
+            .arg("1")
+            .arg("--write-timeout")
+            .arg("1")
+            .arg("--control-timeout")
+            .arg("1")
+            .arg(&server.endpoint)
+            .arg(&mountpoint)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )?;
+    let rpc_path = mountpoint.join("rpc");
+    wait_for_metadata(&rpc_path)?;
+
+    let mut rpc = OpenOptions::new().read(true).write(true).open(&rpc_path)?;
+    rpc.write_all(b"ping")?;
+    rpc.seek(SeekFrom::Start(0))?;
+    let mut response = String::new();
+    rpc.read_to_string(&mut response)?;
+    if response != "rpc:ping" {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unexpected rpc response {response:?}"),
+        ));
+    }
+    drop(rpc);
+
+    unmount(&mountpoint);
+    mount.wait_or_kill()?;
+    server.join()?;
+    let _ = fs::remove_dir_all(&mountpoint);
     Ok(())
 }
 
@@ -613,6 +664,107 @@ struct SlowServer {
     handle: JoinHandle<io::Result<()>>,
 }
 
+struct RpcServer {
+    endpoint: String,
+    handle: JoinHandle<io::Result<()>>,
+}
+
+impl RpcServer {
+    fn start() -> io::Result<Self> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let endpoint = listener.local_addr()?.to_string();
+        let handle = thread::spawn(move || -> io::Result<()> {
+            let (stream, _) = listener.accept()?;
+            serve_file_tree_connection(stream, RpcTree::new())
+        });
+        Ok(Self { endpoint, handle })
+    }
+
+    fn join(self) -> io::Result<()> {
+        self.handle
+            .join()
+            .map_err(|_| io::Error::other("rpc server thread panicked"))?
+    }
+}
+
+struct RpcTree {
+    root: Qid,
+    rpc: Qid,
+    responses: BTreeMap<Fid, Vec<u8>>,
+}
+
+impl RpcTree {
+    fn new() -> Self {
+        Self {
+            root: Qid::dir(1),
+            rpc: Qid::file(2),
+            responses: BTreeMap::new(),
+        }
+    }
+}
+
+impl FileTree for RpcTree {
+    fn attach(&mut self, _fid: Fid, _uname: &[u8], _aname: &[u8]) -> R9pResult<Qid> {
+        Ok(self.root)
+    }
+
+    fn walk(
+        &mut self,
+        _fid: Fid,
+        _newfid: Fid,
+        start: Qid,
+        names: &[Vec<u8>],
+    ) -> R9pResult<Vec<Qid>> {
+        match names {
+            [] => Ok(Vec::new()),
+            [name] if start == self.root && name == b"rpc" => Ok(vec![self.rpc]),
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    fn open(&mut self, _fid: Fid, qid: Qid, mode: u8) -> R9pResult<OpenFile> {
+        if qid == self.rpc && mode & 0x03 != ORDWR {
+            return Err(R9pError::from("rpc file requires read-write open"));
+        }
+        Ok(OpenFile { qid, iounit: 0 })
+    }
+
+    fn read(&mut self, fid: Fid, qid: Qid, offset: u64, count: u32) -> R9pResult<ReadData> {
+        if qid == self.root {
+            return Ok(ReadData::Directory(vec![Stat::new("rpc", self.rpc, 0o600)]));
+        }
+        if qid != self.rpc {
+            return Ok(ReadData::Bytes(Vec::new()));
+        }
+        let response = self
+            .responses
+            .get(&fid)
+            .ok_or_else(|| R9pError::from("rpc read before write"))?;
+        slice_bytes(response, offset, count)
+    }
+
+    fn write(&mut self, fid: Fid, qid: Qid, offset: u64, data: &[u8]) -> R9pResult<u32> {
+        if qid != self.rpc {
+            return Err(R9pError::from("not writable"));
+        }
+        if offset != 0 {
+            return Err(R9pError::from("rpc write offset must be zero"));
+        }
+        let mut response = b"rpc:".to_vec();
+        response.extend(data);
+        self.responses.insert(fid, response);
+        u32::try_from(data.len()).map_err(|_| R9pError::from("write too large"))
+    }
+
+    fn stat(&mut self, qid: Qid) -> R9pResult<Stat> {
+        if qid == self.rpc {
+            Ok(Stat::new("rpc", qid, 0o600))
+        } else {
+            Ok(Stat::new(".", qid, DMDIR | 0o555))
+        }
+    }
+}
+
 impl SlowServer {
     fn start() -> io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
@@ -623,7 +775,7 @@ impl SlowServer {
         let thread_release = Arc::clone(&release);
         let handle = thread::spawn(move || -> io::Result<()> {
             let (stream, _) = listener.accept()?;
-            serve_slow_connection(stream, thread_read_calls, thread_release)
+            serve_file_tree_connection(stream, SlowTree::new(thread_read_calls, thread_release))
         });
         Ok(Self {
             endpoint,
@@ -724,12 +876,8 @@ impl FileTree for SlowTree {
     }
 }
 
-fn serve_slow_connection(
-    mut stream: TcpStream,
-    read_calls: Arc<AtomicUsize>,
-    release: Arc<AtomicBool>,
-) -> io::Result<()> {
-    let mut server = Server::new(SlowTree::new(read_calls, release));
+fn serve_file_tree_connection<T: FileTree>(mut stream: TcpStream, tree: T) -> io::Result<()> {
+    let mut server = Server::new(tree);
     while let Some(message) = read_tmessage(&mut stream)? {
         let reply = server.handle(message);
         let frame = codec::encode_rmessage_checked(&reply, server.session().msize())
@@ -745,6 +893,16 @@ fn serve_slow_connection(
         }
     }
     Ok(())
+}
+
+fn slice_bytes(data: &[u8], offset: u64, count: u32) -> R9pResult<ReadData> {
+    let start = usize::try_from(offset)
+        .map_err(|_| R9pError::from("read offset too large"))?
+        .min(data.len());
+    let end = start
+        .saturating_add(usize::try_from(count).unwrap_or(usize::MAX))
+        .min(data.len());
+    Ok(ReadData::Bytes(data[start..end].to_vec()))
 }
 
 fn read_tmessage(stream: &mut TcpStream) -> io::Result<Option<TMessage>> {

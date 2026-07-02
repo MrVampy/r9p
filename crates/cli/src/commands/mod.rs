@@ -8,5 +8,6 @@ pub(crate) mod read_write;
 pub(crate) mod script;
 pub(crate) mod serve;
 pub(crate) mod session;
+pub(crate) mod session_mount;
 pub(crate) mod stat_rdwr;
 pub(crate) mod version_attach;

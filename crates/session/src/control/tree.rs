@@ -1,5 +1,5 @@
 use super::{freshness::ResponseFreshness, json, query, snapshot, status_json, ControlConfig};
-use crate::{feed::FeedState, Client, NamespaceCache, ORDWR, OREAD};
+use crate::{feed::FeedState, ClientSlot, NamespaceCache, ORDWR, OREAD};
 use r9p::{
     error::{Error as P9Error, EEXIST, EPERM},
     fid::Fid,
@@ -24,7 +24,7 @@ const USAGE: &str = concat!(
 
 #[derive(Clone)]
 pub(super) struct ControlTree {
-    client: Client,
+    client: ClientSlot,
     config: ControlConfig,
     feed_state: FeedState,
     cache: NamespaceCache,
@@ -54,7 +54,7 @@ enum ControlNode {
 
 impl ControlTree {
     pub(super) fn new(
-        client: Client,
+        client: ClientSlot,
         config: ControlConfig,
         feed_state: FeedState,
         cache: NamespaceCache,
@@ -159,8 +159,9 @@ impl FileTree for ControlTree {
             | ControlNode::SnapshotDepth(_) => Ok(ReadData::Directory(Vec::new())),
             ControlNode::Usage => read_bytes(USAGE.as_bytes(), offset, count),
             ControlNode::Status => {
+                let client = self.client.snapshot().map_err(p9_error)?;
                 let response = status_json(
-                    &self.client,
+                    &client,
                     &self.config,
                     &self.feed_state,
                     &self.cache,
@@ -176,8 +177,9 @@ impl FileTree for ControlTree {
                 read_bytes(&response, offset, count)
             }
             ControlNode::Stat(path) => {
+                let client = self.client.snapshot().map_err(p9_error)?;
                 let response = snapshot::stat_json(
-                    &self.client,
+                    &client,
                     &self.cache,
                     &namespace_path(&path),
                     self.config.request_timeout,
@@ -188,8 +190,9 @@ impl FileTree for ControlTree {
                 read_bytes(response.as_bytes(), offset, count)
             }
             ControlNode::List(path) => {
+                let client = self.client.snapshot().map_err(p9_error)?;
                 let response = snapshot::list_json(
-                    &self.client,
+                    &client,
                     &self.cache,
                     &namespace_path(&path),
                     self.config.request_timeout,
@@ -200,8 +203,9 @@ impl FileTree for ControlTree {
                 read_bytes(response.as_bytes(), offset, count)
             }
             ControlNode::Read(path) => {
+                let client = self.client.snapshot().map_err(p9_error)?;
                 let response = snapshot::read_json(
-                    &self.client,
+                    &client,
                     &namespace_path(&path),
                     self.config.request_timeout,
                     &self.response_freshness(),
@@ -210,8 +214,9 @@ impl FileTree for ControlTree {
                 read_bytes(response.as_bytes(), offset, count)
             }
             ControlNode::Snapshot { depth, path } => {
+                let client = self.client.snapshot().map_err(p9_error)?;
                 let response = snapshot::snapshot_json(
-                    &self.client,
+                    &client,
                     &self.cache,
                     &namespace_path(&path),
                     depth,
@@ -236,9 +241,10 @@ impl FileTree for ControlTree {
         }
         match self.node_for(qid)? {
             ControlNode::Query => {
+                let client = self.client.snapshot().map_err(p9_error)?;
                 let response = match query::parse_json(data) {
                     Ok(request) => query::response_json(
-                        &self.client,
+                        &client,
                         &self.config,
                         &self.feed_state,
                         &self.cache,

@@ -1,11 +1,14 @@
 use std::{path::PathBuf, time::Duration};
 
 use crate::{
+    commands::session_mount::{start_session_mount, take_session_mount_config},
     errors::{cli_error, CliResult},
     target::Config,
     usage,
 };
-use session::control::{request_control_socket, serve_control_socket, ControlConfig};
+use session::control::{
+    request_control_socket, serve_control_socket_with_runtime, ControlConfig, ControlRuntime,
+};
 
 pub(crate) fn session_cmd(config: Config, mut args: Vec<String>) -> CliResult<()> {
     if args.is_empty() {
@@ -30,6 +33,7 @@ fn session_serve_cmd(config: Config, mut args: Vec<String>) -> CliResult<()> {
     let change_feed_cursor_template = take_change_feed_cursor_template(&mut args)?;
     let change_feed_poll_interval = take_change_feed_poll_interval(&mut args)?;
     let change_feed_backpressure_limit = take_change_feed_backpressure(&mut args)?;
+    let mount = take_session_mount_config(&mut args)?;
     let address = match (config.address.clone(), args.as_slice()) {
         (_, [endpoint]) => {
             let endpoint = endpoint.clone();
@@ -62,7 +66,9 @@ fn session_serve_cmd(config: Config, mut args: Vec<String>) -> CliResult<()> {
             args[0]
         )));
     }
-    serve_control_socket(&socket, control)?;
+    let runtime = ControlRuntime::start(&control)?;
+    let _mount = start_session_mount(&control, &runtime, &mount)?;
+    serve_control_socket_with_runtime(&socket, control, runtime)?;
     Ok(())
 }
 

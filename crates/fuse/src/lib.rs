@@ -12,3 +12,11 @@ pub use fuse::{
 pub fn mount(config: Config) -> Result<(), Error> {
     fuse::R9pFuse::mount(config)
 }
+
+pub fn mount_with_session(
+    config: Config,
+    client: session::ClientSlot,
+    feed_events: Option<session::feed::FeedEventReceiver>,
+) -> Result<(), Error> {
+    fuse::R9pFuse::mount_with_session(config, client, feed_events)
+}

@@ -26,7 +26,7 @@ use crate::{
 use invalidation::{notify_kernel_invalidations, KernelInvalidation};
 use mount::{block_termination_signals, mount_fuse};
 use r9p::stat::Stat;
-use session::{Client, ClientSlot};
+use session::{feed::FeedEventReceiver, Client, ClientSlot};
 use status::MountStatus;
 use std::{
     fs::File,
@@ -145,9 +145,6 @@ impl R9pFuse {
     pub fn mount(mut config: Config) -> Result<()> {
         block_termination_signals();
         normalize_config(&mut config);
-        let diagnostics =
-            Diagnostics::new(config.diagnostics_capacity, config.diagnostics_path.clone());
-        let status = MountStatus::new(config.status_path.clone());
         let client = Client::connect_with_timeout(
             &config.address,
             &config.uname,
@@ -155,6 +152,28 @@ impl R9pFuse {
             config.msize,
             config.connect_timeout,
         )?;
+        Self::mount_prepared(config, ClientSlot::new(client), None)
+    }
+
+    pub fn mount_with_session(
+        mut config: Config,
+        client: ClientSlot,
+        feed_events: Option<FeedEventReceiver>,
+    ) -> Result<()> {
+        block_termination_signals();
+        normalize_config(&mut config);
+        Self::mount_prepared(config, client, feed_events)
+    }
+
+    fn mount_prepared(
+        config: Config,
+        client: ClientSlot,
+        feed_events: Option<FeedEventReceiver>,
+    ) -> Result<()> {
+        let diagnostics =
+            Diagnostics::new(config.diagnostics_capacity, config.diagnostics_path.clone());
+        let status = MountStatus::new(config.status_path.clone());
+        let client_snapshot = client.snapshot()?;
         let _ = diagnostics.record(
             "mount_attached",
             0,
@@ -163,18 +182,22 @@ impl R9pFuse {
             0,
             format!(
                 "msize={} max_write_payload={} fuse_max_write={}",
-                client.msize(),
-                client.max_write_payload(),
+                client_snapshot.msize(),
+                client_snapshot.max_write_payload(),
                 wire::DEFAULT_MAX_WRITE
             ),
         );
-        let root_stat = client.stat_timeout(client.root_fid(), config.lookup_timeout)?;
-        let nodes = Arc::new(Mutex::new(NodeTable::new(client.root_fid(), root_stat)));
+        let root_stat =
+            client_snapshot.stat_timeout(client_snapshot.root_fid(), config.lookup_timeout)?;
+        let nodes = Arc::new(Mutex::new(NodeTable::new(
+            client_snapshot.root_fid(),
+            root_stat,
+        )));
         let uid = unsafe { libc::getuid() };
         let gid = unsafe { libc::getgid() };
         let mut mount = mount_fuse(Path::new(&config.mountpoint))?;
         let fs = Self {
-            client: ClientSlot::new(client),
+            client,
             nodes,
             config,
             diagnostics,
@@ -183,7 +206,7 @@ impl R9pFuse {
             gid,
             shape_recovery: Arc::new(Mutex::new(ShapeRecovery::new())),
         };
-        fs.run(mount.file_mut())
+        fs.run(mount.file_mut(), feed_events)
     }
 
     pub(in crate::fuse) fn entry_out(

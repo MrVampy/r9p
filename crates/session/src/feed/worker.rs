@@ -1,8 +1,8 @@
 use super::{
     feed_poll_path, parse_namespace_change_record, parse_namespace_path, select_feed_records,
-    FeedState,
+    FeedEvent, FeedEventBus, FeedState,
 };
-use crate::{Client, Error, NamespaceCache, Result, StaleReason, OREAD};
+use crate::{Client, ClientSlot, Error, NamespaceCache, Result, StaleReason, OREAD};
 use r9p::fid::Fid;
 use std::{
     sync::{
@@ -19,6 +19,7 @@ pub struct FeedWorkerConfig {
     pub stream_path: Option<String>,
     pub cursor_template: Option<String>,
     pub cache: Option<NamespaceCache>,
+    pub event_bus: Option<FeedEventBus>,
     pub poll_interval: Duration,
     pub lookup_timeout: Duration,
     pub read_timeout: Duration,
@@ -50,7 +51,7 @@ impl Drop for FeedWorkerHandle {
 }
 
 pub fn start_feed_worker(
-    client: Client,
+    client: ClientSlot,
     config: FeedWorkerConfig,
     state: FeedState,
 ) -> Result<FeedWorkerHandle> {
@@ -66,10 +67,20 @@ pub fn start_feed_worker(
     })
 }
 
-fn feed_loop(client: Client, config: FeedWorkerConfig, state: FeedState, stop: Arc<AtomicBool>) {
+fn feed_loop(
+    client: ClientSlot,
+    config: FeedWorkerConfig,
+    state: FeedState,
+    stop: Arc<AtomicBool>,
+) {
     state.set_connecting();
     let mut since_event_id = None;
     while !stop.load(Ordering::SeqCst) {
+        let Ok(client) = client.snapshot() else {
+            state.set_degraded("9P client slot unavailable");
+            sleep_interruptible(config.poll_interval, &stop);
+            continue;
+        };
         if let Some(stream_path) = config.stream_path.as_deref() {
             match consume_stream_until_error(&client, &config, stream_path, &state, &stop) {
                 Ok(next_event_id) => {
@@ -202,6 +213,13 @@ fn process_feed_data(
                 if let Some(cache) = &config.cache {
                     cache.mark_all_stale(StaleReason::NamespaceChange);
                 }
+                publish_feed_event(
+                    config,
+                    FeedEvent::CoarseInvalidation {
+                        reason: "change feed cursor fell outside recent window".to_string(),
+                    },
+                    state,
+                );
                 state.mark_fresh_instance();
                 state.set_connected(mode.source(), selected.cursor_advanced_to.clone(), None);
                 return Ok(selected.cursor_advanced_to);
@@ -220,6 +238,13 @@ fn process_feed_data(
                 "change feed backpressure limit exceeded".to_string(),
             ));
         }
+        publish_feed_event(
+            config,
+            FeedEvent::CoarseInvalidation {
+                reason: "change feed backpressure limit exceeded".to_string(),
+            },
+            state,
+        );
         state.set_degraded("change feed backpressure limit exceeded");
         return Ok(records.last().map(|record| record.event_id.clone()));
     }
@@ -227,6 +252,14 @@ fn process_feed_data(
         if let Some(cache) = &config.cache {
             cache.mark_namespace_change(&record.path, record.old_path.as_deref());
         }
+        publish_feed_event(
+            config,
+            FeedEvent::Change {
+                change: record.clone(),
+                source: mode.source(),
+            },
+            state,
+        );
         state.set_connected(
             mode.source(),
             Some(record.event_id.clone()),
@@ -234,6 +267,20 @@ fn process_feed_data(
         );
     }
     Ok(cursor_advanced_to.or_else(|| records.last().map(|record| record.event_id.clone())))
+}
+
+fn publish_feed_event(config: &FeedWorkerConfig, event: FeedEvent, state: &FeedState) {
+    let Some(bus) = &config.event_bus else {
+        return;
+    };
+    if !bus.publish(event) {
+        if let Some(cache) = &config.cache {
+            cache.mark_all_stale(StaleReason::Explicit(
+                "change feed event subscriber backpressure".to_string(),
+            ));
+        }
+        state.set_degraded("change feed event subscriber backpressure");
+    }
 }
 
 fn open_feed(client: &Client, path: &str, timeout: Duration) -> Result<Fid> {

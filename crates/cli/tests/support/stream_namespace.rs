@@ -55,17 +55,17 @@ impl NamespaceServer {
         })
     }
 
-    pub fn wait_for_stream_reader(&self) -> io::Result<()> {
+    pub fn wait_for_stream_reader_count(&self, expected: usize) -> io::Result<()> {
         let started = Instant::now();
         while started.elapsed() <= Duration::from_secs(5) {
-            if self.state.stream_reader_count() > 0 {
+            if self.state.stream_reader_count() == expected {
                 return Ok(());
             }
             thread::sleep(Duration::from_millis(20));
         }
         Err(io::Error::new(
             io::ErrorKind::TimedOut,
-            "stream reader did not attach",
+            format!("stream reader count did not reach {expected}"),
         ))
     }
 }

@@ -1,5 +1,5 @@
 use super::{tree::ControlTree, ControlConfig};
-use crate::{feed::FeedState, Client, Error, NamespaceCache, Result};
+use crate::{feed::FeedState, ClientSlot, Error, NamespaceCache, Result};
 use r9p::{
     codec,
     message::TMessage,
@@ -11,7 +11,7 @@ const CONTROL_MSIZE: u32 = 65_536;
 
 pub(super) fn serve_control_connection<S>(
     mut stream: S,
-    client: Client,
+    client: ClientSlot,
     config: ControlConfig,
     feed_state: FeedState,
     cache: NamespaceCache,

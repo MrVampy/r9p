@@ -1,6 +1,7 @@
 use std::{
     error::Error,
     fs, io,
+    io::Write,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     thread,
@@ -129,6 +130,32 @@ pub fn unmount(path: &Path) {
         {
             return;
         }
+    }
+}
+
+pub fn write_9p_file(endpoint: &str, path: &str, data: &[u8]) -> io::Result<()> {
+    let mut child = Command::new(r9p_bin())
+        .arg("-a")
+        .arg(endpoint)
+        .arg("write")
+        .arg(path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    child
+        .stdin
+        .as_mut()
+        .ok_or_else(|| io::Error::other("write stdin unavailable"))?
+        .write_all(data)?;
+    let output = child.wait_with_output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "9P write failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )))
     }
 }
 

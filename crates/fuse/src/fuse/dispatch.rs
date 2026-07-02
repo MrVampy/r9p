@@ -35,9 +35,16 @@ use std::{
 };
 
 impl R9pFuse {
-    pub(super) fn run(&self, file: &mut File) -> Result<()> {
+    pub(super) fn run(
+        &self,
+        file: &mut File,
+        feed_events: Option<session::feed::FeedEventReceiver>,
+    ) -> Result<()> {
         let mut workers = WorkerPool::start(self)?;
-        let mut change_feed = self.start_change_feed(file)?;
+        let mut change_feed = match feed_events {
+            Some(receiver) => self.start_session_feed_events(file, receiver)?,
+            None => self.start_change_feed(file)?,
+        };
         let mut buf = vec![0_u8; FUSE_BUFFER_SIZE];
         let mut initialized = false;
         loop {

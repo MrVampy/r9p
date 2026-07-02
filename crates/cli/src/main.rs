@@ -238,7 +238,7 @@ pub(crate) fn usage() -> ! {
     eprintln!("  script file              machine mode");
     eprintln!("  script service file      machine mode without -a");
     eprintln!(
-        "  session serve --socket path [--change-feed namespace-path] [--change-feed-stream namespace-path] [--change-feed-cursor-template path-with-{{event_id}}] [endpoint]"
+        "  session serve --socket path [--mount mountpoint] [--change-feed namespace-path] [--change-feed-stream namespace-path] [--change-feed-cursor-template path-with-{{event_id}}] [endpoint]"
     );
     eprintln!("  session status --socket path");
     eprintln!("  session snapshot --socket path [--depth n] [namespace-path]");

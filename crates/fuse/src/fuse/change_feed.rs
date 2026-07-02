@@ -14,7 +14,7 @@ use r9p::fid::Fid;
 use session::{
     feed::{
         feed_poll_path, parse_namespace_change_record, parse_namespace_path, scope_matches,
-        select_feed_records, NamespaceChange,
+        select_feed_records, FeedEvent, FeedEventReceiver, NamespaceChange,
     },
     Client, OREAD,
 };
@@ -22,6 +22,7 @@ use std::{
     fs::File,
     sync::{
         atomic::{AtomicBool, Ordering},
+        mpsc::RecvTimeoutError,
         Arc,
     },
     thread::{self, JoinHandle},
@@ -70,6 +71,27 @@ impl R9pFuse {
             .name("r9p-fuse-change-feed".to_string())
             .spawn(move || change_feed_loop(&mut fs, &mut file, path, stream_path, thread_stop))
             .map_err(|error| Error::io("spawn namespace change-feed consumer", error))?;
+        Ok(Some(ChangeFeedHandle {
+            stop,
+            handle: Some(handle),
+        }))
+    }
+
+    pub(super) fn start_session_feed_events(
+        &self,
+        file: &File,
+        receiver: FeedEventReceiver,
+    ) -> Result<Option<ChangeFeedHandle>> {
+        let mut file = file
+            .try_clone()
+            .map_err(|error| Error::io("clone /dev/fuse for session feed events", error))?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let mut fs = self.clone();
+        let handle = thread::Builder::new()
+            .name("r9p-fuse-session-feed".to_string())
+            .spawn(move || session_feed_event_loop(&mut fs, &mut file, receiver, thread_stop))
+            .map_err(|error| Error::io("spawn session feed projection", error))?;
         Ok(Some(ChangeFeedHandle {
             stop,
             handle: Some(handle),
@@ -154,6 +176,52 @@ impl R9pFuse {
         // path-backed operations for rebind, but do not clunk the old fids out
         // from under concurrent kernel requests on the data client.
         self.record_mount_diagnostic("change_feed_coarse_invalidation", 0, reason);
+    }
+}
+
+fn session_feed_event_loop(
+    fs: &mut R9pFuse,
+    file: &mut File,
+    receiver: FeedEventReceiver,
+    stop: Arc<AtomicBool>,
+) {
+    fs.status
+        .set_change_feed("connected", Some("session"), None, None);
+    while !stop.load(Ordering::SeqCst) {
+        match receiver.recv_timeout(Duration::from_millis(50)) {
+            Ok(FeedEvent::Change { change, source }) => {
+                if let Err(error) = fs.apply_namespace_change(file, change, source) {
+                    fs.status.set_change_feed(
+                        "degraded",
+                        Some(source),
+                        None,
+                        Some(error.message().to_string()),
+                    );
+                    fs.record_mount_diagnostic(
+                        "session_feed_event_failed",
+                        error.errno,
+                        error.message(),
+                    );
+                    fs.apply_coarse_invalidation(file, "session feed event failed");
+                }
+            }
+            Ok(FeedEvent::CoarseInvalidation { reason }) => {
+                fs.status
+                    .set_change_feed("degraded", Some("session"), None, Some(reason.clone()));
+                fs.apply_coarse_invalidation(file, &reason);
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                fs.status.set_change_feed(
+                    "degraded",
+                    Some("session"),
+                    None,
+                    Some("session feed event bus disconnected".to_string()),
+                );
+                fs.apply_coarse_invalidation(file, "session feed event bus disconnected");
+                return;
+            }
+        }
     }
 }
 

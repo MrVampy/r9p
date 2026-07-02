@@ -9,8 +9,8 @@ mod snapshot_path;
 mod snapshot_report;
 mod tree;
 
-use crate::feed::{start_feed_worker, FeedState, FeedWorkerConfig};
-use crate::{Client, Error, NamespaceCache, Result};
+use crate::feed::{start_feed_worker, FeedEventBus, FeedState, FeedWorkerConfig, FeedWorkerHandle};
+use crate::{Client, ClientSlot, Error, NamespaceCache, Result};
 pub use request::{parse_request, ControlRequest};
 use std::{
     fs,
@@ -35,6 +35,69 @@ pub struct ControlConfig {
     pub change_feed_cursor_template: Option<String>,
     pub change_feed_poll_interval: Duration,
     pub change_feed_backpressure_limit: usize,
+}
+
+pub struct ControlRuntime {
+    client: ClientSlot,
+    feed_state: FeedState,
+    cache: NamespaceCache,
+    session_epoch: String,
+    feed_events: FeedEventBus,
+    _feed_handle: Option<FeedWorkerHandle>,
+}
+
+impl ControlRuntime {
+    pub fn start(config: &ControlConfig) -> Result<Self> {
+        let client = Client::connect_with_timeout(
+            &config.address,
+            &config.uname,
+            &config.aname,
+            config.msize,
+            config.connect_timeout,
+        )?;
+        let client = ClientSlot::new(client);
+        let feed_state = FeedState::new();
+        let cache = NamespaceCache::new();
+        let session_epoch = new_session_epoch();
+        let feed_events = FeedEventBus::new(config.change_feed_backpressure_limit);
+        let feed_handle = if let Some(path) = config.change_feed_path.clone() {
+            Some(start_feed_worker(
+                client.clone(),
+                FeedWorkerConfig {
+                    path,
+                    stream_path: config.change_feed_stream_path.clone(),
+                    cursor_template: config.change_feed_cursor_template.clone(),
+                    cache: Some(cache.clone()),
+                    event_bus: Some(feed_events.clone()),
+                    poll_interval: config.change_feed_poll_interval,
+                    lookup_timeout: config.request_timeout,
+                    read_timeout: config.request_timeout,
+                    control_timeout: config.request_timeout,
+                    backpressure_limit: config.change_feed_backpressure_limit,
+                },
+                feed_state.clone(),
+            )?)
+        } else {
+            feed_state.set_disabled();
+            None
+        };
+        Ok(Self {
+            client,
+            feed_state,
+            cache,
+            session_epoch,
+            feed_events,
+            _feed_handle: feed_handle,
+        })
+    }
+
+    pub fn client_slot(&self) -> ClientSlot {
+        self.client.clone()
+    }
+
+    pub fn feed_events(&self) -> FeedEventBus {
+        self.feed_events.clone()
+    }
 }
 
 pub(super) fn status_json(
@@ -101,50 +164,30 @@ pub(super) fn status_json(
 
 #[cfg(unix)]
 pub fn serve_control_socket(socket_path: &Path, config: ControlConfig) -> Result<()> {
+    let runtime = ControlRuntime::start(&config)?;
+    serve_control_socket_with_runtime(socket_path, config, runtime)
+}
+
+#[cfg(unix)]
+pub fn serve_control_socket_with_runtime(
+    socket_path: &Path,
+    config: ControlConfig,
+    runtime: ControlRuntime,
+) -> Result<()> {
     if socket_path.exists() {
         fs::remove_file(socket_path)
             .map_err(|error| Error::io(format!("remove {}", socket_path.display()), error))?;
     }
     let listener = UnixListener::bind(socket_path)
         .map_err(|error| Error::io(format!("bind {}", socket_path.display()), error))?;
-    let client = Client::connect_with_timeout(
-        &config.address,
-        &config.uname,
-        &config.aname,
-        config.msize,
-        config.connect_timeout,
-    )?;
-    let feed_state = FeedState::new();
-    let cache = NamespaceCache::new();
-    let session_epoch = new_session_epoch();
-    let _feed_handle = if let Some(path) = config.change_feed_path.clone() {
-        Some(start_feed_worker(
-            client.clone(),
-            FeedWorkerConfig {
-                path,
-                stream_path: config.change_feed_stream_path.clone(),
-                cursor_template: config.change_feed_cursor_template.clone(),
-                cache: Some(cache.clone()),
-                poll_interval: config.change_feed_poll_interval,
-                lookup_timeout: config.request_timeout,
-                read_timeout: config.request_timeout,
-                control_timeout: config.request_timeout,
-                backpressure_limit: config.change_feed_backpressure_limit,
-            },
-            feed_state.clone(),
-        )?)
-    } else {
-        feed_state.set_disabled();
-        None
-    };
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                let client = client.clone();
+                let client = runtime.client.clone();
                 let config = config.clone();
-                let feed_state = feed_state.clone();
-                let cache = cache.clone();
-                let session_epoch = session_epoch.clone();
+                let feed_state = runtime.feed_state.clone();
+                let cache = runtime.cache.clone();
+                let session_epoch = runtime.session_epoch.clone();
                 thread::spawn(move || {
                     if let Err(error) = server::serve_control_connection(
                         stream,

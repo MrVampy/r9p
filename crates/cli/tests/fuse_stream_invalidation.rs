@@ -1,15 +1,15 @@
 mod support;
 
 use std::{
-    fs, io,
-    io::Write,
+    fs,
     process::{Command, Stdio},
 };
 
 use support::{
     fuse_host::{
         host_can_run_fuse, r9p_bin, read_dir_names, temp_path, unique_temp_dir, unmount,
-        wait_for_dir_entry, wait_for_mounted_file, wait_for_status_event, ChildGuard, TestResult,
+        wait_for_dir_entry, wait_for_mounted_file, wait_for_status_event, write_9p_file,
+        ChildGuard, TestResult,
     },
     stream_namespace::NamespaceServer,
 };
@@ -58,7 +58,7 @@ fn fuse_stream_event_invalidates_cached_directory_after_9p_mutation() -> TestRes
     )?;
 
     wait_for_mounted_file(&mountpoint.join("watched.txt"), "watched\n")?;
-    server.wait_for_stream_reader()?;
+    server.wait_for_stream_reader_count(1)?;
 
     let before = read_dir_names(&mountpoint)?;
     assert!(
@@ -66,7 +66,7 @@ fn fuse_stream_event_invalidates_cached_directory_after_9p_mutation() -> TestRes
         "created.txt should not be visible before mutation: {before:?}"
     );
 
-    write_mutation(&server.endpoint)?;
+    write_9p_file(&server.endpoint, "/mutate", b"create\n")?;
     wait_for_status_event(&status, "event-1")?;
     wait_for_dir_entry(&mountpoint, "created.txt")?;
     wait_for_mounted_file(&mountpoint.join("created.txt"), "created\n")?;
@@ -77,30 +77,4 @@ fn fuse_stream_event_invalidates_cached_directory_after_9p_mutation() -> TestRes
     let _ = fs::remove_file(status);
     let _ = fs::remove_file(diagnostics);
     Ok(())
-}
-
-fn write_mutation(endpoint: &str) -> io::Result<()> {
-    let mut child = Command::new(r9p_bin())
-        .arg("-a")
-        .arg(endpoint)
-        .arg("write")
-        .arg("/mutate")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    child
-        .stdin
-        .as_mut()
-        .ok_or_else(|| io::Error::other("mutation stdin unavailable"))?
-        .write_all(b"create\n")?;
-    let output = child.wait_with_output()?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!(
-            "mutation write failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )))
-    }
 }

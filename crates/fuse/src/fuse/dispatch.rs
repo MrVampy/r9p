@@ -20,8 +20,8 @@ use super::{
 use crate::{
     error::{Error, Result},
     node::{NodeTable, ROOT_NODEID},
-    p9::{with_fuse_unique, Client},
 };
+use session::{with_fuse_unique, Client};
 use std::{
     fs::File,
     io::Read,
@@ -190,7 +190,9 @@ impl R9pFuse {
         let flushed = self
             .client
             .snapshot()
-            .and_then(|client| client.interrupt_fuse_unique(input.unique, self.interrupt_timeout()))
+            .and_then(|client| {
+                Ok(client.interrupt_fuse_unique(input.unique, self.interrupt_timeout())?)
+            })
             .unwrap_or(0);
         if self.config.debug {
             eprintln!(

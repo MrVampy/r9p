@@ -7,8 +7,8 @@ use crate::{
         R9pFuse,
     },
     node::{has_close_commit_mode, is_dir, read_open_directory_entries},
-    p9::{OREAD, OTRUNC},
 };
+use session::{OREAD, OTRUNC};
 use std::fs::File;
 
 impl R9pFuse {
@@ -93,11 +93,11 @@ impl R9pFuse {
                 mode &= !OTRUNC;
                 if let Err(error) = client.open_timeout(fid, mode, open_timeout) {
                     let _ = client.clunk_timeout(fid, self.control_timeout());
-                    return Err(error);
+                    return Err(error.into());
                 }
             } else {
                 let _ = client.clunk_timeout(fid, self.control_timeout());
-                return Err(error);
+                return Err(error.into());
             }
         }
         let dir_entries = if is_dir_open {

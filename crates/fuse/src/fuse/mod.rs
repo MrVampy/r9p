@@ -22,11 +22,11 @@ use crate::{
     diagnostics::{DiagnosticContext, DiagnosticRecord, Diagnostics, DEFAULT_DIAGNOSTICS_CAPACITY},
     error::{Error, Result},
     node::{mode_kind, qid_to_inode, DirEntry, NodeTable, StaleBinding},
-    p9::Client,
 };
 use invalidation::{notify_kernel_invalidations, KernelInvalidation};
 use mount::{block_termination_signals, mount_fuse};
 use r9p::stat::Stat;
+use session::Client;
 use status::MountStatus;
 use std::{
     fs::File,
@@ -285,7 +285,7 @@ impl R9pFuse {
             let nodes = self.nodes()?;
             nodes.node(nodeid)?.path.clone()
         };
-        client.walk_timeout(client.root_fid(), &path, timeout)
+        Ok(client.walk_timeout(client.root_fid(), &path, timeout)?)
     }
 
     pub(in crate::fuse) fn fresh_child_fid(
@@ -299,7 +299,7 @@ impl R9pFuse {
             let nodes = self.nodes()?;
             nodes.child_path(parent_nodeid, name)?
         };
-        client.walk_timeout(client.root_fid(), &path, timeout)
+        Ok(client.walk_timeout(client.root_fid(), &path, timeout)?)
     }
 
     pub(in crate::fuse) fn cached_node_stat_if_fresh(&self, nodeid: u64) -> Result<Option<Stat>> {
@@ -597,8 +597,8 @@ mod tests {
     };
     use crate::error::Error;
     use crate::node::DirEntry;
-    use crate::p9::{ORDWR, OREAD, OTRUNC, OWRITE};
     use r9p::{qid::Qid, stat::Stat};
+    use session::{ORDWR, OREAD, OTRUNC, OWRITE};
     use std::time::{Duration, Instant};
 
     #[test]

@@ -12,9 +12,9 @@ use crate::{
         R9pFuse,
     },
     node::{is_dir, null_wstat},
-    p9::Client,
 };
 use r9p::{fid::Fid, qid::Qid, stat::Stat};
+use session::Client;
 use std::{fs::File, mem::size_of};
 
 struct RenamePlan {
@@ -115,7 +115,7 @@ impl R9pFuse {
                 Err(error) => {
                     let _ = client.clunk_timeout(existing, self.control_timeout());
                     let _ = client.clunk_timeout(fid, self.control_timeout());
-                    return Err(error);
+                    return Err(error.into());
                 }
             };
             if is_dir(&existing_stat) {
@@ -166,7 +166,7 @@ impl R9pFuse {
                         Err(error) => {
                             let _ = client.clunk_timeout(existing, self.control_timeout());
                             let _ = client.clunk_timeout(fid, self.control_timeout());
-                            return Err(error);
+                            return Err(error.into());
                         }
                     };
                     if is_dir(&existing_stat) {
@@ -240,13 +240,13 @@ impl R9pFuse {
                     Ok(stat) => Ok((rebound, stat)),
                     Err(error) => {
                         let _ = client.clunk_timeout(rebound, self.control_timeout());
-                        Err(error)
+                        Err(error.into())
                     }
                 }
             }
             Err(error) => {
                 let _ = client.clunk_timeout(fid, self.control_timeout());
-                Err(error)
+                Err(error.into())
             }
         }
     }
@@ -254,6 +254,6 @@ impl R9pFuse {
     fn rename_fid(&mut self, client: &Client, fid: Fid, new_name: &[u8]) -> Result<()> {
         let mut stat = null_wstat();
         stat.name = new_name.to_vec();
-        client.wstat_timeout(fid, stat, self.mutation_timeout())
+        Ok(client.wstat_timeout(fid, stat, self.mutation_timeout())?)
     }
 }

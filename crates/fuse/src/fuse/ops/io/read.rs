@@ -7,8 +7,8 @@ use crate::{
         R9pFuse,
     },
     node::is_symlink,
-    p9::OREAD,
 };
+use session::OREAD;
 use std::fs::File;
 
 impl R9pFuse {
@@ -42,7 +42,7 @@ impl R9pFuse {
                     "symlink handle is stale after namespace refresh",
                 ));
             }
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.into()),
         };
         reply_bytes(file, header.unique, &data)
     }
@@ -101,7 +101,7 @@ impl R9pFuse {
                     self.recover_namespace_shape(header.nodeid)?;
                     return Err(Error::new(libc::ESTALE, "file handle is not replayable"));
                 }
-                Err(error) => return Err(error),
+                Err(error) => return Err(error.into()),
             };
         reply_bytes(file, header.unique, &data)
     }
@@ -117,7 +117,7 @@ impl R9pFuse {
         let fid = client.clone_fid_timeout(node_fid, self.lookup_timeout())?;
         if let Err(error) = client.open_timeout(fid, OREAD, self.lookup_timeout()) {
             let _ = client.clunk_timeout(fid, self.control_timeout());
-            return Err(error);
+            return Err(error.into());
         }
         let old_handle =
             match self
@@ -133,7 +133,7 @@ impl R9pFuse {
         let _ = old_handle
             .client
             .clunk_timeout(old_handle.require_fid()?, self.control_timeout());
-        client.read_timeout(fid, offset, size, self.read_timeout())
+        Ok(client.read_timeout(fid, offset, size, self.read_timeout())?)
     }
 }
 

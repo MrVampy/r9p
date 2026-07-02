@@ -2,7 +2,6 @@ mod diagnostics;
 mod error;
 mod fuse;
 mod node;
-mod p9;
 
 pub use error::Error;
 pub use fuse::{

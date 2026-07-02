@@ -8,13 +8,13 @@ use crate::{
         wire::{FuseCreateIn, FuseCreateOut, FuseInHeader, FuseMkdirIn, FuseMknodIn, FuseOpenOut},
         R9pFuse,
     },
-    p9::OREAD,
 };
 use r9p::{
     fid::Fid,
     qid::{Qid, DMDIR},
     stat::Stat,
 };
+use session::{Client, OREAD};
 use std::{fs::File, mem::size_of};
 
 impl R9pFuse {
@@ -84,7 +84,7 @@ impl R9pFuse {
             }
             Err(error) => {
                 let _ = client.clunk_timeout(open_fid, self.control_timeout());
-                return Err(error);
+                return Err(error.into());
             }
         };
         if let Some(clunk_fid) = clunk_fid {
@@ -157,7 +157,7 @@ impl R9pFuse {
         name: &[u8],
         perm: u32,
         mode: u8,
-    ) -> Result<(crate::p9::Client, Fid, Fid, Qid)> {
+    ) -> Result<(Client, Fid, Fid, Qid)> {
         // Create-family operations only retry around the initial Tcreate. Once
         // the server reports that creation succeeded, follow-up walks/stats are
         // not replayed as a second create. That preserves the Plan 37 contract:
@@ -170,7 +170,7 @@ impl R9pFuse {
             Ok(created) => created,
             Err(error) => {
                 let _ = client.clunk_timeout(create_fid, self.control_timeout());
-                return Err(error);
+                return Err(error.into());
             }
         };
         Ok((client, parent_fid, fid, qid))
@@ -180,7 +180,7 @@ impl R9pFuse {
         &mut self,
         file: &mut File,
         header: FuseInHeader,
-        client: &crate::p9::Client,
+        client: &Client,
         parent_fid: Fid,
         name: &[u8],
     ) -> Result<()> {

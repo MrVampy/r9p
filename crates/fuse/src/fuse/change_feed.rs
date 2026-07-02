@@ -9,11 +9,9 @@ use super::{
     util::is_transport_error,
     R9pFuse,
 };
-use crate::{
-    error::{Error, Result},
-    p9::{Client, OREAD},
-};
+use crate::error::{Error, Result};
 use r9p::fid::Fid;
+use session::{Client, OREAD};
 use std::{
     fs::File,
     sync::{
@@ -263,7 +261,7 @@ fn consume_feed_until_error(
             }
             Err(error) => {
                 let _ = client.clunk_timeout(fid, fs.control_timeout());
-                return Err(error);
+                return Err(error.into());
             }
         }
         sleep_interruptible(fs.config.change_feed_poll_interval, stop);
@@ -284,7 +282,7 @@ fn open_feed(client: &Client, path: &str, timeout: Duration) -> Result<Fid> {
     let fid = client.walk_timeout(client.root_fid(), &segments, timeout)?;
     if let Err(error) = client.open_timeout(fid, OREAD, timeout) {
         let _ = client.clunk_timeout(fid, timeout);
-        return Err(error);
+        return Err(error.into());
     }
     Ok(fid)
 }

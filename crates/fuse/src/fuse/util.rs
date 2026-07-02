@@ -1,11 +1,34 @@
 //! Stateless conversion helpers between the FUSE and 9P views of the world.
 
 use super::wire::{FOPEN_CACHE_DIR, FOPEN_DIRECT_IO, FOPEN_KEEP_CACHE};
-use crate::{
-    error::Error,
-    p9::{ORDWR, OREAD, OTRUNC, OWRITE},
-};
+use crate::error::Error;
+use session::{ORDWR, OREAD, OTRUNC, OWRITE};
 use std::{mem::size_of, time::Duration};
+
+pub(super) trait ErrorView {
+    fn errno(&self) -> i32;
+    fn message(&self) -> &str;
+}
+
+impl ErrorView for Error {
+    fn errno(&self) -> i32 {
+        self.errno
+    }
+
+    fn message(&self) -> &str {
+        self.message()
+    }
+}
+
+impl ErrorView for session::Error {
+    fn errno(&self) -> i32 {
+        self.errno
+    }
+
+    fn message(&self) -> &str {
+        self.message()
+    }
+}
 
 pub(super) fn flags_to_9p_mode(flags: u32) -> u8 {
     let mut mode = match flags & libc::O_ACCMODE as u32 {
@@ -29,9 +52,9 @@ pub(super) fn fuse_open_flags(is_dir_open: bool, mode: u8) -> u32 {
     }
 }
 
-pub(super) fn is_transport_error(error: &Error) -> bool {
+pub(super) fn is_transport_error(error: &impl ErrorView) -> bool {
     matches!(
-        error.errno,
+        error.errno(),
         libc::EPIPE
             | libc::ECONNRESET
             | libc::ECONNABORTED
@@ -39,7 +62,7 @@ pub(super) fn is_transport_error(error: &Error) -> bool {
             | libc::ESHUTDOWN
             | libc::ETIMEDOUT
             | libc::EAGAIN
-    ) || (error.errno == libc::EIO && is_transport_message(error.message()))
+    ) || (error.errno() == libc::EIO && is_transport_message(error.message()))
 }
 
 fn is_transport_message(message: &str) -> bool {
@@ -56,9 +79,9 @@ fn is_transport_message(message: &str) -> bool {
 /// intentionally a *candidate* predicate: a genuine missing path is also
 /// `ENOENT`, and an `unknown fid` can mean an open handle is no longer safe, so
 /// callers retry at most once and only at a safe operation boundary.
-pub(super) fn is_namespace_shape_error(error: &Error) -> bool {
-    error.errno == libc::ENOENT
-        || (error.errno == libc::ESTALE && is_stale_namespace_message(error.message()))
+pub(super) fn is_namespace_shape_error(error: &impl ErrorView) -> bool {
+    error.errno() == libc::ENOENT
+        || (error.errno() == libc::ESTALE && is_stale_namespace_message(error.message()))
 }
 
 fn is_stale_namespace_message(message: &str) -> bool {

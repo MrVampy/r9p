@@ -1,13 +1,11 @@
-use crate::{
-    error::{Error, Result},
-    p9::Client,
-};
+use crate::error::{Error, Result};
 use r9p::{
     blocking::DEFAULT_READ_CHUNK,
     fid::Fid,
     qid::{Qid, DMDIR, DMSYMLINK, QTDIR, QTSYMLINK},
     stat::{decode_dir_entries as decode_p9_dir_entries, Stat},
 };
+use session::Client;
 use std::{
     collections::BTreeMap,
     time::{Duration, Instant},

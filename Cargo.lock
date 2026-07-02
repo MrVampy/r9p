@@ -33,6 +33,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "r9p",
+ "session",
 ]
 
 [[package]]
@@ -44,3 +45,11 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 [[package]]
 name = "r9p"
 version = "0.1.0"
+
+[[package]]
+name = "session"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "r9p",
+]

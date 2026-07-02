@@ -99,7 +99,7 @@ impl R9pFuse {
                         ));
                     }
                 }
-                Err(error) => return Err(error),
+                Err(error) => return Err(error.into()),
             }
             self.nodes()?.mark_close_commit_flushed(input.fh)?;
             invalidate_after_reply = close_commit_refreshes_namespace_bindings(handle.close_commit);

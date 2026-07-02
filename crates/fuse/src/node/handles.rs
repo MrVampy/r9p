@@ -1,9 +1,7 @@
 use super::{DirEntry, NodeTable};
-use crate::{
-    error::{Error, Result},
-    p9::Client,
-};
+use crate::error::{Error, Result};
 use r9p::fid::Fid;
+use session::Client;
 use std::fmt;
 
 #[derive(Clone)]

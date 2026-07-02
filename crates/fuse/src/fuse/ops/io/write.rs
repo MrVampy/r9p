@@ -10,8 +10,8 @@ use crate::{
         wire::{FuseInHeader, FuseReleaseIn, FuseWriteIn, FuseWriteOut},
         R9pFuse,
     },
-    p9::OWRITE,
 };
+use session::OWRITE;
 use std::{fs::File, mem::size_of};
 
 impl R9pFuse {
@@ -82,7 +82,7 @@ impl R9pFuse {
                     "write failed during namespace refresh and was not replayed",
                 ));
             }
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.into()),
         };
         if count > 0 {
             self.nodes()?.note_handle_write(input.fh, count)?;
@@ -112,7 +112,7 @@ impl R9pFuse {
         let fid = client.clone_fid_timeout(node_fid, self.control_timeout())?;
         if let Err(error) = client.open_timeout(fid, OWRITE, self.control_timeout()) {
             let _ = client.clunk_timeout(fid, self.control_timeout());
-            return Err(error);
+            return Err(error.into());
         }
         let old_handle =
             match self
@@ -128,7 +128,7 @@ impl R9pFuse {
         let _ = old_handle
             .client
             .clunk_timeout(old_handle.require_fid()?, self.control_timeout());
-        client.write_timeout(fid, offset, data, write_timeout)
+        Ok(client.write_timeout(fid, offset, data, write_timeout)?)
     }
 
     pub(in crate::fuse) fn release(
@@ -182,7 +182,7 @@ impl R9pFuse {
                         ));
                     }
                 }
-                Err(error) => return Err(error),
+                Err(error) => return Err(error.into()),
             }
         }
         reply_empty(file, header.unique)?;

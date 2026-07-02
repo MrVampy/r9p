@@ -13,9 +13,9 @@ use crate::{
         R9pFuse,
     },
     node::{has_close_commit_mode, null_wstat},
-    p9::{Client, OTRUNC, OWRITE},
 };
 use r9p::fid::Fid;
+use session::{Client, OTRUNC, OWRITE};
 use std::fs::File;
 
 impl R9pFuse {
@@ -104,7 +104,7 @@ impl R9pFuse {
                     if input.size == 0 {
                         self.truncate_fallback(&client, fid)?;
                     } else {
-                        return Err(error);
+                        return Err(error.into());
                     }
                 }
             }
@@ -132,10 +132,10 @@ impl R9pFuse {
         if open_result.is_err() {
             if let Err(error) = client.open_timeout(clone, OWRITE, timeout) {
                 let _ = client.clunk_timeout(clone, timeout);
-                return Err(error);
+                return Err(error.into());
             }
         }
-        client.clunk_timeout(clone, timeout)
+        Ok(client.clunk_timeout(clone, timeout)?)
     }
 }
 

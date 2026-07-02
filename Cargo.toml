@@ -5,6 +5,7 @@ members = [
     "crates/fs",
     "crates/fuse",
     "crates/front",
+    "crates/session",
 ]
 resolver = "2"
 
@@ -24,3 +25,4 @@ fuse = { path = "crates/fuse" }
 fs = { path = "crates/fs" }
 libc = "=0.2.186"
 r9p = { path = "crates/core" }
+session = { path = "crates/session" }

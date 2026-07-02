@@ -44,8 +44,8 @@ impl R9pFuse {
     }
 
     fn lookup_once(&mut self, file: &mut File, header: FuseInHeader, name: &[u8]) -> Result<()> {
-        let (client, parent_fid) = self.bound_node_fid(header.nodeid)?;
-        let fid = client.walk_one_timeout(parent_fid, name, self.lookup_timeout())?;
+        let client = self.client_snapshot()?;
+        let fid = self.fresh_child_fid(header.nodeid, name, &client, self.lookup_timeout())?;
         let stat = client.stat_timeout(fid, self.lookup_timeout())?;
         let (nodeid, generation, clunk_fid) = {
             let mut nodes = self.nodes()?;

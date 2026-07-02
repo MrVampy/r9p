@@ -275,6 +275,33 @@ impl R9pFuse {
         }
     }
 
+    pub(in crate::fuse) fn fresh_node_fid(
+        &self,
+        nodeid: u64,
+        client: &Client,
+        timeout: Duration,
+    ) -> Result<r9p::fid::Fid> {
+        let path = {
+            let nodes = self.nodes()?;
+            nodes.node(nodeid)?.path.clone()
+        };
+        client.walk_timeout(client.root_fid(), &path, timeout)
+    }
+
+    pub(in crate::fuse) fn fresh_child_fid(
+        &self,
+        parent_nodeid: u64,
+        name: &[u8],
+        client: &Client,
+        timeout: Duration,
+    ) -> Result<r9p::fid::Fid> {
+        let path = {
+            let nodes = self.nodes()?;
+            nodes.child_path(parent_nodeid, name)?
+        };
+        client.walk_timeout(client.root_fid(), &path, timeout)
+    }
+
     pub(in crate::fuse) fn cached_node_stat_if_fresh(&self, nodeid: u64) -> Result<Option<Stat>> {
         let nodes = self.nodes()?;
         let node = nodes.node(nodeid)?;

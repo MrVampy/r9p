@@ -6,7 +6,7 @@ use crate::{
         wire::{FuseInHeader, FuseOpenIn, FuseOpenOut},
         R9pFuse,
     },
-    node::{has_close_commit_mode, is_dir, read_directory_entries},
+    node::{has_close_commit_mode, is_dir, read_open_directory_entries},
     p9::{OREAD, OTRUNC},
 };
 use std::fs::File;
@@ -57,13 +57,13 @@ impl R9pFuse {
         if is_dir_open && !is_dir(&node_stat) {
             return reply_error(file, header.unique, libc::ENOTDIR);
         }
-        let (client, node_fid) = self.bound_node_fid(header.nodeid)?;
+        let client = self.client_snapshot()?;
         let open_timeout = if flags_to_9p_mode(input.flags) == OREAD || is_dir_open {
             self.lookup_timeout()
         } else {
             self.mutation_timeout()
         };
-        let fid = client.clone_fid_timeout(node_fid, open_timeout)?;
+        let fid = self.fresh_node_fid(header.nodeid, &client, open_timeout)?;
         let mut mode = flags_to_9p_mode(input.flags);
         if is_dir_open {
             mode = OREAD;
@@ -88,8 +88,7 @@ impl R9pFuse {
             }
         }
         let dir_entries = if is_dir_open {
-            let mut dir_client = client.clone();
-            match read_directory_entries(&mut dir_client, node_fid, self.control_timeout()) {
+            match read_open_directory_entries(&client, fid, self.control_timeout()) {
                 Ok(entries) => entries,
                 Err(error) => {
                     let _ = client.clunk_timeout(fid, self.control_timeout());

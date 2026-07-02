@@ -1,6 +1,6 @@
 use crate::{
     error::{Error, Result},
-    p9::{Client, OREAD},
+    p9::Client,
 };
 use r9p::{
     fid::Fid,
@@ -444,23 +444,8 @@ pub fn mode_kind(stat: &Stat) -> u32 {
     }
 }
 
-pub fn read_directory_entries(
-    client: &mut Client,
-    fid: Fid,
-    timeout: Duration,
-) -> Result<Vec<DirEntry>> {
-    let dir_fid = client.clone_fid_timeout(fid, timeout)?;
-    if let Err(error) = client.open_timeout(dir_fid, OREAD, timeout) {
-        let _ = client.clunk_timeout(dir_fid, timeout);
-        return Err(error);
-    }
-    let result = read_directory_entries_open(client, dir_fid, timeout);
-    let _ = client.clunk_timeout(dir_fid, timeout);
-    result
-}
-
-fn read_directory_entries_open(
-    client: &mut Client,
+pub fn read_open_directory_entries(
+    client: &Client,
     fid: Fid,
     timeout: Duration,
 ) -> Result<Vec<DirEntry>> {

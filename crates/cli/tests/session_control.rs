@@ -49,6 +49,10 @@ fn session_control_verbs_use_local_socket() -> TestResult<()> {
     assert_stdout_contains(&status, "\"kind\":\"session.status.v1\"")?;
     assert_stdout_contains(&status, "\"attached\":true")?;
 
+    let direct_status =
+        run_session_until_success(&["-a", &format!("unix!{socket_arg}"), "read", "/status"])?;
+    assert_stdout_contains(&direct_status, "\"kind\":\"session.status.v1\"")?;
+
     let snapshot = run_session_until_success(&[
         "session",
         "snapshot",

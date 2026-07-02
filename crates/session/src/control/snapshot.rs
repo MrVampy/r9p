@@ -164,7 +164,7 @@ fn with_owned_fid<T>(
     }
 }
 
-fn read_all(client: &Client, fid: r9p::fid::Fid, timeout: Duration) -> Result<Vec<u8>> {
+pub(super) fn read_all(client: &Client, fid: r9p::fid::Fid, timeout: Duration) -> Result<Vec<u8>> {
     let mut offset = 0_u64;
     let mut data = Vec::new();
     loop {

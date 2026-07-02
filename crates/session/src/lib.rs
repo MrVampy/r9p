@@ -2,6 +2,7 @@ mod cache;
 mod client;
 pub mod control;
 mod error;
+pub mod feed;
 mod request;
 mod slot;
 mod transport;

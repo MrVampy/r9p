@@ -11,7 +11,13 @@ use super::{
 };
 use crate::error::{Error, Result};
 use r9p::fid::Fid;
-use session::{Client, OREAD};
+use session::{
+    feed::{
+        feed_poll_path, parse_namespace_change_record, parse_namespace_path, scope_matches,
+        select_feed_records, NamespaceChange,
+    },
+    Client, OREAD,
+};
 use std::{
     fs::File,
     sync::{
@@ -299,13 +305,10 @@ fn apply_feed_chunk(
         .lines()
         .filter_map(parse_namespace_change_record)
         .collect::<Vec<_>>();
-    let selected = select_feed_records(
-        fs,
-        file,
-        parsed_records,
-        since_event_id,
-        cursor_template_configured,
-    );
+    let selected = select_feed_records(parsed_records, since_event_id, cursor_template_configured);
+    if selected.cursor_missed {
+        fs.apply_coarse_invalidation(file, "change feed cursor fell outside recent window");
+    }
     let records = selected.records;
     if records.len() > fs.config.change_feed_backpressure_limit {
         let last_event_id = records.last().map(|record| record.event_id.clone());
@@ -321,57 +324,6 @@ fn apply_feed_chunk(
     Ok(last_event_id)
 }
 
-fn feed_poll_path(
-    base_path: &str,
-    since_event_id: Option<&str>,
-    cursor_template: Option<&str>,
-) -> String {
-    match (since_event_id, cursor_template) {
-        (Some(event_id), Some(template)) => template.replace("{event_id}", event_id),
-        _ => base_path.to_string(),
-    }
-}
-
-struct SelectedFeedRecords {
-    records: Vec<NamespaceChange>,
-    cursor_advanced_to: Option<String>,
-}
-
-fn select_feed_records(
-    fs: &mut R9pFuse,
-    file: &mut File,
-    records: Vec<NamespaceChange>,
-    since_event_id: Option<&str>,
-    cursor_template_configured: bool,
-) -> SelectedFeedRecords {
-    if cursor_template_configured {
-        return SelectedFeedRecords {
-            records,
-            cursor_advanced_to: None,
-        };
-    }
-    let Some(cursor) = since_event_id else {
-        return SelectedFeedRecords {
-            records,
-            cursor_advanced_to: None,
-        };
-    };
-    let Some(index) = records.iter().position(|record| record.event_id == cursor) else {
-        let cursor_advanced_to = records.last().map(|record| record.event_id.clone());
-        if !records.is_empty() {
-            fs.apply_coarse_invalidation(file, "change feed cursor fell outside recent window");
-        }
-        return SelectedFeedRecords {
-            records: Vec::new(),
-            cursor_advanced_to,
-        };
-    };
-    SelectedFeedRecords {
-        records: records.into_iter().skip(index + 1).collect(),
-        cursor_advanced_to: None,
-    }
-}
-
 fn sleep_interruptible(duration: Duration, stop: &AtomicBool) {
     let step = Duration::from_millis(50);
     let mut slept = Duration::ZERO;
@@ -383,168 +335,10 @@ fn sleep_interruptible(duration: Duration, stop: &AtomicBool) {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct NamespaceChange {
-    scope: String,
-    path: String,
-    change_kind: String,
-    generation: u64,
-    event_id: String,
-    old_path: Option<String>,
-}
-
-fn parse_namespace_change_record(line: &str) -> Option<NamespaceChange> {
-    let fields = line.split('\t').collect::<Vec<_>>();
-    parse_key_value_record(&fields).or_else(|| parse_positional_record(&fields))
-}
-
-fn parse_key_value_record(fields: &[&str]) -> Option<NamespaceChange> {
-    let mut scope = None;
-    let mut path = None;
-    let mut change_kind = None;
-    let mut generation = None;
-    let mut event_id = None;
-    let mut old_path = None;
-    for field in fields {
-        let Some((key, value)) = field.split_once('=') else {
-            continue;
-        };
-        match key {
-            "scope" => scope = Some(value.to_string()),
-            "path" => path = Some(value.to_string()),
-            "change_kind" | "kind" => change_kind = Some(value.to_string()),
-            "generation" => generation = value.parse::<u64>().ok(),
-            "event_id" => event_id = Some(value.to_string()),
-            "old_path" | "from" => old_path = Some(value.to_string()),
-            _ => {}
-        }
-    }
-    Some(NamespaceChange {
-        scope: scope?,
-        path: path?,
-        change_kind: change_kind?,
-        generation: generation?,
-        event_id: event_id?,
-        old_path,
-    })
-}
-
-fn parse_positional_record(fields: &[&str]) -> Option<NamespaceChange> {
-    match fields {
-        ["namespace_change", event_id, generation, scope, change_kind, path] => {
-            Some(NamespaceChange {
-                scope: (*scope).to_string(),
-                path: (*path).to_string(),
-                change_kind: (*change_kind).to_string(),
-                generation: generation.parse().ok()?,
-                event_id: (*event_id).to_string(),
-                old_path: None,
-            })
-        }
-        ["namespace_change", event_id, generation, scope, "renamed", old_path, path] => {
-            Some(NamespaceChange {
-                scope: (*scope).to_string(),
-                path: (*path).to_string(),
-                change_kind: "renamed".to_string(),
-                generation: generation.parse().ok()?,
-                event_id: (*event_id).to_string(),
-                old_path: Some((*old_path).to_string()),
-            })
-        }
-        _ => None,
-    }
-}
-
-fn parse_namespace_path(path: &str) -> Result<Vec<Vec<u8>>> {
-    if !path.starts_with('/') {
-        return Err(Error::new(
-            libc::EINVAL,
-            format!("namespace change path must be absolute: {path}"),
-        ));
-    }
-    Ok(path
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .map(|segment| segment.as_bytes().to_vec())
-        .collect())
-}
-
-fn scope_matches(configured_scope: Option<&str>, event_scope: &str) -> bool {
-    event_scope == "shared"
-        || configured_scope
-            .map(|scope| scope == event_scope)
-            .unwrap_or(true)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        feed_error_requires_data_reconnect, feed_poll_path, is_feed_poll_timeout,
-        parse_namespace_change_record, parse_namespace_path, scope_matches,
-    };
+    use super::{feed_error_requires_data_reconnect, is_feed_poll_timeout};
     use crate::error::Error;
-
-    #[test]
-    fn parses_key_value_namespace_change_record() {
-        let record = parse_namespace_change_record(
-            "namespace_change\tevent_id=e1\tgeneration=42\tscope=shared\tchange_kind=created\tpath=/tree/x",
-        )
-        .expect("record should parse");
-
-        assert_eq!(record.event_id, "e1");
-        assert_eq!(record.generation, 42);
-        assert_eq!(record.scope, "shared");
-        assert_eq!(record.change_kind, "created");
-        assert_eq!(record.path, "/tree/x");
-    }
-
-    #[test]
-    fn parses_positional_rename_record() {
-        let record = parse_namespace_change_record(
-            "namespace_change\te2\t43\tsession:abc\trenamed\t/tree/old\t/tree/new",
-        )
-        .expect("record should parse");
-
-        assert_eq!(record.old_path.as_deref(), Some("/tree/old"));
-        assert_eq!(record.path, "/tree/new");
-    }
-
-    #[test]
-    fn namespace_paths_are_absolute() {
-        assert_eq!(
-            parse_namespace_path("/tree/status").expect("path should parse"),
-            vec![b"tree".to_vec(), b"status".to_vec()]
-        );
-        assert!(parse_namespace_path("tree/status").is_err());
-    }
-
-    #[test]
-    fn change_feed_scope_matches_shared_or_configured_scope() {
-        assert!(scope_matches(Some("session:a"), "shared"));
-        assert!(scope_matches(Some("session:a"), "session:a"));
-        assert!(!scope_matches(Some("session:a"), "session:b"));
-        assert!(scope_matches(None, "session:b"));
-    }
-
-    #[test]
-    fn feed_poll_path_advances_with_since_cursor() {
-        assert_eq!(
-            feed_poll_path(
-                "/feeds/namespace",
-                Some("event-7"),
-                Some("/feeds/namespace-after/{event_id}"),
-            ),
-            "/feeds/namespace-after/event-7"
-        );
-        assert_eq!(
-            feed_poll_path("/feeds/namespace", Some("event-7"), None),
-            "/feeds/namespace"
-        );
-        assert_eq!(
-            feed_poll_path("/feeds/namespace", None, None),
-            "/feeds/namespace"
-        );
-    }
 
     #[test]
     fn feed_poll_timeout_does_not_stale_data_client() {

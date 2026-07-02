@@ -1,3 +1,4 @@
+mod freshness;
 mod json;
 mod options;
 mod query;
@@ -9,7 +10,12 @@ mod tree;
 use crate::feed::{start_feed_worker, FeedState, FeedWorkerConfig};
 use crate::{Client, Error, Result};
 pub use request::{parse_request, ControlRequest};
-use std::{fs, path::Path, thread, time::Duration};
+use std::{
+    fs,
+    path::Path,
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 #[cfg(unix)]
 use std::os::unix::net::UnixListener;
@@ -32,9 +38,11 @@ pub(super) fn status_json(
     client: &Client,
     config: &ControlConfig,
     feed_state: &FeedState,
+    session_epoch: &str,
 ) -> Result<String> {
     let root = client.stat_timeout(client.root_fid(), config.request_timeout)?;
     let feed = feed_state.snapshot();
+    let response_freshness = freshness::ResponseFreshness::from_feed(session_epoch, feed_state);
     let mut out = String::from("{\"ok\":true,\"kind\":\"session.status.v1\",\"attached\":true");
     out.push_str(",\"endpoint\":");
     json::push_string(&mut out, &config.address);
@@ -50,7 +58,9 @@ pub(super) fn status_json(
     out.push_str(&root.qid.version.to_string());
     out.push_str(",\"qid_type\":");
     out.push_str(&root.qid.qtype.to_string());
-    out.push_str("},\"freshness\":{\"state\":\"fresh\"},\"feed\":{\"state\":");
+    out.push_str("},\"freshness\":");
+    freshness::push_json(&mut out, &response_freshness);
+    out.push_str(",\"feed\":{\"state\":");
     json::push_string(&mut out, feed.state);
     out.push_str(",\"last_event_id\":");
     match feed.last_event_id {
@@ -89,6 +99,7 @@ pub fn serve_control_socket(socket_path: &Path, config: ControlConfig) -> Result
         config.connect_timeout,
     )?;
     let feed_state = FeedState::new();
+    let session_epoch = new_session_epoch();
     let _feed_handle = if let Some(path) = config.change_feed_path.clone() {
         Some(start_feed_worker(
             client.clone(),
@@ -113,10 +124,15 @@ pub fn serve_control_socket(socket_path: &Path, config: ControlConfig) -> Result
                 let client = client.clone();
                 let config = config.clone();
                 let feed_state = feed_state.clone();
+                let session_epoch = session_epoch.clone();
                 thread::spawn(move || {
-                    if let Err(error) =
-                        server::serve_control_connection(stream, client, config, feed_state)
-                    {
+                    if let Err(error) = server::serve_control_connection(
+                        stream,
+                        client,
+                        config,
+                        feed_state,
+                        session_epoch,
+                    ) {
                         eprintln!("r9p session control connection: {error}");
                     }
                 });
@@ -130,6 +146,14 @@ pub fn serve_control_socket(socket_path: &Path, config: ControlConfig) -> Result
         }
     }
     Ok(())
+}
+
+fn new_session_epoch() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("session:{}:{nanos}", std::process::id())
 }
 
 #[cfg(not(unix))]

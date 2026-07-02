@@ -58,6 +58,7 @@ fn session_control_verbs_use_local_socket() -> TestResult<()> {
         "\"last_event_id\":\"e1\"",
     )?;
     assert_stdout_contains(&feed_status, "\"state\":\"connected\"")?;
+    assert_stdout_contains(&feed_status, "\"session_epoch\":\"session:")?;
     assert_stdout_contains(&feed_status, "\"last_generation\":42")?;
 
     let direct_status =
@@ -85,6 +86,8 @@ fn session_control_verbs_use_local_socket() -> TestResult<()> {
     assert_stdout_contains(&filtered_query, "\"path\":\"/data\"")?;
     assert_stdout_contains(&filtered_query, "\"kind\":\"file\"")?;
     assert_stdout_contains(&filtered_query, "\"length\":6")?;
+    assert_stdout_contains(&filtered_query, "\"feed_generation\":42")?;
+    assert_stdout_contains(&filtered_query, "\"fresh_instance\":false")?;
     assert_stdout_contains(&filtered_query, "\"reason\":\"budget_truncated\"")?;
 
     let snapshot = run_session_until_success(&[

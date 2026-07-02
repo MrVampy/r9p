@@ -14,12 +14,13 @@ pub(super) fn serve_control_connection<S>(
     client: Client,
     config: ControlConfig,
     feed_state: FeedState,
+    session_epoch: String,
 ) -> Result<()>
 where
     S: Read + Write,
 {
     let mut server = Server::with_config(
-        ControlTree::new(client, config, feed_state),
+        ControlTree::new(client, config, feed_state, session_epoch),
         ServerConfig {
             default_msize: CONTROL_MSIZE,
             max_msize: CONTROL_MSIZE,

@@ -1,4 +1,4 @@
-use super::{json, options::SnapshotOptions};
+use super::{freshness, freshness::ResponseFreshness, json, options::SnapshotOptions};
 use crate::{is_dir, is_symlink, read_open_directory_entries, Client, Result, OREAD};
 use r9p::blocking::DEFAULT_READ_CHUNK;
 use r9p::stat::Stat;
@@ -9,8 +9,16 @@ pub fn snapshot_json(
     path: &str,
     depth: usize,
     timeout: Duration,
+    response_freshness: &ResponseFreshness,
 ) -> Result<String> {
-    snapshot_json_with_options(client, path, depth, timeout, &SnapshotOptions::default())
+    snapshot_json_with_options(
+        client,
+        path,
+        depth,
+        timeout,
+        &SnapshotOptions::default(),
+        response_freshness,
+    )
 }
 
 pub fn snapshot_json_with_options(
@@ -19,6 +27,7 @@ pub fn snapshot_json_with_options(
     depth: usize,
     timeout: Duration,
     options: &SnapshotOptions,
+    response_freshness: &ResponseFreshness,
 ) -> Result<String> {
     let segments = parse_namespace_path(path);
     let mut report = SnapshotReport::default();
@@ -28,7 +37,9 @@ pub fn snapshot_json_with_options(
     json::push_string(&mut out, &format_path(&segments));
     out.push_str(",\"depth\":");
     out.push_str(&depth.to_string());
-    out.push_str(",\"freshness\":{\"state\":\"fresh\"},\"entries\":[");
+    out.push_str(",\"freshness\":");
+    freshness::push_json(&mut out, response_freshness);
+    out.push_str(",\"entries\":[");
     for (index, entry) in report.entries.iter().enumerate() {
         if index > 0 {
             out.push(',');
@@ -46,7 +57,12 @@ pub fn snapshot_json_with_options(
     Ok(out)
 }
 
-pub fn stat_json(client: &Client, path: &str, timeout: Duration) -> Result<String> {
+pub fn stat_json(
+    client: &Client,
+    path: &str,
+    timeout: Duration,
+    response_freshness: &ResponseFreshness,
+) -> Result<String> {
     let segments = parse_namespace_path(path);
     with_owned_fid(client, &segments, timeout, |fid| {
         let stat = client.stat_timeout(fid, timeout)?;
@@ -56,12 +72,19 @@ pub fn stat_json(client: &Client, path: &str, timeout: Duration) -> Result<Strin
             &SnapshotEntry::from_stat(format_path(&segments), &stat),
             &SnapshotOptions::default(),
         );
+        out.push_str(",\"freshness\":");
+        freshness::push_json(&mut out, response_freshness);
         out.push('}');
         Ok(out)
     })
 }
 
-pub fn list_json(client: &Client, path: &str, timeout: Duration) -> Result<String> {
+pub fn list_json(
+    client: &Client,
+    path: &str,
+    timeout: Duration,
+    response_freshness: &ResponseFreshness,
+) -> Result<String> {
     let segments = parse_namespace_path(path);
     with_owned_fid(client, &segments, timeout, |fid| {
         let stat = client.stat_timeout(fid, timeout)?;
@@ -76,7 +99,9 @@ pub fn list_json(client: &Client, path: &str, timeout: Duration) -> Result<Strin
 
         let mut out = String::from("{\"ok\":true,\"kind\":\"session.list.v1\",\"path\":");
         json::push_string(&mut out, &format_path(&segments));
-        out.push_str(",\"freshness\":{\"state\":\"fresh\"},\"entries\":[");
+        out.push_str(",\"freshness\":");
+        freshness::push_json(&mut out, response_freshness);
+        out.push_str(",\"entries\":[");
         for (index, entry) in entries.iter().enumerate() {
             if index > 0 {
                 out.push(',');
@@ -94,7 +119,12 @@ pub fn list_json(client: &Client, path: &str, timeout: Duration) -> Result<Strin
     })
 }
 
-pub fn read_json(client: &Client, path: &str, timeout: Duration) -> Result<String> {
+pub fn read_json(
+    client: &Client,
+    path: &str,
+    timeout: Duration,
+    response_freshness: &ResponseFreshness,
+) -> Result<String> {
     let segments = parse_namespace_path(path);
     with_owned_fid(client, &segments, timeout, |fid| {
         let stat = client.stat_timeout(fid, timeout)?;
@@ -112,7 +142,9 @@ pub fn read_json(client: &Client, path: &str, timeout: Duration) -> Result<Strin
         out.push_str(&data.len().to_string());
         out.push_str(",\"data_hex\":\"");
         json::push_hex(&mut out, &data);
-        out.push_str("\"}");
+        out.push_str("\",\"freshness\":");
+        freshness::push_json(&mut out, response_freshness);
+        out.push('}');
         Ok(out)
     })
 }

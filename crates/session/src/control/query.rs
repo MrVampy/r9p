@@ -1,4 +1,4 @@
-use super::{json, options, snapshot, status_json, ControlConfig};
+use super::{freshness::ResponseFreshness, json, options, snapshot, status_json, ControlConfig};
 use crate::{feed::FeedState, Client, Result};
 use serde_json::{Map, Value};
 
@@ -70,9 +70,10 @@ pub(super) fn response_json(
     client: &Client,
     config: &ControlConfig,
     feed_state: &FeedState,
+    session_epoch: &str,
     request: QueryRequest,
 ) -> String {
-    match response_json_result(client, config, feed_state, request) {
+    match response_json_result(client, config, feed_state, session_epoch, request) {
         Ok(response) => response,
         Err(error) => json::error_response("session_error", error.message()),
     }
@@ -82,10 +83,12 @@ fn response_json_result(
     client: &Client,
     config: &ControlConfig,
     feed_state: &FeedState,
+    session_epoch: &str,
     request: QueryRequest,
 ) -> Result<String> {
+    let freshness = ResponseFreshness::from_feed(session_epoch, feed_state);
     match request {
-        QueryRequest::Status => status_json(client, config, feed_state),
+        QueryRequest::Status => status_json(client, config, feed_state, session_epoch),
         QueryRequest::Snapshot {
             path,
             depth,
@@ -96,10 +99,17 @@ fn response_json_result(
             depth,
             config.request_timeout,
             &options,
+            &freshness,
         ),
-        QueryRequest::Stat { path } => snapshot::stat_json(client, &path, config.request_timeout),
-        QueryRequest::List { path } => snapshot::list_json(client, &path, config.request_timeout),
-        QueryRequest::Read { path } => snapshot::read_json(client, &path, config.request_timeout),
+        QueryRequest::Stat { path } => {
+            snapshot::stat_json(client, &path, config.request_timeout, &freshness)
+        }
+        QueryRequest::List { path } => {
+            snapshot::list_json(client, &path, config.request_timeout, &freshness)
+        }
+        QueryRequest::Read { path } => {
+            snapshot::read_json(client, &path, config.request_timeout, &freshness)
+        }
     }
 }
 

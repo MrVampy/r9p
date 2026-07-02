@@ -43,6 +43,8 @@ fn session_control_verbs_use_local_socket() -> TestResult<()> {
             .arg(&socket_arg)
             .arg("--change-feed")
             .arg("/events/namespace/recent")
+            .arg("--change-feed-stream")
+            .arg("/events/namespace/stream")
             .arg("--change-feed-poll-interval")
             .arg("0.01")
             .stdout(Stdio::piped())
@@ -58,6 +60,7 @@ fn session_control_verbs_use_local_socket() -> TestResult<()> {
         "\"last_event_id\":\"e1\"",
     )?;
     assert_stdout_contains(&feed_status, "\"state\":\"connected\"")?;
+    assert_stdout_contains(&feed_status, "\"source\":\"stream\"")?;
     assert_stdout_contains(&feed_status, "\"session_epoch\":\"session:")?;
     assert_stdout_contains(&feed_status, "\"last_generation\":42")?;
 
@@ -156,8 +159,17 @@ impl FileTree for SessionTree {
             {
                 Ok(vec![Qid::dir(5), Qid::dir(6), Qid::file(7)])
             }
+            [grandparent, parent, child]
+                if start == Qid::dir(1)
+                    && grandparent == b"events"
+                    && parent == b"namespace"
+                    && child == b"stream" =>
+            {
+                Ok(vec![Qid::dir(5), Qid::dir(6), Qid::file(8)])
+            }
             [name] if start == Qid::dir(5) && name == b"namespace" => Ok(vec![Qid::dir(6)]),
             [name] if start == Qid::dir(6) && name == b"recent" => Ok(vec![Qid::file(7)]),
+            [name] if start == Qid::dir(6) && name == b"stream" => Ok(vec![Qid::file(8)]),
             [name] if start == Qid::dir(1) && name == b"denied" => {
                 Err(R9pError::from("permission denied"))
             }
@@ -189,13 +201,12 @@ impl FileTree for SessionTree {
             )]));
         }
         if qid == Qid::dir(6) {
-            return Ok(ReadData::Directory(vec![Stat::new(
-                "recent",
-                Qid::file(7),
-                0o444,
-            )]));
+            return Ok(ReadData::Directory(vec![
+                Stat::new("recent", Qid::file(7), 0o444),
+                Stat::new("stream", Qid::file(8), 0o444),
+            ]));
         }
-        if qid == Qid::file(7) {
+        if qid == Qid::file(7) || qid == Qid::file(8) {
             return slice_bytes(
                 b"namespace_change\tevent_id=e1\tgeneration=42\tscope=shared\tchange_kind=modified\tpath=/data\n",
                 offset,
@@ -218,6 +229,10 @@ impl FileTree for SessionTree {
             Ok(Stat::new("namespace", qid, DMDIR | 0o555))
         } else if qid == Qid::file(7) {
             let mut stat = Stat::new("recent", qid, 0o444);
+            stat.length = 91;
+            Ok(stat)
+        } else if qid == Qid::file(8) {
+            let mut stat = Stat::new("stream", qid, 0o444);
             stat.length = 91;
             Ok(stat)
         } else {

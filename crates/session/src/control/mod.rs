@@ -29,6 +29,7 @@ pub struct ControlConfig {
     pub connect_timeout: Duration,
     pub request_timeout: Duration,
     pub change_feed_path: Option<String>,
+    pub change_feed_stream_path: Option<String>,
     pub change_feed_cursor_template: Option<String>,
     pub change_feed_poll_interval: Duration,
     pub change_feed_backpressure_limit: usize,
@@ -62,6 +63,11 @@ pub(super) fn status_json(
     freshness::push_json(&mut out, &response_freshness);
     out.push_str(",\"feed\":{\"state\":");
     json::push_string(&mut out, feed.state);
+    out.push_str(",\"source\":");
+    match feed.source {
+        Some(source) => json::push_string(&mut out, source),
+        None => out.push_str("null"),
+    }
     out.push_str(",\"last_event_id\":");
     match feed.last_event_id {
         Some(event_id) => json::push_string(&mut out, &event_id),
@@ -105,6 +111,7 @@ pub fn serve_control_socket(socket_path: &Path, config: ControlConfig) -> Result
             client.clone(),
             FeedWorkerConfig {
                 path,
+                stream_path: config.change_feed_stream_path.clone(),
                 cursor_template: config.change_feed_cursor_template.clone(),
                 poll_interval: config.change_feed_poll_interval,
                 lookup_timeout: config.request_timeout,

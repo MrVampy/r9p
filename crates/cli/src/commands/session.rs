@@ -26,6 +26,7 @@ pub(crate) fn session_cmd(config: Config, mut args: Vec<String>) -> CliResult<()
 fn session_serve_cmd(config: Config, mut args: Vec<String>) -> CliResult<()> {
     let socket = take_socket(&mut args)?;
     let change_feed_path = take_change_feed_path(&mut args)?;
+    let change_feed_stream_path = take_change_feed_stream_path(&mut args)?;
     let change_feed_cursor_template = take_change_feed_cursor_template(&mut args)?;
     let change_feed_poll_interval = take_change_feed_poll_interval(&mut args)?;
     let change_feed_backpressure_limit = take_change_feed_backpressure(&mut args)?;
@@ -50,6 +51,7 @@ fn session_serve_cmd(config: Config, mut args: Vec<String>) -> CliResult<()> {
         connect_timeout: timeout_or_default(config.request_timeout),
         request_timeout: timeout_or_default(config.control_timeout.or(config.request_timeout)),
         change_feed_path,
+        change_feed_stream_path,
         change_feed_cursor_template,
         change_feed_poll_interval,
         change_feed_backpressure_limit,
@@ -181,6 +183,10 @@ fn take_depth(args: &mut Vec<String>) -> CliResult<usize> {
 
 fn take_change_feed_path(args: &mut Vec<String>) -> CliResult<Option<String>> {
     take_optional_value(args, "--change-feed")
+}
+
+fn take_change_feed_stream_path(args: &mut Vec<String>) -> CliResult<Option<String>> {
+    take_optional_value(args, "--change-feed-stream")
 }
 
 fn take_change_feed_cursor_template(args: &mut Vec<String>) -> CliResult<Option<String>> {

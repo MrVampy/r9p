@@ -8,6 +8,7 @@ pub struct FeedState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FeedSnapshot {
     pub state: &'static str,
+    pub source: Option<&'static str>,
     pub last_event_id: Option<String>,
     pub last_generation: Option<u64>,
     pub last_error: Option<String>,
@@ -19,6 +20,7 @@ impl FeedState {
         Self {
             inner: Arc::new(Mutex::new(FeedSnapshot {
                 state: "disabled",
+                source: None,
                 last_event_id: None,
                 last_generation: None,
                 last_error: None,
@@ -33,6 +35,7 @@ impl FeedState {
             .map(|snapshot| snapshot.clone())
             .unwrap_or_else(|_| FeedSnapshot {
                 state: "degraded",
+                source: None,
                 last_event_id: None,
                 last_generation: None,
                 last_error: Some("feed state lock poisoned".to_string()),
@@ -43,6 +46,7 @@ impl FeedState {
     pub fn set_disabled(&self) {
         self.replace(FeedSnapshot {
             state: "disabled",
+            source: None,
             last_event_id: None,
             last_generation: None,
             last_error: None,
@@ -53,13 +57,20 @@ impl FeedState {
     pub fn set_connecting(&self) {
         self.update(|snapshot| {
             snapshot.state = "connecting";
+            snapshot.source = None;
             snapshot.last_error = None;
         });
     }
 
-    pub fn set_connected(&self, event_id: Option<String>, generation: Option<u64>) {
+    pub fn set_connected(
+        &self,
+        source: &'static str,
+        event_id: Option<String>,
+        generation: Option<u64>,
+    ) {
         self.update(|snapshot| {
             snapshot.state = "connected";
+            snapshot.source = Some(source);
             if event_id.is_some() {
                 snapshot.last_event_id = event_id;
             }
@@ -111,10 +122,11 @@ mod tests {
         let state = FeedState::new();
 
         state.set_connecting();
-        state.set_connected(Some("event-7".to_string()), Some(42));
+        state.set_connected("stream", Some("event-7".to_string()), Some(42));
 
         let snapshot = state.snapshot();
         assert_eq!(snapshot.state, "connected");
+        assert_eq!(snapshot.source, Some("stream"));
         assert_eq!(snapshot.last_event_id.as_deref(), Some("event-7"));
         assert_eq!(snapshot.last_generation, Some(42));
         assert_eq!(snapshot.last_error, None);

@@ -16,6 +16,7 @@ use std::{
 #[derive(Clone, Debug)]
 pub struct FeedWorkerConfig {
     pub path: String,
+    pub stream_path: Option<String>,
     pub cursor_template: Option<String>,
     pub poll_interval: Duration,
     pub lookup_timeout: Duration,
@@ -68,6 +69,21 @@ fn feed_loop(client: Client, config: FeedWorkerConfig, state: FeedState, stop: A
     state.set_connecting();
     let mut since_event_id = None;
     while !stop.load(Ordering::SeqCst) {
+        if let Some(stream_path) = config.stream_path.as_deref() {
+            match consume_stream_until_error(&client, &config, stream_path, &state, &stop) {
+                Ok(next_event_id) => {
+                    if next_event_id.is_some() {
+                        since_event_id = next_event_id;
+                    }
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    state.set_degraded(format!("stream feed degraded: {}", error.message()));
+                }
+            }
+        }
         let poll_path = feed_poll_path(
             &config.path,
             since_event_id.as_deref(),
@@ -86,7 +102,7 @@ fn feed_loop(client: Client, config: FeedWorkerConfig, state: FeedState, stop: A
                 }
             }
             Err(error) if error.errno == libc::ETIMEDOUT => {
-                state.set_connected(None, None);
+                state.set_connected("poll", None, None);
             }
             Err(error) => {
                 state.set_degraded(error.message().to_string());
@@ -109,22 +125,86 @@ fn consume_once(
     let data = read?;
     clunk?;
     if data.is_empty() {
-        state.set_connected(None, None);
+        state.set_connected("poll", None, None);
         return Ok(None);
     }
 
+    process_feed_data(&data, FeedReadMode::Poll { since_event_id }, config, state)
+}
+
+fn consume_stream_until_error(
+    client: &Client,
+    config: &FeedWorkerConfig,
+    path: &str,
+    state: &FeedState,
+    stop: &AtomicBool,
+) -> Result<Option<String>> {
+    let fid = open_feed(client, path, config.lookup_timeout)?;
+    let mut last_event_id = None;
+    while !stop.load(Ordering::SeqCst) {
+        match client.read_timeout(fid, 0, 64 * 1024, config.read_timeout) {
+            Ok(data) if data.is_empty() => {
+                state.set_connected("stream", None, None);
+            }
+            Ok(data) => {
+                if let Some(event_id) =
+                    process_feed_data(&data, FeedReadMode::Stream, config, state)?
+                {
+                    last_event_id = Some(event_id);
+                }
+            }
+            Err(error) if error.errno == libc::ETIMEDOUT => {
+                state.set_connected("stream", None, None);
+            }
+            Err(error) => {
+                let _ = client.clunk_timeout(fid, config.control_timeout);
+                return Err(error);
+            }
+        }
+    }
+    let _ = client.clunk_timeout(fid, config.control_timeout);
+    Ok(last_event_id)
+}
+
+#[derive(Clone, Copy)]
+enum FeedReadMode<'a> {
+    Stream,
+    Poll { since_event_id: Option<&'a str> },
+}
+
+impl FeedReadMode<'_> {
+    fn source(self) -> &'static str {
+        match self {
+            FeedReadMode::Stream => "stream",
+            FeedReadMode::Poll { .. } => "poll",
+        }
+    }
+}
+
+fn process_feed_data(
+    data: &[u8],
+    mode: FeedReadMode<'_>,
+    config: &FeedWorkerConfig,
+    state: &FeedState,
+) -> Result<Option<String>> {
     let text = String::from_utf8_lossy(&data);
     let records = text
         .lines()
         .filter_map(parse_namespace_change_record)
         .collect::<Vec<_>>();
-    let selected = select_feed_records(records, since_event_id, config.cursor_template.is_some());
-    if selected.cursor_missed {
-        state.mark_fresh_instance();
-        state.set_connected(selected.cursor_advanced_to.clone(), None);
-        return Ok(selected.cursor_advanced_to);
-    }
-    let records = selected.records;
+    let (records, cursor_advanced_to) = match mode {
+        FeedReadMode::Stream => (records, None),
+        FeedReadMode::Poll { since_event_id } => {
+            let selected =
+                select_feed_records(records, since_event_id, config.cursor_template.is_some());
+            if selected.cursor_missed {
+                state.mark_fresh_instance();
+                state.set_connected(mode.source(), selected.cursor_advanced_to.clone(), None);
+                return Ok(selected.cursor_advanced_to);
+            }
+            (selected.records, selected.cursor_advanced_to)
+        }
+    };
     let backpressure_limit = if config.backpressure_limit == 0 {
         usize::MAX
     } else {
@@ -135,11 +215,13 @@ fn consume_once(
         return Ok(records.last().map(|record| record.event_id.clone()));
     }
     for record in &records {
-        state.set_connected(Some(record.event_id.clone()), Some(record.generation));
+        state.set_connected(
+            mode.source(),
+            Some(record.event_id.clone()),
+            Some(record.generation),
+        );
     }
-    Ok(selected
-        .cursor_advanced_to
-        .or_else(|| records.last().map(|record| record.event_id.clone())))
+    Ok(cursor_advanced_to.or_else(|| records.last().map(|record| record.event_id.clone())))
 }
 
 fn open_feed(client: &Client, path: &str, timeout: Duration) -> Result<Fid> {

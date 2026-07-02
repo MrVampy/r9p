@@ -21,6 +21,7 @@ use commands::{
     },
     script::machine_script_cmd,
     serve::{export_cmd, serve_cmd},
+    session::session_cmd,
     stat_rdwr::{rdwr_cmd, stat_cmd},
     version_attach::{attach_cmd, version_cmd},
 };
@@ -65,6 +66,7 @@ fn run() -> CliResult<()> {
         "create-write-from" if config.machine => create_write_from_cmd(config, args),
         "script" if config.machine => machine_script_cmd(config, args),
         "rpc-hex" if config.machine => machine_rpc_hex_cmd(config, args),
+        "session" => session_cmd(config, args),
         "mount" => mount_cmd(config, args),
         "serve" => serve_cmd(config, args),
         "export" if args.first().is_some_and(|arg| arg == "git") => {
@@ -235,6 +237,9 @@ pub(crate) fn usage() -> ! {
     eprintln!("  rpc-hex name request_hex  machine mode");
     eprintln!("  script file              machine mode");
     eprintln!("  script service file      machine mode without -a");
+    eprintln!("  session serve --socket path [endpoint]");
+    eprintln!("  session status --socket path");
+    eprintln!("  session snapshot --socket path [--depth n] [namespace-path]");
     eprintln!("  mount [--aname aname] [--uname uname] endpoint mountpoint");
     eprintln!("  mount ensure|status|stop --mountpoint path [--unit name]");
     eprintln!("  serve [--bind address] root");

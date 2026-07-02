@@ -1,5 +1,6 @@
 mod cache;
 mod client;
+pub mod control;
 mod error;
 mod request;
 mod transport;

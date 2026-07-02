@@ -10,6 +10,7 @@ dependencies = [
  "fuse",
  "libc",
  "r9p",
+ "session",
 ]
 
 [[package]]

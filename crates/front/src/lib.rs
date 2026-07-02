@@ -606,6 +606,73 @@ impl State {
         }
     }
 
+    fn insert_created_relay_node(
+        &mut self,
+        parent_id: u64,
+        name: &str,
+        qtype: u8,
+        qid_version: u32,
+        qid_path: u64,
+        generation: u64,
+        create_prefix: String,
+    ) -> Result<u64> {
+        if self.qid_index.contains_key(&qid_path) {
+            return Err(Error::from_static("qid path already in use"));
+        }
+        let segments = split_path(name)?;
+        let (leaf, dirs) = segments
+            .split_last()
+            .ok_or_else(|| Error::from_static(EPERM))?;
+        let mut parent = parent_id;
+        for dir in dirs {
+            parent = self.ensure_dir(parent, dir)?;
+        }
+        let existing = match &self.node(parent)?.body {
+            Body::Dir(children) => children.get(leaf.as_slice()).copied(),
+            _ => return Err(Error::from_static(ENOTDIR)),
+        };
+        if existing.is_some() {
+            return Err(Error::from_static("file exists"));
+        }
+        let id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        let write_relay = if qtype & QTDIR != 0 {
+            None
+        } else {
+            Some(create_prefix.clone())
+        };
+        let body = if qtype & QTDIR != 0 {
+            Body::Dir(BTreeMap::new())
+        } else {
+            Body::WriteRelay(create_prefix)
+        };
+        self.nodes.insert(
+            id,
+            Node {
+                name: leaf.clone(),
+                parent,
+                qid_path,
+                version: qid_version,
+                generation,
+                visibility_class: None,
+                freshness_ref: None,
+                wake_token: None,
+                create_relay: None,
+                write_relay,
+                body,
+            },
+        );
+        self.qid_index.insert(qid_path, id);
+        if let Some(Node {
+            body: Body::Dir(children),
+            ..
+        }) = self.nodes.get_mut(&parent)
+        {
+            children.insert(leaf.clone(), id);
+        }
+        Ok(id)
+    }
+
     fn remove_subtree_if_exists(&mut self, path: &str) -> Result<()> {
         let Some(id) = self.lookup_optional_path(path)? else {
             return Ok(());
@@ -1619,7 +1686,7 @@ impl FileTree for FrontTree {
         state.create_pending.push_back(CreateRelayRequest {
             request_id,
             prefix: create_prefix.clone(),
-            name: name_text,
+            name: name_text.clone(),
             perm,
             mode,
             context: request_context,
@@ -1630,45 +1697,15 @@ impl FileTree for FrontTree {
         let state = self.front.lock()?;
         let (qtype, qid_version, qid_path) = self.front.wait_create_relay(state, request_id)?;
         let mut state = self.front.lock()?;
-        if state.qid_index.contains_key(&qid_path) {
-            return Err(Error::from_static("qid path already in use"));
-        }
-        let id = state.next_id;
-        state.next_id = state.next_id.saturating_add(1);
-        let write_relay = if qtype & QTDIR != 0 {
-            None
-        } else {
-            Some(create_prefix.clone())
-        };
-        let body = if qtype & QTDIR != 0 {
-            Body::Dir(BTreeMap::new())
-        } else {
-            Body::WriteRelay(create_prefix)
-        };
-        state.nodes.insert(
-            id,
-            Node {
-                name: name.to_vec(),
-                parent: parent_id,
-                qid_path,
-                version: qid_version,
-                generation: parent_generation,
-                visibility_class: None,
-                freshness_ref: None,
-                wake_token: None,
-                create_relay: None,
-                write_relay,
-                body,
-            },
-        );
-        state.qid_index.insert(qid_path, id);
-        if let Some(Node {
-            body: Body::Dir(children),
-            ..
-        }) = state.nodes.get_mut(&parent_id)
-        {
-            children.insert(name.to_vec(), id);
-        }
+        let id = state.insert_created_relay_node(
+            parent_id,
+            &name_text,
+            qtype,
+            qid_version,
+            qid_path,
+            parent_generation,
+            create_prefix,
+        )?;
         self.fids.insert(
             fid,
             FidBinding {
@@ -2587,6 +2624,90 @@ mod tests {
         )?;
         let wrote = second_writer.join().expect("second writer join")?;
         assert_eq!(wrote as usize, b"updated descriptor".len());
+        Ok(())
+    }
+
+    #[test]
+    fn create_relay_projects_slash_names_as_nested_paths() -> Result<()> {
+        let front = Front::new();
+        front.register_create_relay("srv")?;
+        front.set_wait_timeout(Duration::from_secs(5))?;
+        let writer_front = front.clone();
+        let (done_tx, done_rx) = mpsc::channel();
+        let writer = thread::spawn(move || {
+            let mut tree = writer_front.tree();
+            tree.attach(1, b"alice", b"/")?;
+            let qids = walk_to(&mut tree, 1, 2, &["srv"]);
+            let opened = tree.create(2, qids[0], b"infra/credentials", 0o666, OWRITE)?;
+            let wrote = tree.write(2, opened.qid, 0, b"descriptor")?;
+            done_tx
+                .send((opened.qid.path, opened.qid.version, wrote))
+                .expect("send writer result");
+            Ok::<(), Error>(())
+        });
+
+        let create = front.next_create_request_for_prefix_blocking("srv")?;
+        assert_eq!(create.prefix, "srv");
+        assert_eq!(create.name, "infra/credentials");
+        assert_eq!(create.context.front_path, "/srv/infra/credentials");
+        assert_eq!(create.context.target_path, "/srv/infra/credentials");
+        assert!(done_rx.recv_timeout(Duration::from_millis(50)).is_err());
+
+        front.complete_create("srv", create.request_id, QTFILE, 17, 42_001)?;
+        let write = front
+            .next_request_for_prefix("srv", Duration::from_secs(1))?
+            .expect("dynamic write relay request");
+        assert_eq!(write.prefix, "srv");
+        assert_eq!(write.context.front_path, "/srv/infra/credentials");
+        assert_eq!(write.context.target_path, "/srv/infra/credentials");
+        assert_eq!(write.bytes, b"descriptor");
+        front.complete_write(
+            "srv",
+            write.request_id,
+            u32::try_from(write.bytes.len()).expect("request length"),
+        )?;
+        let (qid_path, qid_version, wrote) = done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("writer should finish");
+        assert_eq!(qid_path, 42_001);
+        assert_eq!(qid_version, 17);
+        assert_eq!(wrote as usize, b"descriptor".len());
+        writer.join().expect("writer join")?;
+
+        let mut verifier = front.tree();
+        verifier.attach(1, b"alice", b"/")?;
+        let qids = walk_to(&mut verifier, 1, 2, &["srv", "infra"]);
+        let stat = verifier.stat(qids[1])?;
+        assert_eq!(stat.mode & DMDIR, DMDIR);
+        let qids = walk_to(&mut verifier, 1, 3, &["srv", "infra", "credentials"]);
+        let stat = verifier.stat(qids[2])?;
+        assert_eq!(stat.qid.path, 42_001);
+        assert_eq!(stat.qid.version, 17);
+
+        front.set_pushed_file(
+            "srv/infra/credentials",
+            b"service-channel-report",
+            PushedFileMetadata {
+                qid_path: 42_001,
+                qid_version: 18,
+                generation: 120,
+                visibility_class: "runtime-reader".to_string(),
+                freshness_ref: "freshness:srv/infra/credentials".to_string(),
+                wake_token: "wake:srv/infra/credentials".to_string(),
+            },
+        )?;
+        let mut verifier = front.tree();
+        verifier.attach(1, b"alice", b"/")?;
+        let qids = walk_to(&mut verifier, 1, 2, &["srv", "infra"]);
+        let stat = verifier.stat(qids[1])?;
+        assert_eq!(stat.mode & DMDIR, DMDIR);
+        let qids = walk_to(&mut verifier, 1, 3, &["srv", "infra", "credentials"]);
+        let stat = verifier.stat(qids[2])?;
+        assert_eq!(stat.qid.path, 42_001);
+        assert_eq!(stat.qid.version, 18);
+        let opened_read = verifier.open(3, qids[2], OREAD)?;
+        let report = verifier.read(3, opened_read.qid, 0, 4096)?;
+        assert_eq!(report, ReadData::Bytes(b"service-channel-report".to_vec()));
         Ok(())
     }
 

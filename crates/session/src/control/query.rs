@@ -1,5 +1,5 @@
 use super::{json, options, snapshot, status_json, ControlConfig};
-use crate::{Client, Result};
+use crate::{feed::FeedState, Client, Result};
 use serde_json::{Map, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,9 +69,10 @@ pub(super) fn parse_json(data: &[u8]) -> std::result::Result<QueryRequest, Strin
 pub(super) fn response_json(
     client: &Client,
     config: &ControlConfig,
+    feed_state: &FeedState,
     request: QueryRequest,
 ) -> String {
-    match response_json_result(client, config, request) {
+    match response_json_result(client, config, feed_state, request) {
         Ok(response) => response,
         Err(error) => json::error_response("session_error", error.message()),
     }
@@ -80,10 +81,11 @@ pub(super) fn response_json(
 fn response_json_result(
     client: &Client,
     config: &ControlConfig,
+    feed_state: &FeedState,
     request: QueryRequest,
 ) -> Result<String> {
     match request {
-        QueryRequest::Status => status_json(client, config),
+        QueryRequest::Status => status_json(client, config, feed_state),
         QueryRequest::Snapshot {
             path,
             depth,

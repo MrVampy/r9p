@@ -25,8 +25,16 @@ pub(crate) fn session_cmd(config: Config, mut args: Vec<String>) -> CliResult<()
 
 fn session_serve_cmd(config: Config, mut args: Vec<String>) -> CliResult<()> {
     let socket = take_socket(&mut args)?;
+    let change_feed_path = take_change_feed_path(&mut args)?;
+    let change_feed_cursor_template = take_change_feed_cursor_template(&mut args)?;
+    let change_feed_poll_interval = take_change_feed_poll_interval(&mut args)?;
+    let change_feed_backpressure_limit = take_change_feed_backpressure(&mut args)?;
     let address = match (config.address.clone(), args.as_slice()) {
-        (_, [endpoint]) => endpoint.clone(),
+        (_, [endpoint]) => {
+            let endpoint = endpoint.clone();
+            args.clear();
+            endpoint
+        }
         (Some(address), []) => address,
         _ => {
             return Err(cli_error(
@@ -41,7 +49,17 @@ fn session_serve_cmd(config: Config, mut args: Vec<String>) -> CliResult<()> {
         msize: config.msize,
         connect_timeout: timeout_or_default(config.request_timeout),
         request_timeout: timeout_or_default(config.control_timeout.or(config.request_timeout)),
+        change_feed_path,
+        change_feed_cursor_template,
+        change_feed_poll_interval,
+        change_feed_backpressure_limit,
     };
+    if !args.is_empty() {
+        return Err(cli_error(format!(
+            "unexpected session serve argument {}",
+            args[0]
+        )));
+    }
     serve_control_socket(&socket, control)?;
     Ok(())
 }
@@ -159,6 +177,75 @@ fn take_depth(args: &mut Vec<String>) -> CliResult<usize> {
     }
     *args = rest;
     Ok(depth)
+}
+
+fn take_change_feed_path(args: &mut Vec<String>) -> CliResult<Option<String>> {
+    take_optional_value(args, "--change-feed")
+}
+
+fn take_change_feed_cursor_template(args: &mut Vec<String>) -> CliResult<Option<String>> {
+    let value = take_optional_value(args, "--change-feed-cursor-template")?;
+    if let Some(template) = &value {
+        if !template.contains("{event_id}") {
+            return Err(cli_error(
+                "change feed cursor template must include {event_id}",
+            ));
+        }
+    }
+    Ok(value)
+}
+
+fn take_change_feed_poll_interval(args: &mut Vec<String>) -> CliResult<Duration> {
+    take_optional_value(args, "--change-feed-poll-interval")?
+        .map(|value| parse_duration_secs(&value, "change feed poll interval"))
+        .transpose()
+        .map(|value| value.unwrap_or_else(|| Duration::from_secs(1)))
+}
+
+fn take_change_feed_backpressure(args: &mut Vec<String>) -> CliResult<usize> {
+    take_optional_value(args, "--change-feed-backpressure")?
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .map_err(|_| cli_error(format!("invalid change feed backpressure {value}")))
+        })
+        .transpose()
+        .map(|value| value.unwrap_or(4096))
+}
+
+fn take_optional_value(args: &mut Vec<String>, name: &str) -> CliResult<Option<String>> {
+    let mut value = None;
+    let mut rest = Vec::new();
+    let mut index = 0;
+    let equals_prefix = format!("{name}=");
+    while index < args.len() {
+        let arg = &args[index];
+        if let Some(current) = arg.strip_prefix(&equals_prefix) {
+            value = Some(current.to_string());
+            index += 1;
+        } else if arg == name {
+            let current = args
+                .get(index + 1)
+                .ok_or_else(|| cli_error(format!("missing value for {name}")))?;
+            value = Some(current.clone());
+            index += 2;
+        } else {
+            rest.push(arg.clone());
+            index += 1;
+        }
+    }
+    *args = rest;
+    Ok(value)
+}
+
+fn parse_duration_secs(value: &str, name: &str) -> CliResult<Duration> {
+    let seconds = value
+        .parse::<f64>()
+        .map_err(|_| cli_error(format!("invalid {name} {value}")))?;
+    if !seconds.is_finite() || seconds < 0.0 {
+        return Err(cli_error(format!("invalid {name} {value}")));
+    }
+    Ok(Duration::from_secs_f64(seconds))
 }
 
 fn parse_depth(value: &str) -> CliResult<usize> {

@@ -41,6 +41,10 @@ fn session_control_verbs_use_local_socket() -> TestResult<()> {
             .arg("serve")
             .arg("--socket")
             .arg(&socket_arg)
+            .arg("--change-feed")
+            .arg("/events/namespace/recent")
+            .arg("--change-feed-poll-interval")
+            .arg("0.01")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped()),
     )?;
@@ -48,6 +52,13 @@ fn session_control_verbs_use_local_socket() -> TestResult<()> {
     let status = run_session_until_success(&["session", "status", "--socket", &socket_arg])?;
     assert_stdout_contains(&status, "\"kind\":\"session.status.v1\"")?;
     assert_stdout_contains(&status, "\"attached\":true")?;
+
+    let feed_status = run_session_until_stdout_contains(
+        &["session", "status", "--socket", &socket_arg],
+        "\"last_event_id\":\"e1\"",
+    )?;
+    assert_stdout_contains(&feed_status, "\"state\":\"connected\"")?;
+    assert_stdout_contains(&feed_status, "\"last_generation\":42")?;
 
     let direct_status =
         run_session_until_success(&["-a", &format!("unix!{socket_arg}"), "read", "/status"])?;
@@ -128,6 +139,22 @@ impl FileTree for SessionTree {
             [] => Ok(Vec::new()),
             [name] if start == Qid::dir(1) && name == b"data" => Ok(vec![Qid::file(2)]),
             [name] if start == Qid::dir(1) && name == b"docs" => Ok(vec![Qid::dir(3)]),
+            [name] if start == Qid::dir(1) && name == b"events" => Ok(vec![Qid::dir(5)]),
+            [parent, child]
+                if start == Qid::dir(1) && parent == b"events" && child == b"namespace" =>
+            {
+                Ok(vec![Qid::dir(5), Qid::dir(6)])
+            }
+            [grandparent, parent, child]
+                if start == Qid::dir(1)
+                    && grandparent == b"events"
+                    && parent == b"namespace"
+                    && child == b"recent" =>
+            {
+                Ok(vec![Qid::dir(5), Qid::dir(6), Qid::file(7)])
+            }
+            [name] if start == Qid::dir(5) && name == b"namespace" => Ok(vec![Qid::dir(6)]),
+            [name] if start == Qid::dir(6) && name == b"recent" => Ok(vec![Qid::file(7)]),
             [name] if start == Qid::dir(1) && name == b"denied" => {
                 Err(R9pError::from("permission denied"))
             }
@@ -145,10 +172,32 @@ impl FileTree for SessionTree {
                 Stat::new("data", Qid::file(2), 0o444),
                 Stat::new("docs", Qid::dir(3), DMDIR | 0o555),
                 Stat::new("denied", Qid::dir(4), DMDIR | 0o555),
+                Stat::new("events", Qid::dir(5), DMDIR | 0o555),
             ]));
         }
         if qid == Qid::dir(3) {
             return Ok(ReadData::Directory(Vec::new()));
+        }
+        if qid == Qid::dir(5) {
+            return Ok(ReadData::Directory(vec![Stat::new(
+                "namespace",
+                Qid::dir(6),
+                DMDIR | 0o555,
+            )]));
+        }
+        if qid == Qid::dir(6) {
+            return Ok(ReadData::Directory(vec![Stat::new(
+                "recent",
+                Qid::file(7),
+                0o444,
+            )]));
+        }
+        if qid == Qid::file(7) {
+            return slice_bytes(
+                b"namespace_change\tevent_id=e1\tgeneration=42\tscope=shared\tchange_kind=modified\tpath=/data\n",
+                offset,
+                count,
+            );
         }
         slice_bytes(b"hello\n", offset, count)
     }
@@ -160,6 +209,14 @@ impl FileTree for SessionTree {
             Ok(stat)
         } else if qid == Qid::dir(3) {
             Ok(Stat::new("docs", qid, DMDIR | 0o555))
+        } else if qid == Qid::dir(5) {
+            Ok(Stat::new("events", qid, DMDIR | 0o555))
+        } else if qid == Qid::dir(6) {
+            Ok(Stat::new("namespace", qid, DMDIR | 0o555))
+        } else if qid == Qid::file(7) {
+            let mut stat = Stat::new("recent", qid, 0o444);
+            stat.length = 91;
+            Ok(stat)
         } else {
             Ok(Stat::new(".", qid, DMDIR | 0o555))
         }
@@ -234,6 +291,24 @@ fn run_session_until_success(args: &[&str]) -> TestResult<Output> {
     let output = last.ok_or_else(|| test_error("session command did not run"))?;
     Err(test_error(format!(
         "session command failed stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )))
+}
+
+fn run_session_until_stdout_contains(args: &[&str], needle: &str) -> TestResult<Output> {
+    let mut last = None;
+    for _ in 0..50 {
+        let output = run_r9p(args)?;
+        if output.status.success() && String::from_utf8_lossy(&output.stdout).contains(needle) {
+            return Ok(output);
+        }
+        last = Some(output);
+        thread::sleep(Duration::from_millis(20));
+    }
+    let output = last.ok_or_else(|| test_error("session command did not run"))?;
+    Err(test_error(format!(
+        "session command never printed {needle} stdout={} stderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     )))

@@ -1,5 +1,5 @@
 use super::{json, query, snapshot, status_json, ControlConfig};
-use crate::{Client, ORDWR, OREAD};
+use crate::{feed::FeedState, Client, ORDWR, OREAD};
 use r9p::{
     error::{Error as P9Error, EEXIST, EPERM},
     fid::Fid,
@@ -26,6 +26,7 @@ const USAGE: &str = concat!(
 pub(super) struct ControlTree {
     client: Client,
     config: ControlConfig,
+    feed_state: FeedState,
     nodes: BTreeMap<u64, ControlNode>,
     qids: BTreeMap<ControlNode, u64>,
     query_responses: BTreeMap<Fid, Vec<u8>>,
@@ -50,10 +51,11 @@ enum ControlNode {
 }
 
 impl ControlTree {
-    pub(super) fn new(client: Client, config: ControlConfig) -> Self {
+    pub(super) fn new(client: Client, config: ControlConfig, feed_state: FeedState) -> Self {
         let mut tree = Self {
             client,
             config,
+            feed_state,
             nodes: BTreeMap::new(),
             qids: BTreeMap::new(),
             query_responses: BTreeMap::new(),
@@ -147,7 +149,8 @@ impl FileTree for ControlTree {
             | ControlNode::SnapshotDepth(_) => Ok(ReadData::Directory(Vec::new())),
             ControlNode::Usage => read_bytes(USAGE.as_bytes(), offset, count),
             ControlNode::Status => {
-                let response = status_json(&self.client, &self.config).map_err(p9_error)?;
+                let response =
+                    status_json(&self.client, &self.config, &self.feed_state).map_err(p9_error)?;
                 read_bytes(response.as_bytes(), offset, count)
             }
             ControlNode::Query => {
@@ -208,7 +211,9 @@ impl FileTree for ControlTree {
         match self.node_for(qid)? {
             ControlNode::Query => {
                 let response = match query::parse_json(data) {
-                    Ok(request) => query::response_json(&self.client, &self.config, request),
+                    Ok(request) => {
+                        query::response_json(&self.client, &self.config, &self.feed_state, request)
+                    }
                     Err(error) => json::error_response("bad_query", &error),
                 };
                 self.query_responses.insert(fid, response.into_bytes());

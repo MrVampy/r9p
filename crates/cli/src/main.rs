@@ -237,7 +237,9 @@ pub(crate) fn usage() -> ! {
     eprintln!("  rpc-hex name request_hex  machine mode");
     eprintln!("  script file              machine mode");
     eprintln!("  script service file      machine mode without -a");
-    eprintln!("  session serve --socket path [endpoint]");
+    eprintln!(
+        "  session serve --socket path [--change-feed namespace-path] [--change-feed-cursor-template path-with-{{event_id}}] [endpoint]"
+    );
     eprintln!("  session status --socket path");
     eprintln!("  session snapshot --socket path [--depth n] [namespace-path]");
     eprintln!("  session stat --socket path [namespace-path]");

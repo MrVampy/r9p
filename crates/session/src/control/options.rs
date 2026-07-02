@@ -3,6 +3,7 @@ pub(super) struct SnapshotOptions {
     pub include: IncludeKind,
     pub fields: EntryFields,
     pub budget: Option<usize>,
+    pub freshness: FreshnessMode,
 }
 
 impl Default for SnapshotOptions {
@@ -11,7 +12,28 @@ impl Default for SnapshotOptions {
             include: IncludeKind::Both,
             fields: EntryFields::all(),
             budget: None,
+            freshness: FreshnessMode::CachedOk,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FreshnessMode {
+    CachedOk,
+    MustRevalidate,
+}
+
+impl FreshnessMode {
+    pub(super) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "cached_ok" => Some(Self::CachedOk),
+            "must_revalidate" => Some(Self::MustRevalidate),
+            _ => None,
+        }
+    }
+
+    pub(super) fn allows_cache_reads(self) -> bool {
+        matches!(self, Self::CachedOk)
     }
 }
 
@@ -118,7 +140,7 @@ impl EntryFields {
 
 #[cfg(test)]
 mod tests {
-    use super::{EntryFields, IncludeKind};
+    use super::{EntryFields, FreshnessMode, IncludeKind};
 
     #[test]
     fn include_kind_parses_contract_names() {
@@ -129,6 +151,19 @@ mod tests {
         );
         assert_eq!(IncludeKind::from_str("files"), Some(IncludeKind::Files));
         assert_eq!(IncludeKind::from_str("all"), None);
+    }
+
+    #[test]
+    fn freshness_mode_parses_contract_names() {
+        assert_eq!(
+            FreshnessMode::from_str("cached_ok"),
+            Some(FreshnessMode::CachedOk)
+        );
+        assert_eq!(
+            FreshnessMode::from_str("must_revalidate"),
+            Some(FreshnessMode::MustRevalidate)
+        );
+        assert_eq!(FreshnessMode::from_str("sync"), None);
     }
 
     #[test]

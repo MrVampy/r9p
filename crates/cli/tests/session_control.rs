@@ -110,6 +110,16 @@ fn session_control_verbs_use_local_socket() -> TestResult<()> {
     assert_stdout_contains(&snapshot, "\"path\":\"/denied\"")?;
     assert_stdout_contains(&snapshot, "\"reason\":\"denied\"")?;
 
+    let revalidated_snapshot = run_session_until_success(&[
+        "-a",
+        &format!("unix!{socket_arg}"),
+        "rpc",
+        "/query",
+        r#"{"op":"snapshot","path":"/","depth":1,"freshness":"must_revalidate","fields":["path"]}"#,
+    ])?;
+    assert_stdout_contains(&revalidated_snapshot, "\"cache\":{\"enabled\":false")?;
+    assert_stdout_contains(&revalidated_snapshot, "\"stat_hits\":0")?;
+
     let stat = run_session_until_success(&["session", "stat", "--socket", &socket_arg, "/data"])?;
     assert_stdout_contains(&stat, "\"kind\":\"session.stat.v1\"")?;
     assert_stdout_contains(&stat, "\"path\":\"/data\"")?;

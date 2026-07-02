@@ -27,6 +27,7 @@ Question: how should the door-attached session manager cache namespace structure
 - Let the feed worker invalidate cache paths from namespace change records and mark the whole cache stale on cursor miss or backpressure.
 - Make stat/list/snapshot use the cache when feed coverage is connected.
 - Add cache counters to `status`, `stat`, `list`, and `snapshot` responses.
+- Add query-level `freshness: "cached_ok"` and `freshness: "must_revalidate"` modes. `must_revalidate` bypasses cache reads and reports `cache.enabled: false`.
 - Extend the CLI integration test so a second snapshot proves a warm root directory hit while still reporting the denied branch as degraded.
 
 ## Live Proof
@@ -36,8 +37,9 @@ Question: how should the door-attached session manager cache namespace structure
 - First snapshot: `cache.enabled: true`, `stat_hits: 0`, `stat_misses: 38`, `dir_hits: 0`, `dir_misses: 1`.
 - Second snapshot: `cache.enabled: true`, `stat_hits: 38`, `stat_misses: 0`, `dir_hits: 1`, `dir_misses: 0`.
 - Status after both snapshots reported `cache.entries: 38`, `cache.directories: 1`, and `cache.stale_entries: 0`.
+- Follow-up freshness proof: after warming the same M7 root snapshot, a query with `freshness: "must_revalidate"` returned `cache.enabled: false` and `stat_hits: 0`, proving the request bypassed cache reads.
 
 ## Open Questions
 
 - FUSE still keeps its own projection-local cache. Moving FUSE into the shared session process remains a later Plan 83 slice.
-- The v1 cache has no `must_revalidate`, `max_age`, or `sync` request modes yet. Those belong in the query-options slice rather than in this structural cache owner.
+- The v1 cache has no `max_age` or `sync` request modes yet. `sync` needs an explicit feed barrier slice rather than an alias for live reads.

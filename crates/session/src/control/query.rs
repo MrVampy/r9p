@@ -12,9 +12,11 @@ pub(super) enum QueryRequest {
     },
     Stat {
         path: String,
+        freshness: options::FreshnessMode,
     },
     List {
         path: String,
+        freshness: options::FreshnessMode,
     },
     Read {
         path: String,
@@ -36,7 +38,15 @@ pub(super) fn parse_json(data: &[u8]) -> std::result::Result<QueryRequest, Strin
         "snapshot" => {
             reject_unknown_fields(
                 object,
-                &["op", "path", "depth", "include", "fields", "budget"],
+                &[
+                    "op",
+                    "path",
+                    "depth",
+                    "include",
+                    "fields",
+                    "budget",
+                    "freshness",
+                ],
             )?;
             Ok(QueryRequest::Snapshot {
                 path: optional_string_field(object, "path")?.unwrap_or_else(|| "/".to_string()),
@@ -45,15 +55,19 @@ pub(super) fn parse_json(data: &[u8]) -> std::result::Result<QueryRequest, Strin
             })
         }
         "stat" => {
-            reject_unknown_fields(object, &["op", "path"])?;
+            reject_unknown_fields(object, &["op", "path", "freshness"])?;
             Ok(QueryRequest::Stat {
                 path: optional_string_field(object, "path")?.unwrap_or_else(|| "/".to_string()),
+                freshness: optional_freshness_field(object, "freshness")?
+                    .unwrap_or(options::FreshnessMode::CachedOk),
             })
         }
         "list" => {
-            reject_unknown_fields(object, &["op", "path"])?;
+            reject_unknown_fields(object, &["op", "path", "freshness"])?;
             Ok(QueryRequest::List {
                 path: optional_string_field(object, "path")?.unwrap_or_else(|| "/".to_string()),
+                freshness: optional_freshness_field(object, "freshness")?
+                    .unwrap_or(options::FreshnessMode::CachedOk),
             })
         }
         "read" => {
@@ -88,8 +102,8 @@ fn response_json_result(
     session_epoch: &str,
     request: QueryRequest,
 ) -> Result<String> {
-    let freshness = ResponseFreshness::from_feed(session_epoch, feed_state);
-    let cache_reads_enabled = feed_state.snapshot().state == "connected";
+    let response_freshness = ResponseFreshness::from_feed(session_epoch, feed_state);
+    let feed_cache_reads_enabled = feed_state.snapshot().state == "connected";
     match request {
         QueryRequest::Status => status_json(client, config, feed_state, cache, session_epoch),
         QueryRequest::Snapshot {
@@ -103,27 +117,33 @@ fn response_json_result(
             depth,
             config.request_timeout,
             &options,
-            cache_reads_enabled,
-            &freshness,
+            cache_reads_enabled(feed_cache_reads_enabled, options.freshness),
+            &response_freshness,
         ),
-        QueryRequest::Stat { path } => snapshot::stat_json(
+        QueryRequest::Stat {
+            path,
+            freshness: freshness_mode,
+        } => snapshot::stat_json(
             client,
             cache,
             &path,
             config.request_timeout,
-            cache_reads_enabled,
-            &freshness,
+            cache_reads_enabled(feed_cache_reads_enabled, freshness_mode),
+            &response_freshness,
         ),
-        QueryRequest::List { path } => snapshot::list_json(
+        QueryRequest::List {
+            path,
+            freshness: freshness_mode,
+        } => snapshot::list_json(
             client,
             cache,
             &path,
             config.request_timeout,
-            cache_reads_enabled,
-            &freshness,
+            cache_reads_enabled(feed_cache_reads_enabled, freshness_mode),
+            &response_freshness,
         ),
         QueryRequest::Read { path } => {
-            snapshot::read_json(client, &path, config.request_timeout, &freshness)
+            snapshot::read_json(client, &path, config.request_timeout, &response_freshness)
         }
     }
 }
@@ -135,7 +155,13 @@ fn snapshot_options(
         include: optional_include_field(object, "include")?.unwrap_or(options::IncludeKind::Both),
         fields: optional_fields_field(object, "fields")?.unwrap_or_else(options::EntryFields::all),
         budget: optional_usize_field(object, "budget")?,
+        freshness: optional_freshness_field(object, "freshness")?
+            .unwrap_or(options::FreshnessMode::CachedOk),
     })
+}
+
+fn cache_reads_enabled(feed_cache_reads_enabled: bool, freshness: options::FreshnessMode) -> bool {
+    feed_cache_reads_enabled && freshness.allows_cache_reads()
 }
 
 fn string_field<'a>(
@@ -210,6 +236,18 @@ fn optional_fields_field(
     options::EntryFields::from_names(&names).map(Some)
 }
 
+fn optional_freshness_field(
+    object: &Map<String, Value>,
+    field: &str,
+) -> std::result::Result<Option<options::FreshnessMode>, String> {
+    let Some(value) = optional_string_field(object, field)? else {
+        return Ok(None);
+    };
+    options::FreshnessMode::from_str(&value)
+        .map(Some)
+        .ok_or_else(|| format!("query field {field} must be one of cached_ok, must_revalidate"))
+}
+
 fn reject_unknown_fields(
     object: &Map<String, Value>,
     allowed: &[&str],
@@ -225,7 +263,10 @@ fn reject_unknown_fields(
 #[cfg(test)]
 mod tests {
     use super::parse_json;
-    use crate::control::{options::IncludeKind, query::QueryRequest};
+    use crate::control::{
+        options::{FreshnessMode, IncludeKind},
+        query::QueryRequest,
+    };
 
     #[test]
     fn parses_snapshot_query() {
@@ -241,6 +282,7 @@ mod tests {
                 assert_eq!(depth, 2);
                 assert_eq!(options.include, IncludeKind::Both);
                 assert_eq!(options.budget, None);
+                assert_eq!(options.freshness, FreshnessMode::CachedOk);
             }
             other => panic!("unexpected request {other:?}"),
         }
@@ -249,7 +291,7 @@ mod tests {
     #[test]
     fn parses_snapshot_query_options() {
         let request = parse_json(
-            br#"{"op":"snapshot","path":"/srv","depth":2,"include":"files","fields":["path","kind","length"],"budget":4}"#,
+            br#"{"op":"snapshot","path":"/srv","depth":2,"include":"files","fields":["path","kind","length"],"budget":4,"freshness":"must_revalidate"}"#,
         )
         .expect("snapshot query");
         match request {
@@ -262,6 +304,7 @@ mod tests {
                 assert_eq!(depth, 2);
                 assert_eq!(options.include, IncludeKind::Files);
                 assert_eq!(options.budget, Some(4));
+                assert_eq!(options.freshness, FreshnessMode::MustRevalidate);
                 assert!(options.fields.path());
                 assert!(!options.fields.qid());
             }
@@ -274,5 +317,18 @@ mod tests {
         let error = parse_json(br#"{"op":"stat","path":"/","legacy":true}"#)
             .expect_err("unknown fields should fail");
         assert!(error.contains("unknown query field legacy"));
+    }
+
+    #[test]
+    fn parses_stat_query_freshness_mode() {
+        let request = parse_json(br#"{"op":"stat","path":"/srv","freshness":"must_revalidate"}"#)
+            .expect("stat query");
+        match request {
+            QueryRequest::Stat { path, freshness } => {
+                assert_eq!(path, "/srv");
+                assert_eq!(freshness, FreshnessMode::MustRevalidate);
+            }
+            other => panic!("unexpected request {other:?}"),
+        }
     }
 }

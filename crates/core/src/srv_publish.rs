@@ -477,9 +477,9 @@ fn create_and_write<S: std::io::Read + std::io::Write>(
     service_name: &str,
     descriptor: &str,
 ) -> Result<()> {
-    let (parent_path, leaf_name) = srv_parent_and_leaf(service_name)?;
+    let (parent_path, create_name) = srv_create_parent_and_name(service_name)?;
     let parent = client.walk_path(&parent_path)?;
-    let (fid, _) = client.create(parent, leaf_name.as_bytes(), 0o666, OWRITE)?;
+    let (fid, _) = client.create(parent, create_name.as_bytes(), 0o666, OWRITE)?;
     let write_result = client.write(fid, 0, descriptor.as_bytes());
     let clunk_result = client.clunk(fid);
     write_result?;
@@ -582,18 +582,9 @@ fn validate_service_name(service_name: &str) -> Result<()> {
     Ok(())
 }
 
-fn srv_parent_and_leaf(service_name: &str) -> Result<(String, &str)> {
+fn srv_create_parent_and_name(service_name: &str) -> Result<(&'static str, &str)> {
     validate_service_name(service_name)?;
-    let mut segments = service_name.split('/').collect::<Vec<_>>();
-    let leaf = segments
-        .pop()
-        .ok_or_else(|| Error::from(format!("invalid srv service name {service_name}")))?;
-    let parent = if segments.is_empty() {
-        "/srv".to_string()
-    } else {
-        format!("/srv/{}", segments.join("/"))
-    };
-    Ok((parent, leaf))
+    Ok(("/srv", service_name))
 }
 
 fn looks_missing(error: &Error) -> bool {
@@ -739,10 +730,10 @@ mod tests {
     }
 
     #[test]
-    fn nested_srv_publication_uses_parent_path_and_leaf_name() {
+    fn nested_srv_publication_creates_from_srv_root_with_full_service_name() {
         assert_eq!(
-            srv_parent_and_leaf("kalshi/demo/actuator").expect("valid nested name"),
-            ("/srv/kalshi/demo".to_string(), "actuator")
+            srv_create_parent_and_name("kalshi/demo/actuator").expect("valid nested name"),
+            ("/srv", "kalshi/demo/actuator")
         );
     }
 
@@ -763,7 +754,6 @@ mod tests {
     #[test]
     fn publishes_missing_nested_srv_entry() {
         let tree = SharedSrvTree::new();
-        tree.ensure_srv_dir_path(&["kalshi", "demo"]);
         let address = serve_tree(tree.clone());
         let mut publication = publication(&address);
         publication.vault_endpoint_bind = address;
@@ -1045,6 +1035,30 @@ mod tests {
         }
 
         fn create(&mut self, parent: u64, name: &[u8]) -> Result<OpenFile> {
+            if parent == SRV && name.contains(&b'/') {
+                return self.create_srv_service_file(name);
+            }
+            self.create_file(parent, name)
+        }
+
+        fn create_srv_service_file(&mut self, name: &[u8]) -> Result<OpenFile> {
+            let service_name = std::str::from_utf8(name)
+                .map_err(|error| Error::from(format!("invalid service name utf-8: {error}")))?;
+            let mut segments = service_name.split('/').collect::<Vec<_>>();
+            let leaf = segments
+                .pop()
+                .ok_or_else(|| Error::from("invalid empty service name"))?;
+            let mut parent = SRV;
+            for segment in segments {
+                parent = match self.child(parent, segment.as_bytes()) {
+                    Some(id) => id,
+                    None => self.insert_dir(parent, segment.as_bytes()),
+                };
+            }
+            self.create_file(parent, leaf.as_bytes())
+        }
+
+        fn create_file(&mut self, parent: u64, name: &[u8]) -> Result<OpenFile> {
             let parent_node = self
                 .nodes
                 .get_mut(&parent)

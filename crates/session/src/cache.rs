@@ -174,7 +174,8 @@ impl NamespaceCache {
                 return;
             };
             if is_dir(&entry.stat) && !entry.stat_freshness.is_stale() {
-                entry.dir_cache = Some(DirCache::fresh(entries));
+                entry.dir_cache = Some(DirCache::fresh(entries.clone()));
+                seed_child_stats(&mut inner, path, entries);
             }
         }
     }
@@ -322,6 +323,30 @@ fn path_is_prefix(prefix: &[Vec<u8>], path: &[Vec<u8>]) -> bool {
     prefix.len() <= path.len() && path.iter().zip(prefix).all(|(path, prefix)| path == prefix)
 }
 
+fn seed_child_stats(inner: &mut NamespaceCacheInner, parent: &[Vec<u8>], entries: Vec<DirEntry>) {
+    for child in entries {
+        if child.name == b"." || child.name == b".." {
+            continue;
+        }
+        let mut child_path = parent.to_vec();
+        child_path.push(child.name);
+        let entry = inner
+            .entries
+            .entry(child_path)
+            .or_insert_with(|| CachedNode {
+                stat: child.stat.clone(),
+                stat_freshness: Freshness::fresh_now(),
+                dir_cache: None,
+            });
+        let identity_changed = !same_qid(entry.stat.qid, child.stat.qid);
+        entry.stat = child.stat;
+        entry.stat_freshness.mark_fresh();
+        if identity_changed || !is_dir(&entry.stat) {
+            entry.dir_cache = None;
+        }
+    }
+}
+
 fn parse_absolute_path(path: &str) -> Option<Vec<Vec<u8>>> {
     path.starts_with('/').then(|| {
         path.split('/')
@@ -405,6 +430,61 @@ mod tests {
         assert!(cache.directory_if_fresh(&docs).is_none());
         assert!(cache.stat_if_fresh(&alpha).is_none());
         assert!(cache.stat_if_fresh(&root).is_some());
+    }
+
+    #[test]
+    fn directory_cache_update_seeds_child_stat_entries() {
+        let cache = NamespaceCache::new();
+        let root = Vec::<Vec<u8>>::new();
+        let docs = vec![b"docs".to_vec()];
+        let alpha = vec![b"docs".to_vec(), b"alpha".to_vec()];
+
+        cache.update_stat(&root, Stat::new("", Qid::dir(1), 0o555));
+        cache.update_directory(
+            &root,
+            vec![DirEntry {
+                name: b"docs".to_vec(),
+                qid: Qid::dir(2),
+                stat: Stat::new("docs", Qid::dir(2), 0o555),
+            }],
+        );
+
+        assert!(cache.stat_if_fresh(&docs).is_some());
+
+        cache.update_directory(
+            &docs,
+            vec![DirEntry {
+                name: b"alpha".to_vec(),
+                qid: Qid::file(3),
+                stat: Stat::new("alpha", Qid::file(3), 0o444),
+            }],
+        );
+
+        assert!(cache.stat_if_fresh(&alpha).is_some());
+    }
+
+    #[test]
+    fn directory_cache_update_clears_replaced_child_directory_cache() {
+        let cache = NamespaceCache::new();
+        let root = Vec::<Vec<u8>>::new();
+        let docs = vec![b"docs".to_vec()];
+
+        cache.update_stat(&root, Stat::new("", Qid::dir(1), 0o555));
+        cache.update_stat(&docs, Stat::new("docs", Qid::dir(2), 0o555));
+        cache.update_directory(&docs, Vec::new());
+        assert!(cache.directory_if_fresh(&docs).is_some());
+
+        cache.update_directory(
+            &root,
+            vec![DirEntry {
+                name: b"docs".to_vec(),
+                qid: Qid::file(3),
+                stat: Stat::new("docs", Qid::file(3), 0o444),
+            }],
+        );
+
+        assert!(cache.stat_if_fresh(&docs).is_some());
+        assert!(cache.directory_if_fresh(&docs).is_none());
     }
 
     #[test]

@@ -1,5 +1,5 @@
-use super::{snapshot, status_json, ControlConfig};
-use crate::{Client, OREAD};
+use super::{json, query, snapshot, status_json, ControlConfig};
+use crate::{Client, ORDWR, OREAD};
 use r9p::{
     error::{Error as P9Error, EEXIST, EPERM},
     fid::Fid,
@@ -15,6 +15,7 @@ const USAGE: &str = concat!(
     "files:\n",
     "  status             session attachment status JSON\n",
     "  usage              this text\n",
+    "  query              JSON RPC file: write {\"op\":\"stat\",\"path\":\"/\"}, read response\n",
     "  stat/<path>        stat JSON for namespace path; use stat/. for root\n",
     "  list/<path>        directory listing JSON; use list/. for root\n",
     "  read/<path>        file content report JSON; use read/. for root\n",
@@ -27,6 +28,7 @@ pub(super) struct ControlTree {
     config: ControlConfig,
     nodes: BTreeMap<u64, ControlNode>,
     qids: BTreeMap<ControlNode, u64>,
+    query_responses: BTreeMap<Fid, Vec<u8>>,
     next_qid: u64,
 }
 
@@ -35,6 +37,7 @@ enum ControlNode {
     Root,
     Usage,
     Status,
+    Query,
     StatRoot,
     Stat(Vec<String>),
     ListRoot,
@@ -53,6 +56,7 @@ impl ControlTree {
             config,
             nodes: BTreeMap::new(),
             qids: BTreeMap::new(),
+            query_responses: BTreeMap::new(),
             next_qid: 1,
         };
         tree.qid_for(ControlNode::Root);
@@ -86,6 +90,7 @@ impl ControlTree {
         vec![
             self.stat_for(ControlNode::Status),
             self.stat_for(ControlNode::Usage),
+            self.stat_for(ControlNode::Query),
             self.stat_for(ControlNode::StatRoot),
             self.stat_for(ControlNode::ListRoot),
             self.stat_for(ControlNode::ReadRoot),
@@ -120,14 +125,19 @@ impl FileTree for ControlTree {
     }
 
     fn open(&mut self, _fid: Fid, qid: Qid, mode: u8) -> r9p::Result<OpenFile> {
-        if mode & 0x3 != OREAD {
+        let node = self.node_for(qid)?;
+        let access = mode & 0x3;
+        if matches!(node, ControlNode::Query) {
+            if access != OREAD && access != ORDWR {
+                return Err(P9Error::from_static(EPERM));
+            }
+        } else if access != OREAD {
             return Err(P9Error::from_static(EPERM));
         }
-        let _node = self.node_for(qid)?;
         Ok(OpenFile { qid, iounit: 0 })
     }
 
-    fn read(&mut self, _fid: Fid, qid: Qid, offset: u64, count: u32) -> r9p::Result<ReadData> {
+    fn read(&mut self, fid: Fid, qid: Qid, offset: u64, count: u32) -> r9p::Result<ReadData> {
         match self.node_for(qid)? {
             ControlNode::Root => Ok(ReadData::Directory(self.root_entries())),
             ControlNode::StatRoot
@@ -139,6 +149,12 @@ impl FileTree for ControlTree {
             ControlNode::Status => {
                 let response = status_json(&self.client, &self.config).map_err(p9_error)?;
                 read_bytes(response.as_bytes(), offset, count)
+            }
+            ControlNode::Query => {
+                let response = self.query_responses.get(&fid).cloned().unwrap_or_else(|| {
+                    json::error_response("query_required", "write query JSON first").into_bytes()
+                });
+                read_bytes(&response, offset, count)
             }
             ControlNode::Stat(path) => {
                 let response = snapshot::stat_json(
@@ -184,6 +200,28 @@ impl FileTree for ControlTree {
         let node = self.node_for(qid)?;
         Ok(stat_for_node(qid_for_path(qid.path, &node), &node))
     }
+
+    fn write(&mut self, fid: Fid, qid: Qid, offset: u64, data: &[u8]) -> r9p::Result<u32> {
+        if offset != 0 {
+            return Err(P9Error::from("query writes must start at offset 0"));
+        }
+        match self.node_for(qid)? {
+            ControlNode::Query => {
+                let response = match query::parse_json(data) {
+                    Ok(request) => query::response_json(&self.client, &self.config, request),
+                    Err(error) => json::error_response("bad_query", &error),
+                };
+                self.query_responses.insert(fid, response.into_bytes());
+                u32::try_from(data.len()).map_err(|_| P9Error::from("query write too large"))
+            }
+            _ => Err(P9Error::from_static(EPERM)),
+        }
+    }
+
+    fn clunk(&mut self, fid: Fid, _qid: Qid) -> r9p::Result<()> {
+        self.query_responses.remove(&fid);
+        Ok(())
+    }
 }
 
 fn walk_child(node: &ControlNode, name: &[u8]) -> Option<ControlNode> {
@@ -192,6 +230,7 @@ fn walk_child(node: &ControlNode, name: &[u8]) -> Option<ControlNode> {
         ControlNode::Root => match name.as_str() {
             "usage" => Some(ControlNode::Usage),
             "status" => Some(ControlNode::Status),
+            "query" => Some(ControlNode::Query),
             "stat" => Some(ControlNode::StatRoot),
             "list" => Some(ControlNode::ListRoot),
             "read" => Some(ControlNode::ReadRoot),
@@ -213,7 +252,7 @@ fn walk_child(node: &ControlNode, name: &[u8]) -> Option<ControlNode> {
             depth: *depth,
             path: extend_path(path.clone(), name),
         }),
-        ControlNode::Usage | ControlNode::Status => None,
+        ControlNode::Usage | ControlNode::Status | ControlNode::Query => None,
     }
 }
 
@@ -255,6 +294,7 @@ fn node_name(node: &ControlNode) -> Vec<u8> {
         ControlNode::Root => b".".to_vec(),
         ControlNode::Usage => b"usage".to_vec(),
         ControlNode::Status => b"status".to_vec(),
+        ControlNode::Query => b"query".to_vec(),
         ControlNode::StatRoot => b"stat".to_vec(),
         ControlNode::Stat(path) => query_name(path),
         ControlNode::ListRoot => b"list".to_vec(),

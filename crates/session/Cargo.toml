@@ -14,3 +14,4 @@ unwrap_used = "deny"
 [dependencies]
 libc.workspace = true
 r9p.workspace = true
+serde_json.workspace = true

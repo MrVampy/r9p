@@ -19,9 +19,10 @@ Question: how should Plan 83 slice 3 expose local session status, snapshot, stat
 
 - The local control socket belongs in `crates/session`, not `crates/cli`, because the long-lived attachment is the session owner. The CLI should be a thin client that starts the socket owner or sends requests to it.
 - The first CLI surface can be `r9p session serve --socket PATH [endpoint]`, `r9p session status --socket PATH`, `r9p session snapshot --socket PATH [--depth N] PATH`, `r9p session stat --socket PATH [PATH]`, `r9p session list --socket PATH [PATH]`, and `r9p session read --socket PATH PATH`.
-- The local Unix socket should serve a small 9P namespace, not a bespoke line protocol. JSON remains the response payload format, while the transport stays normal r9p so existing clients can inspect the session with ordinary `read` operations.
+- The local Unix socket should serve a small 9P namespace, not a bespoke line protocol. JSON remains the response payload format, while the transport stays normal r9p so existing clients can inspect the session with ordinary `read` operations. Parameterized requests use `/query` as an ORDWR RPC file with JSON request bodies.
 - Stat, list, and read can use the same control protocol and the same long-lived 9P attachment. Since the control socket server is long-lived, per-request walked or cloned fids should be clunked even when stat/open/read returns an error.
 - Snapshot reports should preserve successful entries when a child branch fails and list the failed branch under a typed `degraded` array. A denied or vanished child is report evidence, not a reason to discard the whole snapshot.
+- The session crate uses `serde_json` for `/query` request parsing so the JSON contract is parsed by a real parser instead of a bespoke string scanner. This dependency stays outside `crates/core`.
 - This slice should prove status, snapshot, stat, list, and read over a synthetic 9P server.
 
 ## Effect
@@ -29,5 +30,5 @@ Question: how should Plan 83 slice 3 expose local session status, snapshot, stat
 - Add a `session::control` module with Unix-socket 9P serve/request helpers, status response, and snapshot response.
 - Keep control request parsing in a focused module so `control/mod.rs` remains the socket coordinator rather than a parser and response monolith.
 - Add a `r9p session` CLI command that either starts the local socket owner or talks to it for status, snapshot, stat, list, and read.
-- Add a focused CLI integration test with a synthetic 9P server, a session socket process, all current read-only control requests, and a direct `r9p -a unix!SOCKET read /status` proof.
+- Add a focused CLI integration test with a synthetic 9P server, a session socket process, all current read-only control requests, a direct `r9p -a unix!SOCKET read /status` proof, and a direct `r9p -a unix!SOCKET rpc /query '{"op":"stat","path":"/data"}'` proof.
 - Extend the synthetic tree with a denied child and prove snapshot output keeps the visible siblings while returning `reason="denied"` for the degraded branch.

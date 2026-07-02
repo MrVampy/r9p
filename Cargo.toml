@@ -25,4 +25,5 @@ fuse = { path = "crates/fuse" }
 fs = { path = "crates/fs" }
 libc = "=0.2.186"
 r9p = { path = "crates/core" }
+serde_json = { version = "1", default-features = false, features = ["std"] }
 session = { path = "crates/session" }

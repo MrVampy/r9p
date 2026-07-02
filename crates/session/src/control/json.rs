@@ -36,6 +36,15 @@ pub fn push_hex(out: &mut String, bytes: &[u8]) {
     }
 }
 
+pub fn error_response(code: &str, message: &str) -> String {
+    let mut out = String::from("{\"ok\":false,\"error\":{\"code\":");
+    push_string(&mut out, code);
+    out.push_str(",\"message\":");
+    push_string(&mut out, message);
+    out.push_str("}}");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::string;

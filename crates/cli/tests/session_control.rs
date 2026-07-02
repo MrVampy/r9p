@@ -53,6 +53,16 @@ fn session_control_verbs_use_local_socket() -> TestResult<()> {
         run_session_until_success(&["-a", &format!("unix!{socket_arg}"), "read", "/status"])?;
     assert_stdout_contains(&direct_status, "\"kind\":\"session.status.v1\"")?;
 
+    let direct_query = run_session_until_success(&[
+        "-a",
+        &format!("unix!{socket_arg}"),
+        "rpc",
+        "/query",
+        r#"{"op":"stat","path":"/data"}"#,
+    ])?;
+    assert_stdout_contains(&direct_query, "\"kind\":\"session.stat.v1\"")?;
+    assert_stdout_contains(&direct_query, "\"path\":\"/data\"")?;
+
     let snapshot = run_session_until_success(&[
         "session",
         "snapshot",

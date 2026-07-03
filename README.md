@@ -59,6 +59,7 @@ r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] create path...
 r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] mkdir path...
 r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] con [-r] path
 r9p mount [--uname uname] [--aname aname] [--attr-timeout seconds] [--entry-timeout seconds] [--request-timeout seconds] [--lookup-timeout seconds] [--read-timeout seconds] [--write-timeout seconds] [--mutation-timeout seconds] [--control-timeout seconds] [--interrupt-timeout seconds] [--max-workers count] [--max-background count] [--congestion-threshold count] [--diagnostics-file path] [--diagnostics-capacity count] endpoint mountpoint
+r9p mount ensure|status|stop --mountpoint path [--unit name] [--status-file path] [--expect-endpoint endpoint] [--expect-change-feed path] [--expect-status-file path] [--attempts count] [-- mount args...]
 r9p serve [--bind address] root
 r9p export [--bind address] [--descriptor machine] [--descriptor-file path] [--auth boundary] [--descriptor-field key=value] root
 r9p export git [--repo path] [--rev rev] [--worktree path] [--bundle-path path] [--bundle-namespace-path path] [--bind address] [--max-fids count] [--descriptor-file path] [--auth boundary]

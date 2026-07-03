@@ -8,6 +8,7 @@ use std::fmt;
 pub struct Handle {
     pub client: Client,
     pub fid: Option<Fid>,
+    pub open_mode: u8,
     pub is_dir: bool,
     pub write_on_release: bool,
     pub close_commit: bool,
@@ -21,6 +22,7 @@ impl fmt::Debug for Handle {
         formatter
             .debug_struct("Handle")
             .field("fid", &self.fid)
+            .field("open_mode", &self.open_mode)
             .field("is_dir", &self.is_dir)
             .field("write_on_release", &self.write_on_release)
             .field("close_commit", &self.close_commit)
@@ -43,6 +45,7 @@ impl NodeTable {
         &mut self,
         client: Client,
         fid: Option<Fid>,
+        open_mode: u8,
         is_dir: bool,
         write_on_release: bool,
         close_commit: bool,
@@ -55,6 +58,7 @@ impl NodeTable {
             Handle {
                 client,
                 fid,
+                open_mode,
                 is_dir,
                 write_on_release,
                 close_commit,

@@ -62,7 +62,7 @@ impl R9pFuse {
             if let Some(dir_entries) = self.cached_dir_entries_if_fresh(header.nodeid)? {
                 let handle =
                     self.nodes()?
-                        .open_handle(client, None, true, false, false, dir_entries);
+                        .open_handle(client, None, OREAD, true, false, false, dir_entries);
                 let out = FuseOpenOut {
                     fh: handle,
                     open_flags: fuse_open_flags(true, OREAD),
@@ -120,6 +120,7 @@ impl R9pFuse {
         let handle = self.nodes()?.open_handle(
             client.clone(),
             Some(fid),
+            mode,
             is_dir_open,
             write_on_release,
             close_commit,

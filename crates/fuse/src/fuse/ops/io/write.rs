@@ -11,8 +11,8 @@ use crate::{
         R9pFuse,
     },
 };
-use session::OWRITE;
-use std::{fs::File, mem::size_of};
+use session::{ORDWR, OWRITE};
+use std::{fs::File, mem::size_of, time::Duration};
 
 impl R9pFuse {
     pub(in crate::fuse) fn write(
@@ -33,11 +33,13 @@ impl R9pFuse {
             nodes.node(header.nodeid)?.path.clone()
         };
         let handle = self.nodes()?.handle(input.fh)?.clone();
-        let write_timeout = if write_uses_control_timeout(&node_path, handle.close_commit) {
-            self.control_timeout()
-        } else {
-            self.write_timeout()
-        };
+        let write_timeout = write_timeout_for_handle(
+            handle.open_mode,
+            write_uses_control_timeout(&node_path, handle.close_commit),
+            self.read_timeout(),
+            self.write_timeout(),
+            self.control_timeout(),
+        );
         let fid = handle.require_fid()?;
         let count = match handle
             .client
@@ -190,5 +192,79 @@ impl R9pFuse {
             self.invalidate_namespace_bindings_after_reply(file, "close-commit release");
         }
         Ok(())
+    }
+}
+
+fn write_timeout_for_handle(
+    open_mode: u8,
+    uses_control_timeout: bool,
+    read_timeout: Duration,
+    write_timeout: Duration,
+    control_timeout: Duration,
+) -> Duration {
+    if uses_control_timeout {
+        control_timeout
+    } else if open_mode == ORDWR {
+        read_timeout
+    } else {
+        write_timeout
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use session::OREAD;
+
+    #[test]
+    fn read_write_rpc_handles_use_read_timeout_for_write_syscall() {
+        assert_eq!(
+            write_timeout_for_handle(
+                ORDWR,
+                false,
+                Duration::from_secs(180),
+                Duration::from_secs(5),
+                Duration::from_secs(600),
+            ),
+            Duration::from_secs(180),
+        );
+    }
+
+    #[test]
+    fn control_writes_keep_control_timeout_priority() {
+        assert_eq!(
+            write_timeout_for_handle(
+                ORDWR,
+                true,
+                Duration::from_secs(180),
+                Duration::from_secs(5),
+                Duration::from_secs(600),
+            ),
+            Duration::from_secs(600),
+        );
+    }
+
+    #[test]
+    fn ordinary_writes_keep_write_timeout() {
+        assert_eq!(
+            write_timeout_for_handle(
+                OWRITE,
+                false,
+                Duration::from_secs(180),
+                Duration::from_secs(5),
+                Duration::from_secs(600),
+            ),
+            Duration::from_secs(5),
+        );
+        assert_eq!(
+            write_timeout_for_handle(
+                OREAD,
+                false,
+                Duration::from_secs(180),
+                Duration::from_secs(5),
+                Duration::from_secs(600),
+            ),
+            Duration::from_secs(5),
+        );
     }
 }

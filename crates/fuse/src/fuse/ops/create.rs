@@ -59,6 +59,7 @@ impl R9pFuse {
                 let handle = nodes.open_handle(
                     client.clone(),
                     Some(open_fid),
+                    mode,
                     false,
                     mode != OREAD,
                     false,
@@ -74,6 +75,7 @@ impl R9pFuse {
                 let handle = nodes.open_handle(
                     client.clone(),
                     Some(open_fid),
+                    mode,
                     false,
                     mode != OREAD,
                     false,

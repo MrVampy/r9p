@@ -608,9 +608,6 @@ pub unsafe extern "C" fn r9p_front_request_copy(
     let Some(abi) = (unsafe { handle.as_ref() }) else {
         return INVALID as isize;
     };
-    if buf.is_null() {
-        return INVALID as isize;
-    }
     let Ok(mut requests) = abi.staged_requests.lock() else {
         return INTERNAL as isize;
     };
@@ -618,6 +615,13 @@ pub unsafe extern "C" fn r9p_front_request_copy(
         return INVALID as isize;
     };
     if request.bytes.len() > cap {
+        return INVALID as isize;
+    }
+    if request.bytes.is_empty() {
+        requests.remove(&request_id);
+        return 0;
+    }
+    if buf.is_null() {
         return INVALID as isize;
     }
     unsafe {

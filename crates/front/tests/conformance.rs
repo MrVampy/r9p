@@ -746,6 +746,10 @@ fn abi_remove_relay_uses_tremove_and_drops_projection() {
     assert_eq!(request_len, 0);
     let context = request_context(handle, request_id);
     assert!(context.contains("\"target_path\" \"/trades/demo/trade-1\""));
+    assert_eq!(
+        unsafe { r9p_front_request_copy(handle, request_id, std::ptr::null_mut(), 0) },
+        0
+    );
     let (prefix, prefix_len) = cstr("trades/demo/trade-1");
     assert_eq!(
         unsafe { r9p_front_complete_remove(handle, prefix, prefix_len, request_id) },

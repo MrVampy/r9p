@@ -1,4 +1,4 @@
-export const SUPPORTED_ABI_VERSIONS = new Set([14]);
+export const SUPPORTED_ABI_VERSIONS = new Set([15]);
 
 const SYMBOLS = {
   r9p_front_abi_version: { parameters: [], result: "u32" },
@@ -24,6 +24,18 @@ const SYMBOLS = {
     parameters: ["pointer", "buffer", "usize"],
     result: "i32",
   },
+  r9p_front_register_write_relay: {
+    parameters: ["pointer", "buffer", "usize"],
+    result: "i32",
+  },
+  r9p_front_register_remove_relay: {
+    parameters: ["pointer", "buffer", "usize"],
+    result: "i32",
+  },
+  r9p_front_register_wstat_relay: {
+    parameters: ["pointer", "buffer", "usize"],
+    result: "i32",
+  },
   r9p_front_register_log: {
     parameters: ["pointer", "buffer", "usize"],
     result: "i32",
@@ -46,6 +58,30 @@ const SYMBOLS = {
     result: "isize",
   },
   r9p_front_complete_request: {
+    parameters: ["pointer", "buffer", "usize", "u64", "buffer", "usize"],
+    result: "i32",
+  },
+  r9p_front_complete_write: {
+    parameters: ["pointer", "buffer", "usize", "u64", "u32"],
+    result: "i32",
+  },
+  r9p_front_reject_write: {
+    parameters: ["pointer", "buffer", "usize", "u64", "buffer", "usize"],
+    result: "i32",
+  },
+  r9p_front_complete_remove: {
+    parameters: ["pointer", "buffer", "usize", "u64"],
+    result: "i32",
+  },
+  r9p_front_reject_remove: {
+    parameters: ["pointer", "buffer", "usize", "u64", "buffer", "usize"],
+    result: "i32",
+  },
+  r9p_front_complete_wstat: {
+    parameters: ["pointer", "buffer", "usize", "u64"],
+    result: "i32",
+  },
+  r9p_front_reject_wstat: {
     parameters: ["pointer", "buffer", "usize", "u64", "buffer", "usize"],
     result: "i32",
   },
@@ -566,6 +602,48 @@ export class FrontHost implements TransitionSink {
     }
   }
 
+  registerWriteRelay(path: string): void {
+    const [pathBytes, pathLen] = bytes(path);
+    const status = this.library.symbols.r9p_front_register_write_relay(
+      this.handle,
+      pathBytes,
+      pathLen,
+    );
+    if (status !== 0) {
+      throw new Error(
+        `front register_write_relay(${path}) failed with status ${status}`,
+      );
+    }
+  }
+
+  registerRemoveRelay(path: string): void {
+    const [pathBytes, pathLen] = bytes(path);
+    const status = this.library.symbols.r9p_front_register_remove_relay(
+      this.handle,
+      pathBytes,
+      pathLen,
+    );
+    if (status !== 0) {
+      throw new Error(
+        `front register_remove_relay(${path}) failed with status ${status}`,
+      );
+    }
+  }
+
+  registerWstatRelay(path: string): void {
+    const [pathBytes, pathLen] = bytes(path);
+    const status = this.library.symbols.r9p_front_register_wstat_relay(
+      this.handle,
+      pathBytes,
+      pathLen,
+    );
+    if (status !== 0) {
+      throw new Error(
+        `front register_wstat_relay(${path}) failed with status ${status}`,
+      );
+    }
+  }
+
   registerLog(path: string): void {
     const [pathBytes, pathLen] = bytes(path);
     const status = this.library.symbols.r9p_front_register_log(
@@ -668,6 +746,94 @@ export class FrontHost implements TransitionSink {
       throw new Error(
         `front complete_request(${prefix}) failed with status ${status}`,
       );
+    }
+  }
+
+  completeWrite(prefix: string, requestId: bigint, count: number): void {
+    const [prefixBytes, prefixLen] = bytes(prefix);
+    const status = this.library.symbols.r9p_front_complete_write(
+      this.handle,
+      prefixBytes,
+      prefixLen,
+      requestId,
+      count,
+    );
+    if (status !== 0) {
+      throw new Error(`front complete_write(${prefix}) failed with status ${status}`);
+    }
+  }
+
+  rejectWrite(prefix: string, requestId: bigint, message: string): void {
+    const [prefixBytes, prefixLen] = bytes(prefix);
+    const [messageBytes, messageLen] = bytes(message);
+    const status = this.library.symbols.r9p_front_reject_write(
+      this.handle,
+      prefixBytes,
+      prefixLen,
+      requestId,
+      messageBytes,
+      messageLen,
+    );
+    if (status !== 0) {
+      throw new Error(`front reject_write(${prefix}) failed with status ${status}`);
+    }
+  }
+
+  completeRemove(prefix: string, requestId: bigint): void {
+    const [prefixBytes, prefixLen] = bytes(prefix);
+    const status = this.library.symbols.r9p_front_complete_remove(
+      this.handle,
+      prefixBytes,
+      prefixLen,
+      requestId,
+    );
+    if (status !== 0) {
+      throw new Error(`front complete_remove(${prefix}) failed with status ${status}`);
+    }
+  }
+
+  rejectRemove(prefix: string, requestId: bigint, message: string): void {
+    const [prefixBytes, prefixLen] = bytes(prefix);
+    const [messageBytes, messageLen] = bytes(message);
+    const status = this.library.symbols.r9p_front_reject_remove(
+      this.handle,
+      prefixBytes,
+      prefixLen,
+      requestId,
+      messageBytes,
+      messageLen,
+    );
+    if (status !== 0) {
+      throw new Error(`front reject_remove(${prefix}) failed with status ${status}`);
+    }
+  }
+
+  completeWstat(prefix: string, requestId: bigint): void {
+    const [prefixBytes, prefixLen] = bytes(prefix);
+    const status = this.library.symbols.r9p_front_complete_wstat(
+      this.handle,
+      prefixBytes,
+      prefixLen,
+      requestId,
+    );
+    if (status !== 0) {
+      throw new Error(`front complete_wstat(${prefix}) failed with status ${status}`);
+    }
+  }
+
+  rejectWstat(prefix: string, requestId: bigint, message: string): void {
+    const [prefixBytes, prefixLen] = bytes(prefix);
+    const [messageBytes, messageLen] = bytes(message);
+    const status = this.library.symbols.r9p_front_reject_wstat(
+      this.handle,
+      prefixBytes,
+      prefixLen,
+      requestId,
+      messageBytes,
+      messageLen,
+    );
+    if (status !== 0) {
+      throw new Error(`front reject_wstat(${prefix}) failed with status ${status}`);
     }
   }
 

@@ -16,7 +16,7 @@ pub use publication::{
     r9p_front_maintain_r9p_export, r9p_front_publish_r9p_export, r9p_front_reconcile_r9p_exports,
 };
 
-pub const ABI_VERSION: u32 = 14;
+pub const ABI_VERSION: u32 = 15;
 
 const OK: i32 = 0;
 const TIMEOUT: i32 = 1;
@@ -342,6 +342,48 @@ pub unsafe extern "C" fn r9p_front_register_write_relay(
         return INVALID;
     };
     match abi.front.register_write_relay(path) {
+        Ok(()) => {
+            clear_last_error(abi);
+            OK
+        }
+        Err(error) => set_last_error(abi, error),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn r9p_front_register_remove_relay(
+    handle: *mut FrontAbi,
+    path: *const c_char,
+    path_len: usize,
+) -> i32 {
+    let Some(abi) = (unsafe { handle.as_ref() }) else {
+        return INVALID;
+    };
+    let Some(path) = (unsafe { str_arg(path, path_len) }) else {
+        return INVALID;
+    };
+    match abi.front.register_remove_relay(path) {
+        Ok(()) => {
+            clear_last_error(abi);
+            OK
+        }
+        Err(error) => set_last_error(abi, error),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn r9p_front_register_wstat_relay(
+    handle: *mut FrontAbi,
+    path: *const c_char,
+    path_len: usize,
+) -> i32 {
+    let Some(abi) = (unsafe { handle.as_ref() }) else {
+        return INVALID;
+    };
+    let Some(path) = (unsafe { str_arg(path, path_len) }) else {
+        return INVALID;
+    };
+    match abi.front.register_wstat_relay(path) {
         Ok(()) => {
             clear_last_error(abi);
             OK
@@ -724,6 +766,114 @@ pub unsafe extern "C" fn r9p_front_reject_write(
         requests.remove(&request_id);
     }
     match abi.front.reject_write(prefix, request_id, message) {
+        Ok(()) => {
+            clear_last_error(abi);
+            OK
+        }
+        Err(error) => set_last_error(abi, error),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn r9p_front_complete_remove(
+    handle: *mut FrontAbi,
+    prefix: *const c_char,
+    prefix_len: usize,
+    request_id: u64,
+) -> i32 {
+    let Some(abi) = (unsafe { handle.as_ref() }) else {
+        return INVALID;
+    };
+    let Some(prefix) = (unsafe { str_arg(prefix, prefix_len) }) else {
+        return INVALID;
+    };
+    if let Ok(mut requests) = abi.staged_requests.lock() {
+        requests.remove(&request_id);
+    }
+    match abi.front.complete_remove(prefix, request_id) {
+        Ok(()) => {
+            clear_last_error(abi);
+            OK
+        }
+        Err(error) => set_last_error(abi, error),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn r9p_front_reject_remove(
+    handle: *mut FrontAbi,
+    prefix: *const c_char,
+    prefix_len: usize,
+    request_id: u64,
+    message: *const c_char,
+    message_len: usize,
+) -> i32 {
+    let Some(abi) = (unsafe { handle.as_ref() }) else {
+        return INVALID;
+    };
+    let (Some(prefix), Some(message)) = (unsafe { str_arg(prefix, prefix_len) }, unsafe {
+        str_arg(message, message_len)
+    }) else {
+        return INVALID;
+    };
+    if let Ok(mut requests) = abi.staged_requests.lock() {
+        requests.remove(&request_id);
+    }
+    match abi.front.reject_remove(prefix, request_id, message) {
+        Ok(()) => {
+            clear_last_error(abi);
+            OK
+        }
+        Err(error) => set_last_error(abi, error),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn r9p_front_complete_wstat(
+    handle: *mut FrontAbi,
+    prefix: *const c_char,
+    prefix_len: usize,
+    request_id: u64,
+) -> i32 {
+    let Some(abi) = (unsafe { handle.as_ref() }) else {
+        return INVALID;
+    };
+    let Some(prefix) = (unsafe { str_arg(prefix, prefix_len) }) else {
+        return INVALID;
+    };
+    if let Ok(mut requests) = abi.staged_requests.lock() {
+        requests.remove(&request_id);
+    }
+    match abi.front.complete_wstat(prefix, request_id) {
+        Ok(()) => {
+            clear_last_error(abi);
+            OK
+        }
+        Err(error) => set_last_error(abi, error),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn r9p_front_reject_wstat(
+    handle: *mut FrontAbi,
+    prefix: *const c_char,
+    prefix_len: usize,
+    request_id: u64,
+    message: *const c_char,
+    message_len: usize,
+) -> i32 {
+    let Some(abi) = (unsafe { handle.as_ref() }) else {
+        return INVALID;
+    };
+    let (Some(prefix), Some(message)) = (unsafe { str_arg(prefix, prefix_len) }, unsafe {
+        str_arg(message, message_len)
+    }) else {
+        return INVALID;
+    };
+    if let Ok(mut requests) = abi.staged_requests.lock() {
+        requests.remove(&request_id);
+    }
+    match abi.front.reject_wstat(prefix, request_id, message) {
         Ok(()) => {
             clear_last_error(abi);
             OK

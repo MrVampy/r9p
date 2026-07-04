@@ -2,10 +2,10 @@
 #define R9P_FRONT_H
 
 /*
- * r9p front C ABI, version 14.
+ * r9p front C ABI, version 15.
  *
  * Contract rules:
- * - r9p_front_abi_version() must return 14 before v14-only calls are made.
+ * - r9p_front_abi_version() must return 15 before v15-only calls are made.
  *   Hosts that only use the v9/v10 call set may accept their known versions.
  * - r9p_front_new() returns an owned handle; every handle must be released
  *   exactly once with r9p_front_free(). Calls other than r9p_front_free()
@@ -28,10 +28,11 @@
  *   r9p_front_request_prefix_copy, r9p_front_request_context_copy, and
  *   r9p_front_request_copy. Call sequence per request: next_request,
  *   request_prefix_copy(request_id), request_context_copy(request_id),
- *   request_copy(request_id), then complete_request, complete_write, or
- *   reject_write according to the registered shape. The prefix is the value
- *   to pass to the completion call: the intake prefix for register_intake, or
- *   the registered path for register_rpc and register_write_relay.
+ *   request_copy(request_id), then a completion/rejection call according to
+ *   the registered shape. The prefix is the value to pass to the completion
+ *   call: the intake prefix for register_intake, or the registered path for
+ *   register_rpc, register_write_relay, register_remove_relay, or
+ *   register_wstat_relay.
  *   request_prefix_copy and request_context_copy with cap=0 return the
  *   required length without copying. request_copy consumes the staged request
  *   bytes, so copy prefix and context first.
@@ -62,6 +63,14 @@
  *     error text to the writer, and a missing host reports write relay
  *     unavailable after the front wait timeout. Use for write/control
  *     surfaces where enqueueing is not admission.
+ *   - register_remove_relay(path): synchronous remove relay. A client
+ *     Tremove on path enqueues a request with empty bytes; complete_remove
+ *     removes the projected subtree from the front, while reject_remove
+ *     returns the supplied error text to the remover.
+ *   - register_wstat_relay(path): synchronous wstat relay. A client Twstat
+ *     on path enqueues a request whose bytes are the encoded 9P stat payload;
+ *     complete_wstat accepts the metadata mutation, while reject_wstat
+ *     returns the supplied error text to the caller.
  * - set_principal_root(principal, root_path) pushes a v9-style wildcard attach
  *   root for a principal. set_principal_root_aname(principal, aname,
  *   root_path) admits one aname while using the same value for uname and
@@ -149,6 +158,10 @@ int32_t r9p_front_register_rpc(r9p_front *front, const char *path,
                                size_t path_len);
 int32_t r9p_front_register_write_relay(r9p_front *front, const char *path,
                                        size_t path_len);
+int32_t r9p_front_register_remove_relay(r9p_front *front, const char *path,
+                                        size_t path_len);
+int32_t r9p_front_register_wstat_relay(r9p_front *front, const char *path,
+                                       size_t path_len);
 int32_t r9p_front_register_log(r9p_front *front, const char *path,
                                size_t path_len);
 int32_t r9p_front_set_principal_root(r9p_front *front,
@@ -186,6 +199,16 @@ int32_t r9p_front_complete_write(r9p_front *front, const char *prefix,
                                  size_t prefix_len, uint64_t request_id,
                                  uint32_t count);
 int32_t r9p_front_reject_write(r9p_front *front, const char *prefix,
+                               size_t prefix_len, uint64_t request_id,
+                               const char *message, size_t message_len);
+int32_t r9p_front_complete_remove(r9p_front *front, const char *prefix,
+                                  size_t prefix_len, uint64_t request_id);
+int32_t r9p_front_reject_remove(r9p_front *front, const char *prefix,
+                                size_t prefix_len, uint64_t request_id,
+                                const char *message, size_t message_len);
+int32_t r9p_front_complete_wstat(r9p_front *front, const char *prefix,
+                                 size_t prefix_len, uint64_t request_id);
+int32_t r9p_front_reject_wstat(r9p_front *front, const char *prefix,
                                size_t prefix_len, uint64_t request_id,
                                const char *message, size_t message_len);
 int32_t r9p_front_stop(r9p_front *front);

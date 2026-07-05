@@ -330,7 +330,7 @@ fn perform_request(
             count,
         } => {
             let (front, target) = {
-                let tree = tree
+                let mut tree = tree
                     .lock()
                     .map_err(|_| Error::from_static("front tree poisoned"))?;
                 (tree.front(), tree.read_target(*fid)?)

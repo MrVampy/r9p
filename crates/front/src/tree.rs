@@ -17,6 +17,7 @@ pub struct FrontTree {
     session_id: u64,
     fids: BTreeMap<Fid, FidBinding>,
     open_modes: BTreeMap<Fid, u8>,
+    rpc_buffers: BTreeMap<Fid, RpcBuffer>,
     rpc_inflight: BTreeMap<Fid, u64>,
 }
 
@@ -27,6 +28,7 @@ impl FrontTree {
             session_id,
             fids: BTreeMap::new(),
             open_modes: BTreeMap::new(),
+            rpc_buffers: BTreeMap::new(),
             rpc_inflight: BTreeMap::new(),
         }
     }
@@ -40,6 +42,12 @@ struct FidBinding {
     uname: Vec<u8>,
     aname: Vec<u8>,
     principal_id: String,
+}
+
+struct RpcBuffer {
+    prefix: String,
+    bytes: Vec<u8>,
+    context: RequestContext,
 }
 
 fn request_context(
@@ -261,21 +269,36 @@ impl FileTree for FrontTree {
         );
         if let Body::Rpc(prefix) = &state.node(id)?.body {
             let prefix = prefix.clone();
-            if let Some(previous) = self.rpc_inflight.remove(&fid) {
+            if let Some(previous) = self.rpc_inflight.get(&fid).copied() {
+                if offset != 0 {
+                    return Err(Error::from_static("rpc request already submitted"));
+                }
+                self.rpc_inflight.remove(&fid);
                 state.rpc_responses.remove(&previous);
             }
-            let request_id = state.next_request_id;
-            state.next_request_id = state.next_request_id.saturating_add(1);
-            state.rpc_responses.insert(request_id, None);
-            state.pending.push_back(IntakeRequest {
-                request_id,
-                prefix,
-                bytes: data.to_vec(),
-                context: request_context,
-            });
-            self.rpc_inflight.insert(fid, request_id);
-            drop(state);
-            self.front.shared.1.notify_all();
+            let offset = usize::try_from(offset).map_err(|_| Error::from_static(EPERM))?;
+            if offset == 0 {
+                self.rpc_buffers.insert(
+                    fid,
+                    RpcBuffer {
+                        prefix,
+                        bytes: data.to_vec(),
+                        context: request_context,
+                    },
+                );
+            } else {
+                let buffer = self
+                    .rpc_buffers
+                    .get_mut(&fid)
+                    .ok_or_else(|| Error::from_static("rpc write offset without request start"))?;
+                if buffer.prefix != prefix {
+                    return Err(Error::from_static("rpc path changed while buffering"));
+                }
+                if offset != buffer.bytes.len() {
+                    return Err(Error::from_static("rpc write offset is not sequential"));
+                }
+                buffer.bytes.extend_from_slice(data);
+            }
             return u32::try_from(data.len()).map_err(|_| Error::from_static(EPERM));
         }
         let write_relay = state.node(id)?.write_relay.clone().or_else(|| {
@@ -342,6 +365,7 @@ impl FileTree for FrontTree {
     fn clunk(&mut self, fid: Fid, _qid: Qid) -> Result<()> {
         self.fids.remove(&fid);
         self.open_modes.remove(&fid);
+        self.rpc_buffers.remove(&fid);
         if let Some(request_id) = self.rpc_inflight.remove(&fid) {
             if let Ok(mut state) = self.front.lock() {
                 state.rpc_responses.remove(&request_id);
@@ -398,6 +422,7 @@ impl FileTree for FrontTree {
         state.remove_subtree_if_exists(&front_path)?;
         self.fids.remove(&fid);
         self.open_modes.remove(&fid);
+        self.rpc_buffers.remove(&fid);
         if let Some(request_id) = self.rpc_inflight.remove(&fid) {
             state.rpc_responses.remove(&request_id);
         }
@@ -452,7 +477,7 @@ impl FileTree for FrontTree {
 
 impl FrontTree {
     pub fn read_with_cancel(
-        &self,
+        &mut self,
         fid: Fid,
         offset: u64,
         count: u32,
@@ -464,19 +489,36 @@ impl FrontTree {
         }
     }
 
-    pub(crate) fn read_target(&self, fid: Fid) -> Result<ReadTarget> {
+    pub(crate) fn read_target(&mut self, fid: Fid) -> Result<ReadTarget> {
         let id = self
             .fids
             .get(&fid)
             .ok_or_else(|| Error::from_static(EBADFID))?
             .node;
-        let state = self.front.lock()?;
+        let mut state = self.front.lock()?;
         if matches!(state.node(id)?.body, Body::Rpc(_)) {
-            let request_id = self
-                .rpc_inflight
-                .get(&fid)
-                .copied()
-                .ok_or_else(|| Error::from_static("rpc read before write on this fid"))?;
+            let request_id = match self.rpc_inflight.get(&fid).copied() {
+                Some(request_id) => request_id,
+                None => {
+                    let buffer = self
+                        .rpc_buffers
+                        .remove(&fid)
+                        .ok_or_else(|| Error::from_static("rpc read before write on this fid"))?;
+                    let request_id = state.next_request_id;
+                    state.next_request_id = state.next_request_id.saturating_add(1);
+                    state.rpc_responses.insert(request_id, None);
+                    state.pending.push_back(IntakeRequest {
+                        request_id,
+                        prefix: buffer.prefix,
+                        bytes: buffer.bytes,
+                        context: buffer.context,
+                    });
+                    self.rpc_inflight.insert(fid, request_id);
+                    drop(state);
+                    self.front.shared.1.notify_all();
+                    request_id
+                }
+            };
             return Ok(ReadTarget::Rpc(request_id));
         }
         Ok(ReadTarget::Node(id))
@@ -490,12 +532,14 @@ impl FrontTree {
 impl Drop for FrontTree {
     fn drop(&mut self) {
         if self.rpc_inflight.is_empty() {
+            self.rpc_buffers.clear();
             return;
         }
         if let Ok(mut state) = self.front.lock() {
             for (_, request_id) in std::mem::take(&mut self.rpc_inflight) {
                 state.rpc_responses.remove(&request_id);
             }
+            self.rpc_buffers.clear();
             drop(state);
             self.front.shared.1.notify_all();
         }

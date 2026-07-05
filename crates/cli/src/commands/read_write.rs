@@ -140,9 +140,9 @@ pub(crate) fn rpc_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
 }
 
 fn rpc_exchange(client: &mut BoxedClient, fid: Fid, request: &[u8]) -> CliResult<()> {
-    let count = client.write_once(fid, 0, request)?;
+    let count = client.write(fid, 0, request)?;
     if count as usize != request.len() {
-        return Err(cli_error("rpc request exceeded a single 9P message"));
+        return Err(cli_error("short rpc request write"));
     }
     copy_fid_to_stdout(client, fid)?;
     Ok(())

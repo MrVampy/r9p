@@ -220,6 +220,11 @@ fn abi_roundtrip_over_tcp() {
         .write_once(rpc_fid, 0, rpc_query)
         .expect("write rpc request");
     assert_eq!(wrote as usize, rpc_query.len());
+    let rpc_reader = thread::spawn(move || {
+        client
+            .read(rpc_fid, 0, 4096)
+            .expect("read rpc response on same fid")
+    });
     let mut rpc_request_id = 0u64;
     let mut rpc_request_len = 0usize;
     assert_eq!(
@@ -247,9 +252,7 @@ fn abi_roundtrip_over_tcp() {
         },
         0
     );
-    let rpc_response = client
-        .read(rpc_fid, 0, 4096)
-        .expect("read rpc response on same fid");
+    let rpc_response = rpc_reader.join().expect("rpc reader join");
     assert_eq!(rpc_response, b"#M(\"count\" 37)".to_vec());
 
     assert_eq!(unsafe { r9p_front_stop(handle) }, 0);
@@ -396,6 +399,51 @@ fn abi_client_rpc_writes_and_reads_same_fid() {
     );
 
     assert_eq!(client.join().expect("client join"), b"pong".to_vec());
+    assert_eq!(unsafe { r9p_front_stop(handle) }, 0);
+    unsafe { r9p_front_free(handle) };
+}
+
+#[test]
+fn rpc_path_buffers_request_larger_than_negotiated_write_payload() {
+    assert_eq!(r9p_front_abi_version(), 15);
+    let handle = r9p_front_new();
+    let (rpc, rpc_len) = cstr("rpc");
+    assert_eq!(unsafe { r9p_front_register_rpc(handle, rpc, rpc_len) }, 0);
+    let (bind, bind_len) = cstr("127.0.0.1:0");
+    let mut port = 0u16;
+    assert_eq!(
+        unsafe { r9p_front_serve_tcp(handle, bind, bind_len, &mut port) },
+        0
+    );
+    let address = format!("127.0.0.1:{port}");
+    let request = vec![b'x'; 9500];
+    let expected = request.clone();
+    let client = thread::spawn(move || {
+        let mut client = Client::connect_tcp(&address, "codex", "/", 8192).expect("connect front");
+        assert_eq!(client.msize(), 8192);
+        client.rpc_path("/rpc", &request).expect("rpc path")
+    });
+
+    let mut request_id = 0u64;
+    let mut request_len = 0usize;
+    assert_eq!(
+        unsafe { r9p_front_next_request(handle, 1000, &mut request_id, &mut request_len) },
+        0
+    );
+    assert_eq!(request_prefix(handle, request_id), "rpc");
+    assert_eq!(request_len, expected.len());
+    let mut request = vec![0u8; request_len];
+    let copied =
+        unsafe { r9p_front_request_copy(handle, request_id, request.as_mut_ptr(), request.len()) };
+    assert_eq!(copied as usize, request_len);
+    assert_eq!(request, expected);
+    let (reply, reply_len) = cbytes(b"accepted");
+    assert_eq!(
+        unsafe { r9p_front_complete_request(handle, rpc, rpc_len, request_id, reply, reply_len) },
+        0
+    );
+
+    assert_eq!(client.join().expect("client join"), b"accepted".to_vec());
     assert_eq!(unsafe { r9p_front_stop(handle) }, 0);
     unsafe { r9p_front_free(handle) };
 }

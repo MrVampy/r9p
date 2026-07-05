@@ -1062,6 +1062,8 @@ fn dropping_tree_abandons_pending_rpc_response() -> Result<()> {
     let qids = walk_to(&mut tree, 1, 2, &["queries"]);
     tree.open(2, qids[0], ORDWR)?;
     tree.write(2, qids[0], 0, b"find markets")?;
+    let target = tree.read_target(2)?;
+    assert!(matches!(target, ReadTarget::Rpc(_)));
     let request = front
         .next_request(Duration::from_millis(200))?
         .expect("rpc request");
@@ -1095,6 +1097,8 @@ fn prefix_wait_tied_to_rpc_close_does_not_consume_later_requests() -> Result<()>
     let control_qids = walk_to(&mut control, 1, 2, &["control"]);
     control.open(2, control_qids[0], ORDWR)?;
     control.write(2, control_qids[0], 0, b"take relay")?;
+    let target = control.read_target(2)?;
+    assert!(matches!(target, ReadTarget::Rpc(_)));
     let control_request = front
         .next_request_for_prefix("control", Duration::from_millis(200))?
         .expect("control rpc request");
@@ -1170,6 +1174,8 @@ fn rpc_single_fid_request_response_roundtrip() -> Result<()> {
     tree.open(2, qids[0], ORDWR)?;
     let written = tree.write(2, qids[0], 0, b"find markets")?;
     assert_eq!(written as usize, "find markets".len());
+    let target = tree.read_target(2)?;
+    assert!(matches!(target, ReadTarget::Rpc(_)));
     let request = front
         .next_request(Duration::from_millis(200))?
         .expect("a pending rpc request");
@@ -1193,9 +1199,13 @@ fn rpc_request_carries_the_registered_path() -> Result<()> {
     let query_qids = walk_to(&mut tree, 1, 2, &["queries"]);
     tree.open(2, query_qids[0], ORDWR)?;
     tree.write(2, query_qids[0], 0, b"browse")?;
+    let query_target = tree.read_target(2)?;
+    assert!(matches!(query_target, ReadTarget::Rpc(_)));
     let candidate_qids = walk_to(&mut tree, 1, 3, &["candidates"]);
     tree.open(3, candidate_qids[0], ORDWR)?;
     tree.write(3, candidate_qids[0], 0, b"scan")?;
+    let candidate_target = tree.read_target(3)?;
+    assert!(matches!(candidate_target, ReadTarget::Rpc(_)));
     let first = front
         .next_request(Duration::from_millis(200))?
         .expect("first request");
@@ -1230,11 +1240,15 @@ fn rpc_second_request_on_same_fid_replaces_the_first() -> Result<()> {
     let qids = walk_to(&mut tree, 1, 2, &["queries"]);
     tree.open(2, qids[0], ORDWR)?;
     let _ = tree.write(2, qids[0], 0, b"first")?;
+    let target = tree.read_target(2)?;
+    assert!(matches!(target, ReadTarget::Rpc(_)));
     let first = front
         .next_request(Duration::from_millis(200))?
         .expect("first request");
     front.complete_request("queries", first.request_id, b"one")?;
     let _ = tree.write(2, qids[0], 0, b"second")?;
+    let target = tree.read_target(2)?;
+    assert!(matches!(target, ReadTarget::Rpc(_)));
     let second = front
         .next_request(Duration::from_millis(200))?
         .expect("second request");
@@ -1243,5 +1257,37 @@ fn rpc_second_request_on_same_fid_replaces_the_first() -> Result<()> {
     front.complete_request("queries", second.request_id, b"two")?;
     let response = tree.read(2, qids[0], 0, 4096)?;
     assert_eq!(response, ReadData::Bytes(b"two".to_vec()));
+    Ok(())
+}
+
+#[test]
+fn rpc_buffers_sequential_writes_until_read() -> Result<()> {
+    let front = Front::new();
+    front.register_rpc("queries")?;
+    let mut tree = front.tree();
+    tree.attach(1, b"claude", b"/")?;
+    let qids = walk_to(&mut tree, 1, 2, &["queries"]);
+    tree.open(2, qids[0], ORDWR)?;
+
+    let first = vec![b'a'; 4096];
+    let second = vec![b'b'; 4096];
+    let first_written = tree.write(2, qids[0], 0, &first)?;
+    assert_eq!(first_written as usize, first.len());
+    assert!(front.next_request(Duration::from_millis(0))?.is_none());
+    let second_written = tree.write(2, qids[0], first.len() as u64, &second)?;
+    assert_eq!(second_written as usize, second.len());
+    assert!(front.next_request(Duration::from_millis(0))?.is_none());
+
+    let target = tree.read_target(2)?;
+    assert!(matches!(target, ReadTarget::Rpc(_)));
+    let request = front
+        .next_request(Duration::from_millis(200))?
+        .expect("assembled rpc request");
+    let mut expected = first;
+    expected.extend(second);
+    assert_eq!(request.bytes, expected);
+    front.complete_request("queries", request.request_id, b"ok")?;
+    let response = tree.read(2, qids[0], 0, 4096)?;
+    assert_eq!(response, ReadData::Bytes(b"ok".to_vec()));
     Ok(())
 }

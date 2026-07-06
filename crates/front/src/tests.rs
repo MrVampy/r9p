@@ -605,21 +605,35 @@ fn retained_principal_roots_drop_stale_unames() -> Result<()> {
 }
 
 #[test]
-fn write_relay_returns_count_after_brain_accepts() -> Result<()> {
+fn write_relay_buffers_chunks_until_clunk() -> Result<()> {
     let front = Front::new();
     front.register_write_relay("control")?;
     front.set_wait_timeout(Duration::from_secs(5))?;
     let writer_front = front.clone();
+    let (write_tx, write_rx) = mpsc::channel();
+    let (proceed_tx, proceed_rx) = mpsc::channel();
     let (done_tx, done_rx) = mpsc::channel();
     let writer = thread::spawn(move || {
         let mut tree = writer_front.tree();
         tree.attach(1, b"alice", b"/")?;
         let qids = walk_to(&mut tree, 1, 2, &["control"]);
         tree.open(2, qids[0], OWRITE)?;
-        let result = tree.write(2, qids[0], 0, b"#M(\"command\" \"restart\")");
+        let first = tree.write(2, qids[0], 0, b"#M(\"command\" ")?;
+        let second = tree.write(2, qids[0], u64::from(first), b"\"restart\")")?;
+        write_tx.send((first, second)).expect("send write result");
+        proceed_rx.recv().expect("wait for clunk signal");
+        let result = tree.clunk(2, qids[0]);
         done_tx.send(result).expect("send writer result");
         Ok::<(), Error>(())
     });
+
+    let (first, second) = write_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("writer should accept chunks before clunk");
+    assert_eq!(first as usize, b"#M(\"command\" ".len());
+    assert_eq!(second as usize, b"\"restart\")".len());
+    assert!(front.next_request(Duration::from_millis(0))?.is_none());
+    proceed_tx.send(()).expect("signal clunk");
 
     let request = front
         .next_request(Duration::from_millis(200))?
@@ -633,10 +647,9 @@ fn write_relay_returns_count_after_brain_accepts() -> Result<()> {
         request.request_id,
         u32::try_from(request.bytes.len()).expect("request length"),
     )?;
-    let wrote = done_rx
+    done_rx
         .recv_timeout(Duration::from_secs(1))
         .expect("writer should finish")?;
-    assert_eq!(wrote as usize, request.bytes.len());
     writer.join().expect("writer join")?;
     Ok(())
 }
@@ -654,6 +667,7 @@ fn create_relay_returns_backend_qid_and_rebinds_fid_for_write() -> Result<()> {
         let qids = walk_to(&mut tree, 1, 2, &["srv"]);
         let opened = tree.create(2, qids[0], b"calendar", 0o666, OWRITE)?;
         let wrote = tree.write(2, opened.qid, 0, b"descriptor")?;
+        tree.clunk(2, opened.qid)?;
         done_tx
             .send((opened.qid.path, opened.qid.version, wrote))
             .expect("send writer result");
@@ -717,7 +731,11 @@ fn create_relay_returns_backend_qid_and_rebinds_fid_for_write() -> Result<()> {
     let qids = walk_to(&mut verifier, 1, 3, &["srv", "calendar"]);
     verifier.open(3, qids[1], OWRITE)?;
     let relay_front = front.clone();
-    let second_writer = thread::spawn(move || verifier.write(3, qids[1], 0, b"updated descriptor"));
+    let second_writer = thread::spawn(move || {
+        let wrote = verifier.write(3, qids[1], 0, b"updated descriptor")?;
+        verifier.clunk(3, qids[1])?;
+        Ok::<u32, Error>(wrote)
+    });
     let update = relay_front
         .next_request_for_prefix("srv", Duration::from_secs(1))?
         .expect("refreshed service channel must still relay writes");
@@ -747,6 +765,7 @@ fn create_relay_projects_slash_names_as_nested_paths() -> Result<()> {
         let qids = walk_to(&mut tree, 1, 2, &["srv"]);
         let opened = tree.create(2, qids[0], b"infra/credentials", 0o666, OWRITE)?;
         let wrote = tree.write(2, opened.qid, 0, b"descriptor")?;
+        tree.clunk(2, opened.qid)?;
         done_tx
             .send((opened.qid.path, opened.qid.version, wrote))
             .expect("send writer result");
@@ -869,8 +888,10 @@ fn write_relay_reports_unavailable_when_brain_is_absent() -> Result<()> {
     tree.attach(1, b"alice", b"/")?;
     let qids = walk_to(&mut tree, 1, 2, &["control"]);
     tree.open(2, qids[0], OWRITE)?;
+    let wrote = tree.write(2, qids[0], 0, b"#M(\"command\" \"restart\")")?;
+    assert_eq!(wrote as usize, b"#M(\"command\" \"restart\")".len());
     let error = tree
-        .write(2, qids[0], 0, b"#M(\"command\" \"restart\")")
+        .clunk(2, qids[0])
         .expect_err("write relay without brain must fail");
     assert_eq!(error.message(), b"write relay unavailable");
     assert!(front.next_request(Duration::from_millis(0))?.is_none());
@@ -883,17 +904,24 @@ fn write_relay_can_return_brain_denial() -> Result<()> {
     front.register_write_relay("control")?;
     front.set_wait_timeout(Duration::from_secs(5))?;
     let writer_front = front.clone();
+    let (write_tx, write_rx) = mpsc::channel();
     let (done_tx, done_rx) = mpsc::channel();
     let writer = thread::spawn(move || {
         let mut tree = writer_front.tree();
         tree.attach(1, b"alice", b"/")?;
         let qids = walk_to(&mut tree, 1, 2, &["control"]);
         tree.open(2, qids[0], OWRITE)?;
-        let result = tree.write(2, qids[0], 0, b"#M(\"command\" \"restart\")");
+        let wrote = tree.write(2, qids[0], 0, b"#M(\"command\" \"restart\")")?;
+        write_tx.send(wrote).expect("send write result");
+        let result = tree.clunk(2, qids[0]);
         done_tx.send(result).expect("send writer result");
         Ok::<(), Error>(())
     });
 
+    let wrote = write_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("writer should accept write before clunk");
+    assert_eq!(wrote as usize, b"#M(\"command\" \"restart\")".len());
     let request = front
         .next_request(Duration::from_millis(200))?
         .expect("write relay request");
@@ -1117,7 +1145,9 @@ fn prefix_wait_tied_to_rpc_close_does_not_consume_later_requests() -> Result<()>
         tree.attach(1, b"alice", b"/")?;
         let relay_qids = walk_to(&mut tree, 1, 2, &["relay"]);
         tree.open(2, relay_qids[0], OWRITE)?;
-        tree.write(2, relay_qids[0], 0, b"still owned")
+        let wrote = tree.write(2, relay_qids[0], 0, b"still owned")?;
+        tree.clunk(2, relay_qids[0])?;
+        Ok::<u32, Error>(wrote)
     });
     let request = front
         .next_request_for_prefix("relay", Duration::from_millis(200))?

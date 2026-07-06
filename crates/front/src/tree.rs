@@ -19,6 +19,7 @@ pub struct FrontTree {
     open_modes: BTreeMap<Fid, u8>,
     rpc_buffers: BTreeMap<Fid, RpcBuffer>,
     rpc_inflight: BTreeMap<Fid, u64>,
+    write_relay_buffers: BTreeMap<Fid, WriteRelayBuffer>,
 }
 
 impl FrontTree {
@@ -30,6 +31,7 @@ impl FrontTree {
             open_modes: BTreeMap::new(),
             rpc_buffers: BTreeMap::new(),
             rpc_inflight: BTreeMap::new(),
+            write_relay_buffers: BTreeMap::new(),
         }
     }
 }
@@ -45,6 +47,12 @@ struct FidBinding {
 }
 
 struct RpcBuffer {
+    prefix: String,
+    bytes: Vec<u8>,
+    context: RequestContext,
+}
+
+struct WriteRelayBuffer {
     prefix: String,
     bytes: Vec<u8>,
     context: RequestContext,
@@ -309,21 +317,34 @@ impl FileTree for FrontTree {
             }
         });
         if let Some(prefix) = write_relay {
-            let request_id = state.next_request_id;
-            state.next_request_id = state.next_request_id.saturating_add(1);
-            state.write_relay_responses.insert(request_id, None);
-            state.pending.push_back(IntakeRequest {
-                request_id,
-                prefix,
-                bytes: data.to_vec(),
-                context: request_context,
-            });
-            drop(state);
-            self.front.shared.1.notify_all();
-            let state = self.front.lock()?;
-            return self
-                .front
-                .wait_write_relay(state, request_id, data.len(), None);
+            if let Some(buffer) = self.write_relay_buffers.get_mut(&fid) {
+                if buffer.prefix != prefix {
+                    return Err(Error::from_static(
+                        "write relay path changed while buffering",
+                    ));
+                }
+                let expected = buffer
+                    .context
+                    .offset
+                    .checked_add(
+                        u64::try_from(buffer.bytes.len()).map_err(|_| Error::from_static(EPERM))?,
+                    )
+                    .ok_or_else(|| Error::from_static(EPERM))?;
+                if offset != expected {
+                    return Err(Error::from_static("write relay offset is not sequential"));
+                }
+                buffer.bytes.extend_from_slice(data);
+            } else {
+                self.write_relay_buffers.insert(
+                    fid,
+                    WriteRelayBuffer {
+                        prefix,
+                        bytes: data.to_vec(),
+                        context: request_context,
+                    },
+                );
+            }
+            return u32::try_from(data.len()).map_err(|_| Error::from_static(EPERM));
         }
         let intake_id = match state.node(id)?.body {
             Body::IntakeNew(intake_id) => intake_id,
@@ -363,6 +384,11 @@ impl FileTree for FrontTree {
     }
 
     fn clunk(&mut self, fid: Fid, _qid: Qid) -> Result<()> {
+        let write_relay_result = self
+            .write_relay_buffers
+            .remove(&fid)
+            .map(|buffer| self.commit_write_relay(buffer))
+            .unwrap_or(Ok(()));
         self.fids.remove(&fid);
         self.open_modes.remove(&fid);
         self.rpc_buffers.remove(&fid);
@@ -373,7 +399,7 @@ impl FileTree for FrontTree {
                 self.front.shared.1.notify_all();
             }
         }
-        Ok(())
+        write_relay_result
     }
 
     fn remove(&mut self, fid: Fid, qid: Qid) -> Result<()> {
@@ -423,6 +449,7 @@ impl FileTree for FrontTree {
         self.fids.remove(&fid);
         self.open_modes.remove(&fid);
         self.rpc_buffers.remove(&fid);
+        self.write_relay_buffers.remove(&fid);
         if let Some(request_id) = self.rpc_inflight.remove(&fid) {
             state.rpc_responses.remove(&request_id);
         }
@@ -527,12 +554,34 @@ impl FrontTree {
     pub(crate) fn front(&self) -> Front {
         self.front.clone()
     }
+
+    fn commit_write_relay(&self, buffer: WriteRelayBuffer) -> Result<()> {
+        let mut state = self.front.lock()?;
+        let request_id = state.next_request_id;
+        state.next_request_id = state.next_request_id.saturating_add(1);
+        state.write_relay_responses.insert(request_id, None);
+        let data_len = buffer.bytes.len();
+        state.pending.push_back(IntakeRequest {
+            request_id,
+            prefix: buffer.prefix,
+            bytes: buffer.bytes,
+            context: buffer.context,
+        });
+        drop(state);
+        self.front.shared.1.notify_all();
+
+        let state = self.front.lock()?;
+        self.front
+            .wait_write_relay(state, request_id, data_len, None)
+            .map(|_| ())
+    }
 }
 
 impl Drop for FrontTree {
     fn drop(&mut self) {
         if self.rpc_inflight.is_empty() {
             self.rpc_buffers.clear();
+            self.write_relay_buffers.clear();
             return;
         }
         if let Ok(mut state) = self.front.lock() {
@@ -540,6 +589,7 @@ impl Drop for FrontTree {
                 state.rpc_responses.remove(&request_id);
             }
             self.rpc_buffers.clear();
+            self.write_relay_buffers.clear();
             drop(state);
             self.front.shared.1.notify_all();
         }

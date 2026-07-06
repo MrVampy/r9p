@@ -584,6 +584,7 @@ fn abi_door_rehearsal_principal_root_and_write_relay() {
         .write_once(control_fid, 0, b"#M(\"command\" \"restart\")")
         .expect("write control");
     assert_eq!(wrote as usize, b"#M(\"command\" \"restart\")".len());
+    alice.clunk(control_fid).expect("clunk control");
     brain.join().expect("brain join");
 
     assert_eq!(unsafe { r9p_front_stop(handle) }, 0);
@@ -737,6 +738,7 @@ fn abi_v11_pushed_metadata_aname_gate_and_request_context() {
         .write_once(control_fid, 9, b"#M(\"command\" \"restart\")")
         .expect("write control");
     assert_eq!(wrote as usize, b"#M(\"command\" \"restart\")".len());
+    alice.clunk(control_fid).expect("clunk control");
     brain.join().expect("brain join");
 
     assert_eq!(unsafe { r9p_front_stop(handle) }, 0);
@@ -885,6 +887,7 @@ fn door_rehearsal_relayed_write_returns_count_after_brain_accepts() {
         .write_once(control_fid, 0, b"#M(\"command\" \"restart\")")
         .expect("write control");
     assert_eq!(wrote as usize, b"#M(\"command\" \"restart\")".len());
+    client.clunk(control_fid).expect("clunk control");
 
     brain_thread.join().expect("brain thread join");
     serve.shutdown();
@@ -905,8 +908,12 @@ fn door_rehearsal_relayed_write_reports_unavailable_when_brain_absent() {
     let mut client = Client::connect_tcp(&address, "alice", "/", 65536).expect("connect front");
     let control_fid = client.walk_path("/control").expect("walk control");
     client.open(control_fid, OWRITE).expect("open control");
-    let error = client
+    let wrote = client
         .write_once(control_fid, 0, b"#M(\"command\" \"restart\")")
+        .expect("write control");
+    assert_eq!(wrote as usize, b"#M(\"command\" \"restart\")".len());
+    let error = client
+        .clunk(control_fid)
         .expect_err("brain-absent relay must be unavailable");
     assert_eq!(error.message(), b"write relay unavailable");
     assert!(front

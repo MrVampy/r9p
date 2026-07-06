@@ -1,7 +1,11 @@
 use std::io::Read;
 
-use r9p::blocking::{BoxedClient, ORDWR, OREAD, OTRUNC, OWRITE};
 use r9p::fid::Fid;
+use r9p::{
+    blocking::{BoxedClient, ORDWR, OREAD, OTRUNC, OWRITE},
+    qid::{DMDIR, QTDIR},
+    stat::Stat,
+};
 
 use crate::commands::machine::machine_write_cmd;
 use crate::commands::mutate::split_parent;
@@ -131,12 +135,39 @@ pub(crate) fn rpc_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
         config: operation_config(config),
         path: args[0].clone(),
     };
-    let (mut client, fid) = open_path(&target, ORDWR)?;
+    let (mut client, fid) = open_rpc_path(&target)?;
     let result = rpc_exchange(&mut client, fid, &request);
     let clunk = client.clunk(fid);
     result?;
     clunk?;
     Ok(())
+}
+
+fn open_rpc_path(target: &Target) -> CliResult<(BoxedClient, Fid)> {
+    let (mut client, path) = connect_path(target)?;
+    let fid = client.walk_path(&path)?;
+    let stat = client.stat(fid)?;
+    match client.open(fid, ORDWR) {
+        Ok(_) => Ok((client, fid)),
+        Err(error) => {
+            let _ = client.clunk(fid);
+            if let Some(hint) = rpc_open_hint(&target.path, &stat) {
+                Err(cli_error(format!("{hint}: {error}")))
+            } else {
+                Err(error.into())
+            }
+        }
+    }
+}
+
+fn rpc_open_hint(path: &str, stat: &Stat) -> Option<String> {
+    if stat.qid.qtype & QTDIR != 0 || stat.mode & DMDIR != 0 {
+        return Some(format!("{path} is a directory; use ls {path}"));
+    }
+    if stat.mode & 0o222 == 0 {
+        return Some(format!("{path} is a read-only file; use read {path}"));
+    }
+    None
 }
 
 fn rpc_exchange(client: &mut BoxedClient, fid: Fid, request: &[u8]) -> CliResult<()> {
@@ -146,6 +177,39 @@ fn rpc_exchange(client: &mut BoxedClient, fid: Fid, request: &[u8]) -> CliResult
     }
     copy_fid_to_stdout(client, fid)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rpc_open_hint;
+    use r9p::{
+        qid::{Qid, DMDIR},
+        stat::Stat,
+    };
+
+    #[test]
+    fn rpc_hint_points_read_only_files_at_read() {
+        let stat = Stat::new("status", Qid::file(7), 0o444);
+        assert_eq!(
+            rpc_open_hint("/sources/x/status", &stat),
+            Some("/sources/x/status is a read-only file; use read /sources/x/status".to_string())
+        );
+    }
+
+    #[test]
+    fn rpc_hint_points_directories_at_ls() {
+        let stat = Stat::new("sources", Qid::dir(7), DMDIR | 0o555);
+        assert_eq!(
+            rpc_open_hint("/sources", &stat),
+            Some("/sources is a directory; use ls /sources".to_string())
+        );
+    }
+
+    #[test]
+    fn rpc_hint_leaves_writeable_files_to_protocol_errors() {
+        let stat = Stat::new("run", Qid::file(7), 0o600);
+        assert_eq!(rpc_open_hint("/operations/srvcheck/run", &stat), None);
+    }
 }
 
 pub(crate) fn write_at_cmd(config: Config, args: Vec<String>) -> CliResult<()> {

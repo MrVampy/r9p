@@ -45,9 +45,45 @@
               runHook postInstall
             '';
           };
+          beamPort = pkgs.rustPlatform.buildRustPackage {
+            pname = "r9p-beam-port";
+            version = "0.1.0";
+            src = self;
+            cargoLock.lockFile = ./Cargo.lock;
+            cargoBuildFlags = [ "-p" "beam-port" ];
+            nativeBuildInputs = with pkgs; [
+              clang
+              mold
+              binutils
+            ];
+            installPhase = ''
+              runHook preInstall
+              install -Dm755 target/${pkgs.stdenv.hostPlatform.rust.rustcTarget}/release/r9p-beam-port \
+                "$out/bin/r9p-beam-port"
+              runHook postInstall
+            '';
+          };
+          beamGleam = pkgs.stdenvNoCC.mkDerivation {
+            pname = "r9p-beam-gleam";
+            version = "0.1.0";
+            src = ./bindings/gleam;
+            dontBuild = true;
+            installPhase = ''
+              runHook preInstall
+              mkdir -p "$out/share/r9p/beam/gleam"
+              cp -R . "$out/share/r9p/beam/gleam/"
+              runHook postInstall
+            '';
+          };
         in
         {
           packages.default = r9p;
+          packages.beam = pkgs.symlinkJoin {
+            name = "r9p-beam";
+            paths = [ beamPort beamGleam ];
+          };
+          packages.beam-gleam = beamGleam;
+          packages.beam-port = beamPort;
           packages.front = front;
           packages.r9p = r9p;
 

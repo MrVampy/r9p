@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/beam-port",
     "crates/core",
     "crates/cli",
     "crates/fs",

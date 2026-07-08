@@ -16,4 +16,5 @@ name = "r9p-beam-port"
 path = "src/main.rs"
 
 [dependencies]
+front = { path = "../front" }
 r9p.workspace = true

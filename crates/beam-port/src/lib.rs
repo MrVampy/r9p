@@ -1,3 +1,4 @@
+mod front_port;
 mod hex;
 
 use r9p::{
@@ -25,6 +26,7 @@ struct TargetKey {
 #[derive(Default)]
 struct PeerClientServer {
     clients: HashMap<TargetKey, BoxedClient>,
+    fronts: front_port::FrontManager,
 }
 
 pub fn run_stdio() -> Result<(), String> {
@@ -89,6 +91,7 @@ impl PeerClientServer {
                 let data = hex::decode(data)?;
                 self.with_client(&key, |client| rpc_output(client, &path, &data))
             }
+            [operation, ..] if operation.starts_with("front-") => self.fronts.handle(&fields),
             _ => Err("invalid_r9p_beam_port_request".to_string()),
         }
     }
@@ -241,13 +244,13 @@ fn format_stat(prefix: &str, stat: &Stat) -> String {
     )
 }
 
-fn parse_u64(field: &str, value: &str) -> Result<u64, String> {
+pub(crate) fn parse_u64(field: &str, value: &str) -> Result<u64, String> {
     value
         .parse::<u64>()
         .map_err(|_| format!("invalid_{field}:{value}"))
 }
 
-fn parse_u32(field: &str, value: &str) -> Result<u32, String> {
+pub(crate) fn parse_u32(field: &str, value: &str) -> Result<u32, String> {
     value
         .parse::<u32>()
         .map_err(|_| format!("invalid_{field}:{value}"))
@@ -333,6 +336,88 @@ mod tests {
         let _ = fs::remove_file(socket_path);
     }
 
+    #[test]
+    fn front_commands_serve_static_file() {
+        let mut server = PeerClientServer::default();
+        let front_id = parse_front_id(&server.handle_line("front-new").expect("front-new"));
+        let set = format!(
+            "front-set\t{front_id}\t{}\t{}",
+            hex_text("status"),
+            hex::encode(b"running")
+        );
+        assert_eq!(
+            server.handle_line(&set).expect("front-set"),
+            "front-set".to_string()
+        );
+        let serve = format!("front-serve-tcp\t{front_id}\t{}", hex_text("127.0.0.1:0"));
+        let addr = parse_front_addr(&server.handle_line(&serve).expect("front serve"));
+
+        let mut client =
+            blocking::Client::connect_tcp(&addr, "codex", "/", 65_536).expect("connect front");
+        let body = client.read_path("status").expect("read status");
+        assert_eq!(body, b"running");
+
+        let stop = format!("front-stop\t{front_id}");
+        assert_eq!(
+            server.handle_line(&stop).expect("front-stop"),
+            "front-stop".to_string()
+        );
+    }
+
+    #[test]
+    fn front_commands_roundtrip_rpc_request() {
+        let mut server = PeerClientServer::default();
+        let front_id = parse_front_id(&server.handle_line("front-new").expect("front-new"));
+        let register = format!(
+            "front-register-rpc\t{front_id}\t{}",
+            hex_text("declaration")
+        );
+        assert_eq!(
+            server.handle_line(&register).expect("front-register-rpc"),
+            "front-register-rpc".to_string()
+        );
+        let serve = format!("front-serve-tcp\t{front_id}\t{}", hex_text("127.0.0.1:0"));
+        let addr = parse_front_addr(&server.handle_line(&serve).expect("front serve"));
+
+        let client = thread::spawn(move || {
+            let mut client =
+                blocking::Client::connect_tcp(&addr, "codex", "/", 65_536).expect("connect front");
+            client
+                .rpc_path("declaration", b"compile this")
+                .expect("rpc declaration")
+        });
+
+        let next = format!("front-next-request\t{front_id}\t1000");
+        let request = server.handle_line(&next).expect("front-next-request");
+        let fields = request.split('\t').collect::<Vec<_>>();
+        assert_eq!(fields[0], "front-request");
+        assert_eq!(
+            hex::decode_text(fields[1]).expect("prefix"),
+            "declaration".to_string()
+        );
+        assert_eq!(hex::decode(fields[3]).expect("body"), b"compile this");
+
+        let complete = format!(
+            "front-complete-request\t{front_id}\t{}\t{}\t{}",
+            fields[1],
+            fields[2],
+            hex::encode(b"compiled")
+        );
+        assert_eq!(
+            server
+                .handle_line(&complete)
+                .expect("front-complete-request"),
+            "front-complete-request".to_string()
+        );
+        assert_eq!(client.join().expect("client join"), b"compiled");
+
+        let stop = format!("front-stop\t{front_id}");
+        assert_eq!(
+            server.handle_line(&stop).expect("front-stop"),
+            "front-stop".to_string()
+        );
+    }
+
     fn temp_socket_path(label: &str) -> std::path::PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -342,5 +427,21 @@ mod tests {
             "r9p-beam-port-{label}-{}-{nanos}.sock",
             std::process::id()
         ))
+    }
+
+    fn hex_text(value: &str) -> String {
+        hex::encode(value.as_bytes())
+    }
+
+    fn parse_front_id(output: &str) -> u64 {
+        let fields = output.split('\t').collect::<Vec<_>>();
+        assert_eq!(fields[0], "front");
+        fields[1].parse::<u64>().expect("front id")
+    }
+
+    fn parse_front_addr(output: &str) -> String {
+        let fields = output.split('\t').collect::<Vec<_>>();
+        assert_eq!(fields[0], "front-serve-tcp");
+        hex::decode_text(fields[1]).expect("front address")
     }
 }

@@ -4,7 +4,7 @@ import gleam/list
 import gleam/result
 import gleam/string
 import r9p/codec
-import r9p/stat.{type Stat}
+import r9p/stat as r9p_stat
 
 pub const default_msize: Int = 65_536
 
@@ -18,6 +18,14 @@ pub type Hand {
 
 pub type Target {
   Target(bind: String, uname: String, aname: String, msize: Int)
+}
+
+pub type VersionInfo {
+  VersionInfo(version: String, msize: Int)
+}
+
+pub type CreateInfo {
+  CreateInfo(qid: r9p_stat.Qid, iounit: Int)
 }
 
 pub fn hand(executable: String) -> Hand {
@@ -45,20 +53,41 @@ pub fn target_with_msize(
   Target(bind:, uname:, aname:, msize:)
 }
 
-pub fn stat(hand: Hand, target: Target, path: String) -> Result(Stat, String) {
+pub fn version(hand: Hand, target: Target) -> Result(VersionInfo, String) {
+  use line <- result.try(run(hand, target, "version", []))
+  case codec.fields(line) {
+    ["version", version_hex, raw_msize] -> {
+      use version <- result.try(codec.decode_text(version_hex))
+      use msize <- result.try(codec.parse_int("msize", raw_msize))
+      Ok(VersionInfo(version:, msize:))
+    }
+    _ -> Error("r9p_beam_unexpected_version_output:" <> line)
+  }
+}
+
+pub fn attach(hand: Hand, target: Target) -> Result(r9p_stat.Qid, String) {
+  use line <- result.try(run(hand, target, "attach", []))
+  parse_qid_line("attach", line)
+}
+
+pub fn stat(
+  hand: Hand,
+  target: Target,
+  path: String,
+) -> Result(r9p_stat.Stat, String) {
   use line <- result.try(run(hand, target, "stat", [text(path)]))
-  stat.parse_line("stat", line)
+  r9p_stat.parse_line("stat", line)
 }
 
 pub fn list(
   hand: Hand,
   target: Target,
   path: String,
-) -> Result(List(Stat), String) {
+) -> Result(List(r9p_stat.Stat), String) {
   use body <- result.try(run(hand, target, "list", [text(path)]))
   body
   |> codec.lines
-  |> stat.parse_lines
+  |> r9p_stat.parse_lines
 }
 
 pub fn read(
@@ -140,6 +169,43 @@ pub fn rpc_text(
   |> result.map_error(fn(_) { "r9p_beam_rpc_non_utf8:" <> path })
 }
 
+pub fn create(
+  hand: Hand,
+  target: Target,
+  path: String,
+  perm: Int,
+  mode: Int,
+) -> Result(CreateInfo, String) {
+  use line <- result.try(
+    run(hand, target, "create", [
+      text(path),
+      int.to_string(perm),
+      int.to_string(mode),
+    ]),
+  )
+  case codec.fields(line) {
+    ["create", raw_qtype, raw_version, raw_path, raw_iounit] -> {
+      use qtype <- result.try(codec.parse_int("qid_qtype", raw_qtype))
+      use version <- result.try(codec.parse_int("qid_version", raw_version))
+      use path <- result.try(codec.parse_int("qid_path", raw_path))
+      use iounit <- result.try(codec.parse_int("iounit", raw_iounit))
+      Ok(CreateInfo(
+        qid: r9p_stat.Qid(qtype: qtype, version: version, path: path),
+        iounit: iounit,
+      ))
+    }
+    _ -> Error("r9p_beam_unexpected_create_output:" <> line)
+  }
+}
+
+pub fn remove(hand: Hand, target: Target, path: String) -> Result(Nil, String) {
+  use line <- result.try(run(hand, target, "remove", [text(path)]))
+  case codec.fields(line) {
+    ["remove"] -> Ok(Nil)
+    _ -> Error("r9p_beam_unexpected_remove_output:" <> line)
+  }
+}
+
 fn run(
   hand: Hand,
   target: Target,
@@ -206,6 +272,21 @@ fn parse_rpc_line(line: String) -> Result(BitArray, String) {
       }
     }
     _ -> Error("r9p_beam_unexpected_rpc_output:" <> line)
+  }
+}
+
+fn parse_qid_line(
+  prefix: String,
+  line: String,
+) -> Result(r9p_stat.Qid, String) {
+  case codec.fields(line) {
+    [actual, raw_qtype, raw_version, raw_path] if actual == prefix -> {
+      use qtype <- result.try(codec.parse_int("qid_qtype", raw_qtype))
+      use version <- result.try(codec.parse_int("qid_version", raw_version))
+      use path <- result.try(codec.parse_int("qid_path", raw_path))
+      Ok(r9p_stat.Qid(qtype: qtype, version: version, path: path))
+    }
+    _ -> Error("r9p_beam_unexpected_" <> prefix <> "_output:" <> line)
   }
 }
 

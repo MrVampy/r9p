@@ -3,7 +3,10 @@ mod hex;
 
 use r9p::{
     blocking::{self, BoxedClient, ReadWrite},
+    client::{Client as ProtocolClient, ClientResponse, Completion},
+    codec,
     error::{Error, Result as R9pResult},
+    qid::Qid,
     stat::Stat,
 };
 use std::{
@@ -54,6 +57,14 @@ impl PeerClientServer {
             .split('\t')
             .collect::<Vec<_>>();
         match fields.as_slice() {
+            ["version", bind, uname, aname, msize] => {
+                let key = target_key(bind, uname, aname, msize)?;
+                version_probe_output(&key.bind, key.msize).map_err(|error| error.to_string())
+            }
+            ["attach", bind, uname, aname, msize] => {
+                let key = target_key(bind, uname, aname, msize)?;
+                self.with_client_retry(&key, attach_output)
+            }
             ["stat", bind, uname, aname, msize, path] => {
                 let key = target_key(bind, uname, aname, msize)?;
                 let path = hex::decode_text(path)?;
@@ -90,6 +101,18 @@ impl PeerClientServer {
                 let path = hex::decode_text(path)?;
                 let data = hex::decode(data)?;
                 self.with_client(&key, |client| rpc_output(client, &path, &data))
+            }
+            ["create", bind, uname, aname, msize, path, perm, mode] => {
+                let key = target_key(bind, uname, aname, msize)?;
+                let path = hex::decode_text(path)?;
+                let perm = parse_u32("perm", perm)?;
+                let mode = parse_u8("mode", mode)?;
+                self.with_client(&key, |client| create_output(client, &path, perm, mode))
+            }
+            ["remove", bind, uname, aname, msize, path] => {
+                let key = target_key(bind, uname, aname, msize)?;
+                let path = hex::decode_text(path)?;
+                self.with_client(&key, |client| remove_output(client, &path))
             }
             [operation, ..] if operation.starts_with("front-") => self.fronts.handle(&fields),
             _ => Err("invalid_r9p_beam_port_request".to_string()),
@@ -163,6 +186,30 @@ fn connect_stream(bind: &str) -> R9pResult<Box<dyn ReadWrite>> {
     Ok(Box::new(stream))
 }
 
+fn version_probe_output(bind: &str, msize: u32) -> R9pResult<String> {
+    let mut stream = connect_stream(bind)?;
+    let mut protocol = ProtocolClient::new();
+    let request = protocol.version_request(msize);
+    codec::write_tmessage(&mut stream, &request)?;
+    let response = codec::read_rmessage(&mut stream)?
+        .ok_or_else(|| Error::from("9P transport closed before version response"))?;
+
+    match protocol.receive(response)? {
+        ClientResponse::Completion {
+            completion: Completion::Version { msize, version },
+            ..
+        } => Ok(format!("version\t{}\t{msize}", hex::encode(&version))),
+        ClientResponse::Error { ename, .. } => Err(Error::new(ename)),
+        other => Err(Error::from(format!(
+            "unexpected version response: {other:?}"
+        ))),
+    }
+}
+
+fn attach_output(client: &mut BoxedClient) -> R9pResult<String> {
+    Ok(format_qid("attach", client.root_qid()))
+}
+
 fn stat_output(client: &mut BoxedClient, path: &str) -> R9pResult<String> {
     client
         .stat_path(path)
@@ -215,6 +262,31 @@ fn rpc_output(client: &mut BoxedClient, path: &str, data: &[u8]) -> R9pResult<St
         .map(|bytes| format!("rpc\t{}\t{}", bytes.len(), hex::encode(&bytes)))
 }
 
+fn create_output(client: &mut BoxedClient, path: &str, perm: u32, mode: u8) -> R9pResult<String> {
+    let (parent, name) = split_parent(path).map_err(Error::from)?;
+    let parent_fid = client.walk_path(&parent)?;
+    let result: R9pResult<String> = (|| {
+        let (fid, qid) = client.create(parent_fid, name.as_bytes(), perm, mode)?;
+        let iounit = r9p::codec::max_write_payload(client.msize());
+        let output = format!(
+            "create\t{}\t{}\t{}\t{}",
+            qid.qtype, qid.version, qid.path, iounit
+        );
+        client.clunk(fid)?;
+        Ok(output)
+    })();
+    let parent_clunk = client.clunk(parent_fid);
+    let output = result?;
+    parent_clunk?;
+    Ok(output)
+}
+
+fn remove_output(client: &mut BoxedClient, path: &str) -> R9pResult<String> {
+    let fid = client.walk_path(path)?;
+    client.remove(fid)?;
+    Ok("remove".to_string())
+}
+
 fn target_key(bind: &str, uname: &str, aname: &str, msize: &str) -> Result<TargetKey, String> {
     Ok(TargetKey {
         bind: hex::decode_text(bind)?,
@@ -244,6 +316,10 @@ fn format_stat(prefix: &str, stat: &Stat) -> String {
     )
 }
 
+fn format_qid(prefix: &str, qid: Qid) -> String {
+    format!("{}\t{}\t{}\t{}", prefix, qid.qtype, qid.version, qid.path)
+}
+
 pub(crate) fn parse_u64(field: &str, value: &str) -> Result<u64, String> {
     value
         .parse::<u64>()
@@ -254,6 +330,28 @@ pub(crate) fn parse_u32(field: &str, value: &str) -> Result<u32, String> {
     value
         .parse::<u32>()
         .map_err(|_| format!("invalid_{field}:{value}"))
+}
+
+pub(crate) fn parse_u8(field: &str, value: &str) -> Result<u8, String> {
+    value
+        .parse::<u8>()
+        .map_err(|_| format!("invalid_{field}:{value}"))
+}
+
+fn split_parent(path: &str) -> Result<(String, String), String> {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Err("cannot_create_root".to_string());
+    }
+    let (parent, name) = match trimmed.rsplit_once('/') {
+        Some(("", name)) => ("/".to_string(), name.to_string()),
+        Some((parent, name)) => (parent.to_string(), name.to_string()),
+        None => (".".to_string(), trimmed.to_string()),
+    };
+    if name.is_empty() || name == "." || name == ".." {
+        return Err(format!("bad_create_name:{name}"));
+    }
+    Ok((parent, name))
 }
 
 fn retryable_client_error(reason: &str) -> bool {
@@ -314,6 +412,19 @@ mod tests {
     }
 
     #[test]
+    fn split_parent_rejects_invalid_paths() {
+        assert_eq!(
+            split_parent("/srv/example"),
+            Ok(("/srv".to_string(), "example".to_string()))
+        );
+        assert_eq!(split_parent("/"), Err("cannot_create_root".to_string()));
+        assert_eq!(
+            split_parent("/srv/.."),
+            Err("bad_create_name:..".to_string())
+        );
+    }
+
+    #[test]
     fn connect_stream_accepts_unix_colon_bind() {
         let socket_path = temp_socket_path("colon-bind");
         let _ = fs::remove_file(&socket_path);
@@ -334,6 +445,39 @@ mod tests {
         let joined = handle.join();
         assert!(joined.is_ok());
         let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
+    fn client_commands_report_version_and_attach() {
+        let mut server = PeerClientServer::default();
+        let front_id = parse_front_id(&server.handle_line("front-new").expect("front-new"));
+        let serve = format!("front-serve-tcp\t{front_id}\t{}", hex_text("127.0.0.1:0"));
+        let addr = parse_front_addr(&server.handle_line(&serve).expect("front serve"));
+        let target = target_fields(&addr);
+
+        let version = server
+            .handle_line(&format!("version\t{target}"))
+            .expect("version");
+        let version_fields = version.split('\t').collect::<Vec<_>>();
+        assert_eq!(version_fields[0], "version");
+        assert_eq!(
+            hex::decode_text(version_fields[1]).expect("version text"),
+            "9P2000"
+        );
+        assert_eq!(version_fields[2], "65536");
+
+        let attach = server
+            .handle_line(&format!("attach\t{target}"))
+            .expect("attach");
+        let attach_fields = attach.split('\t').collect::<Vec<_>>();
+        assert_eq!(attach_fields[0], "attach");
+        assert_eq!(attach_fields.len(), 4);
+
+        let stop = format!("front-stop\t{front_id}");
+        assert_eq!(
+            server.handle_line(&stop).expect("front-stop"),
+            "front-stop".to_string()
+        );
     }
 
     #[test]
@@ -443,5 +587,14 @@ mod tests {
         let fields = output.split('\t').collect::<Vec<_>>();
         assert_eq!(fields[0], "front-serve-tcp");
         hex::decode_text(fields[1]).expect("front address")
+    }
+
+    fn target_fields(bind: &str) -> String {
+        format!(
+            "{}\t{}\t{}\t65536",
+            hex_text(bind),
+            hex_text("codex"),
+            hex_text("/")
+        )
     }
 }

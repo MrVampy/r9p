@@ -323,8 +323,16 @@ impl<S: Read + Write> Client<S> {
             Ok(_) => self.write(fid, offset, data),
             Err(error) => Err(error),
         };
-        let _ = self.clunk(fid);
-        result
+        match result {
+            Ok(count) => {
+                self.clunk(fid)?;
+                Ok(count)
+            }
+            Err(error) => {
+                let _ = self.clunk(fid);
+                Err(error)
+            }
+        }
     }
 
     pub fn rpc_path(&mut self, path: &str, data: &[u8]) -> Result<Vec<u8>> {

@@ -24,8 +24,10 @@ type TestResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + S
 struct MemoryTree {
     root: Qid,
     hello: Qid,
+    command: Qid,
     nested: Qid,
     nested_note: Qid,
+    clunk_error_on_command: bool,
 }
 
 impl MemoryTree {
@@ -33,8 +35,17 @@ impl MemoryTree {
         Self {
             root: Qid::dir(1),
             hello: Qid::file(2),
-            nested: Qid::dir(3),
-            nested_note: Qid::file(4),
+            command: Qid::file(3),
+            nested: Qid::dir(4),
+            nested_note: Qid::file(5),
+            clunk_error_on_command: false,
+        }
+    }
+
+    fn with_command_clunk_error() -> Self {
+        Self {
+            clunk_error_on_command: true,
+            ..Self::new()
         }
     }
 }
@@ -58,8 +69,9 @@ impl FileTree for MemoryTree {
                 (_, b".") => current,
                 (_, b"..") => self.root,
                 (1, b"hello.txt") => self.hello,
+                (1, b"command") => self.command,
                 (1, b"nested") => self.nested,
-                (3, b"note.txt") => self.nested_note,
+                (4, b"note.txt") => self.nested_note,
                 _ => break,
             };
             qids.push(current);
@@ -76,6 +88,7 @@ impl FileTree for MemoryTree {
             let stats = if qid == self.root {
                 vec![
                     self.stat(self.hello)?,
+                    self.stat(self.command)?,
                     self.stat(self.nested)?,
                     self.stat(self.nested_note)?,
                 ]
@@ -87,7 +100,7 @@ impl FileTree for MemoryTree {
 
         let data = match qid.path {
             2 => b"hello from r9p\n".as_slice(),
-            4 => b"nested note\n".as_slice(),
+            5 => b"nested note\n".as_slice(),
             _ => b"".as_slice(),
         };
         let start = usize::try_from(offset)
@@ -103,10 +116,26 @@ impl FileTree for MemoryTree {
         Ok(match qid.path {
             1 => Stat::new(".", qid, DMDIR | 0o500),
             2 => Stat::new("hello.txt", qid, 0o400),
-            3 => Stat::new("nested", qid, DMDIR | 0o500),
-            4 => Stat::new("note.txt", qid, 0o400),
+            3 => Stat::new("command", qid, 0o200),
+            4 => Stat::new("nested", qid, DMDIR | 0o500),
+            5 => Stat::new("note.txt", qid, 0o400),
             _ => Stat::new("missing", qid, 0),
         })
+    }
+
+    fn write(&mut self, _fid: r9p::Fid, qid: Qid, _offset: u64, data: &[u8]) -> Result<u32> {
+        match qid.path {
+            3 => Ok(u32::try_from(data.len()).unwrap_or(u32::MAX)),
+            _ => Err(r9p::Error::from_static(EPERM)),
+        }
+    }
+
+    fn clunk(&mut self, _fid: r9p::Fid, qid: Qid) -> Result<()> {
+        if qid.path == self.command.path && self.clunk_error_on_command {
+            Err(r9p::Error::from_static("authority denied"))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -221,8 +250,34 @@ fn blocking_list_path_rejects_file_paths() -> TestResult<()> {
 }
 
 #[cfg(unix)]
-fn serve_blocking_connection(mut stream: UnixStream) -> TestResult<()> {
-    let mut server = Server::new(MemoryTree::new());
+#[test]
+fn blocking_write_path_returns_commit_clunk_errors() -> TestResult<()> {
+    let (client_stream, server_stream) = UnixStream::pair()?;
+    let handle = thread::spawn(move || {
+        serve_blocking_connection_with_tree(server_stream, MemoryTree::with_command_clunk_error())
+    });
+    let mut client = BlockingClient::connect(client_stream, "glenda", "", 8192)?;
+
+    let error = client
+        .write_path("/command", 0, b"#M(\"command\" \"stop\")")
+        .expect_err("write_path should surface commit-time clunk denial");
+    assert_eq!(error.display_lossy().as_ref(), "authority denied");
+
+    drop(client);
+    handle
+        .join()
+        .map_err(|_| "server thread panicked".to_string())??;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn serve_blocking_connection(stream: UnixStream) -> TestResult<()> {
+    serve_blocking_connection_with_tree(stream, MemoryTree::new())
+}
+
+#[cfg(unix)]
+fn serve_blocking_connection_with_tree(mut stream: UnixStream, tree: MemoryTree) -> TestResult<()> {
+    let mut server = Server::new(tree);
     while let Some(message) = read_tmessage(&mut stream)? {
         let reply = server.handle(message);
         let frame = codec::encode_rmessage_checked(&reply, server.session().msize())?;

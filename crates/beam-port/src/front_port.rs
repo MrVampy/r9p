@@ -64,6 +64,25 @@ impl FrontManager {
                     .map_err(|error| error.to_string())?;
                 Ok("front-set".to_string())
             }
+            ["front-register-log", raw_id, path] => {
+                let state = self.front(raw_id)?;
+                let path = hex::decode_text(path)?;
+                state
+                    .front
+                    .register_log(&path)
+                    .map_err(|error| error.to_string())?;
+                Ok("front-register-log".to_string())
+            }
+            ["front-append-event", raw_id, path, data] => {
+                let state = self.front(raw_id)?;
+                let path = hex::decode_text(path)?;
+                let data = hex::decode(data)?;
+                state
+                    .front
+                    .append_event(&path, &data)
+                    .map_err(|error| error.to_string())?;
+                Ok("front-append-event".to_string())
+            }
             ["front-register-rpc", raw_id, path] => {
                 let state = self.front(raw_id)?;
                 let path = hex::decode_text(path)?;

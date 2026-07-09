@@ -90,6 +90,39 @@ pub fn set_text(front: Front, path: String, data: String) -> Result(Nil, String)
   set(front, path, <<data:utf8>>)
 }
 
+pub fn register_log(front: Front, path: String) -> Result(Nil, String) {
+  use line <- result.try(
+    run(front.hand, "front-register-log", [
+      int.to_string(front.id),
+      text(path),
+    ]),
+  )
+  expect_line("front-register-log", line)
+}
+
+pub fn append_event(
+  front: Front,
+  path: String,
+  data: BitArray,
+) -> Result(Nil, String) {
+  use line <- result.try(
+    run(front.hand, "front-append-event", [
+      int.to_string(front.id),
+      text(path),
+      codec.encode_hex(data),
+    ]),
+  )
+  expect_line("front-append-event", line)
+}
+
+pub fn append_event_text(
+  front: Front,
+  path: String,
+  data: String,
+) -> Result(Nil, String) {
+  append_event(front, path, <<data:utf8>>)
+}
+
 pub fn register_rpc(front: Front, path: String) -> Result(Nil, String) {
   use line <- result.try(
     run(front.hand, "front-register-rpc", [int.to_string(front.id), text(path)]),

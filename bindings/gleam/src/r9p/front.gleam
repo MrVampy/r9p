@@ -33,6 +33,11 @@ pub type RequestContext {
   )
 }
 
+pub type ExportMode {
+  ReadOnly
+  ReadWrite
+}
+
 pub type ExportPublication {
   ExportPublication(
     vault_endpoint_bind: String,
@@ -44,6 +49,7 @@ pub type ExportPublication {
     export_aname: String,
     exported_root: String,
     transport_class: String,
+    mode: ExportMode,
     auth: String,
     protocol: String,
     local_root_label: Option(String),
@@ -90,6 +96,16 @@ pub fn set_text(front: Front, path: String, data: String) -> Result(Nil, String)
   set(front, path, <<data:utf8>>)
 }
 
+pub fn remove_subtree(front: Front, path: String) -> Result(Nil, String) {
+  use line <- result.try(
+    run(front.hand, "front-remove-subtree", [
+      int.to_string(front.id),
+      text(path),
+    ]),
+  )
+  expect_line("front-remove-subtree", line)
+}
+
 pub fn register_log(front: Front, path: String) -> Result(Nil, String) {
   use line <- result.try(
     run(front.hand, "front-register-log", [
@@ -128,6 +144,16 @@ pub fn register_rpc(front: Front, path: String) -> Result(Nil, String) {
     run(front.hand, "front-register-rpc", [int.to_string(front.id), text(path)]),
   )
   expect_line("front-register-rpc", line)
+}
+
+pub fn register_remove_relay(front: Front, path: String) -> Result(Nil, String) {
+  use line <- result.try(
+    run(front.hand, "front-register-remove-relay", [
+      int.to_string(front.id),
+      text(path),
+    ]),
+  )
+  expect_line("front-register-remove-relay", line)
 }
 
 pub fn serve_tcp(front: Front, bind: String) -> Result(String, String) {
@@ -225,6 +251,38 @@ pub fn complete_request(
   expect_line("front-complete-request", line)
 }
 
+pub fn complete_remove(
+  front: Front,
+  prefix: String,
+  request_id: Int,
+) -> Result(Nil, String) {
+  use line <- result.try(
+    run(front.hand, "front-complete-remove", [
+      int.to_string(front.id),
+      text(prefix),
+      int.to_string(request_id),
+    ]),
+  )
+  expect_line("front-complete-remove", line)
+}
+
+pub fn reject_remove(
+  front: Front,
+  prefix: String,
+  request_id: Int,
+  message: String,
+) -> Result(Nil, String) {
+  use line <- result.try(
+    run(front.hand, "front-reject-remove", [
+      int.to_string(front.id),
+      text(prefix),
+      int.to_string(request_id),
+      text(message),
+    ]),
+  )
+  expect_line("front-reject-remove", line)
+}
+
 pub fn maintain_r9p_export(
   front: Front,
   publication: ExportPublication,
@@ -241,6 +299,7 @@ pub fn maintain_r9p_export(
       text(publication.export_aname),
       text(publication.exported_root),
       text(publication.transport_class),
+      text(export_mode(publication.mode)),
       text(publication.auth),
       text(publication.protocol),
       text(optional_text(publication.local_root_label)),
@@ -328,6 +387,13 @@ fn optional_text(value: Option(String)) -> String {
   case value {
     Some(inner) -> inner
     None -> ""
+  }
+}
+
+fn export_mode(mode: ExportMode) -> String {
+  case mode {
+    ReadOnly -> "ro"
+    ReadWrite -> "rw"
   }
 }
 

@@ -64,6 +64,15 @@ impl FrontManager {
                     .map_err(|error| error.to_string())?;
                 Ok("front-set".to_string())
             }
+            ["front-remove-subtree", raw_id, path] => {
+                let state = self.front(raw_id)?;
+                let path = hex::decode_text(path)?;
+                state
+                    .front
+                    .remove_subtree_if_exists(&path)
+                    .map_err(|error| error.to_string())?;
+                Ok("front-remove-subtree".to_string())
+            }
             ["front-register-log", raw_id, path] => {
                 let state = self.front(raw_id)?;
                 let path = hex::decode_text(path)?;
@@ -91,6 +100,15 @@ impl FrontManager {
                     .register_rpc(&path)
                     .map_err(|error| error.to_string())?;
                 Ok("front-register-rpc".to_string())
+            }
+            ["front-register-remove-relay", raw_id, path] => {
+                let state = self.front(raw_id)?;
+                let path = hex::decode_text(path)?;
+                state
+                    .front
+                    .register_remove_relay(&path)
+                    .map_err(|error| error.to_string())?;
+                Ok("front-register-remove-relay".to_string())
             }
             ["front-serve-tcp", raw_id, bind] => {
                 let state = self.front(raw_id)?;
@@ -126,7 +144,28 @@ impl FrontManager {
                     .map_err(|error| error.to_string())?;
                 Ok("front-complete-request".to_string())
             }
-            ["front-maintain-r9p-export", raw_id, vault_endpoint_bind, vault_uname, vault_aname, service_name, export_endpoint_bind, export_uname, export_aname, exported_root, transport_class, auth, protocol, local_root_label, msize, retry_interval_ms, service_unit, host_firewall_admission, namespace_mount_paths] =>
+            ["front-complete-remove", raw_id, prefix, request_id] => {
+                let state = self.front(raw_id)?;
+                let prefix = hex::decode_text(prefix)?;
+                let request_id = parse_u64("request_id", request_id)?;
+                state
+                    .front
+                    .complete_remove(&prefix, request_id)
+                    .map_err(|error| error.to_string())?;
+                Ok("front-complete-remove".to_string())
+            }
+            ["front-reject-remove", raw_id, prefix, request_id, message] => {
+                let state = self.front(raw_id)?;
+                let prefix = hex::decode_text(prefix)?;
+                let request_id = parse_u64("request_id", request_id)?;
+                let message = hex::decode_text(message)?;
+                state
+                    .front
+                    .reject_remove(&prefix, request_id, &message)
+                    .map_err(|error| error.to_string())?;
+                Ok("front-reject-remove".to_string())
+            }
+            ["front-maintain-r9p-export", raw_id, vault_endpoint_bind, vault_uname, vault_aname, service_name, export_endpoint_bind, export_uname, export_aname, exported_root, transport_class, mode, auth, protocol, local_root_label, msize, retry_interval_ms, service_unit, host_firewall_admission, namespace_mount_paths] =>
             {
                 let state = self.front(raw_id)?;
                 let publication = publication_from_fields(PublicationFields {
@@ -139,6 +178,7 @@ impl FrontManager {
                     export_aname,
                     exported_root,
                     transport_class,
+                    mode,
                     auth,
                     protocol,
                     local_root_label,
@@ -200,6 +240,7 @@ struct PublicationFields<'a> {
     export_aname: &'a str,
     exported_root: &'a str,
     transport_class: &'a str,
+    mode: &'a str,
     auth: &'a str,
     protocol: &'a str,
     local_root_label: &'a str,
@@ -220,6 +261,8 @@ fn publication_from_fields(fields: PublicationFields<'_>) -> Result<R9pExportPub
     let exported_root = hex::decode_text(fields.exported_root)?;
     let transport_class = TransportClass::parse(&hex::decode_text(fields.transport_class)?)
         .map_err(|error| error.to_string())?;
+    let mode =
+        ExportMode::parse(&hex::decode_text(fields.mode)?).map_err(|error| error.to_string())?;
     let auth =
         AuthBoundary::parse(&hex::decode_text(fields.auth)?).map_err(|error| error.to_string())?;
     let protocol =
@@ -259,7 +302,7 @@ fn publication_from_fields(fields: PublicationFields<'_>) -> Result<R9pExportPub
             uname: export_uname,
             exported_root,
             transport_class,
-            mode: ExportMode::ReadOnly,
+            mode,
             auth,
             pid: std::process::id(),
             protocol,

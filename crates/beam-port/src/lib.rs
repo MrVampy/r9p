@@ -509,6 +509,42 @@ mod tests {
     }
 
     #[test]
+    fn front_commands_remove_projected_subtree() {
+        let mut server = PeerClientServer::default();
+        let front_id = parse_front_id(&server.handle_line("front-new").expect("front-new"));
+        let set = format!(
+            "front-set\t{front_id}\t{}\t{}",
+            hex_text("trades/demo/item/state"),
+            hex::encode(b"open")
+        );
+        assert_eq!(
+            server.handle_line(&set).expect("front-set"),
+            "front-set".to_string()
+        );
+        let serve = format!("front-serve-tcp\t{front_id}\t{}", hex_text("127.0.0.1:0"));
+        let addr = parse_front_addr(&server.handle_line(&serve).expect("front serve"));
+        let mut client =
+            blocking::Client::connect_tcp(&addr, "codex", "/", 65_536).expect("connect front");
+        assert!(client.stat_path("trades/demo/item/state").is_ok());
+
+        let remove = format!(
+            "front-remove-subtree\t{front_id}\t{}",
+            hex_text("trades/demo/item")
+        );
+        assert_eq!(
+            server.handle_line(&remove).expect("front-remove-subtree"),
+            "front-remove-subtree".to_string()
+        );
+        assert!(client.stat_path("trades/demo/item").is_err());
+
+        let stop = format!("front-stop\t{front_id}");
+        assert_eq!(
+            server.handle_line(&stop).expect("front-stop"),
+            "front-stop".to_string()
+        );
+    }
+
+    #[test]
     fn front_commands_serve_event_log() {
         let mut server = PeerClientServer::default();
         let front_id = parse_front_id(&server.handle_line("front-new").expect("front-new"));
@@ -592,6 +628,66 @@ mod tests {
             "front-complete-request".to_string()
         );
         assert_eq!(client.join().expect("client join"), b"compiled");
+
+        let stop = format!("front-stop\t{front_id}");
+        assert_eq!(
+            server.handle_line(&stop).expect("front-stop"),
+            "front-stop".to_string()
+        );
+    }
+
+    #[test]
+    fn front_commands_roundtrip_remove_relay() {
+        let mut server = PeerClientServer::default();
+        let front_id = parse_front_id(&server.handle_line("front-new").expect("front-new"));
+        let path = "trades/demo/stale";
+        let set = format!(
+            "front-set\t{front_id}\t{}\t{}",
+            hex_text(path),
+            hex::encode(b"stale")
+        );
+        assert_eq!(
+            server.handle_line(&set).expect("front-set"),
+            "front-set".to_string()
+        );
+        let register = format!(
+            "front-register-remove-relay\t{front_id}\t{}",
+            hex_text(path)
+        );
+        assert_eq!(
+            server
+                .handle_line(&register)
+                .expect("front-register-remove-relay"),
+            "front-register-remove-relay".to_string()
+        );
+        let serve = format!("front-serve-tcp\t{front_id}\t{}", hex_text("127.0.0.1:0"));
+        let addr = parse_front_addr(&server.handle_line(&serve).expect("front serve"));
+
+        let client = thread::spawn(move || {
+            let mut client =
+                blocking::Client::connect_tcp(&addr, "codex", "/", 65_536).expect("connect front");
+            let fid = client.walk_path(path).expect("walk remove target");
+            client.remove(fid)
+        });
+
+        let next = format!("front-next-request\t{front_id}\t1000");
+        let request = server.handle_line(&next).expect("front-next-request");
+        let fields = request.split('\t').collect::<Vec<_>>();
+        assert_eq!(fields[0], "front-request");
+        assert_eq!(hex::decode_text(fields[1]).expect("prefix"), path);
+        assert_eq!(hex::decode(fields[3]).expect("body"), b"");
+
+        let complete = format!(
+            "front-complete-remove\t{front_id}\t{}\t{}",
+            fields[1], fields[2]
+        );
+        assert_eq!(
+            server
+                .handle_line(&complete)
+                .expect("front-complete-remove"),
+            "front-complete-remove".to_string()
+        );
+        assert!(client.join().expect("client join").is_ok());
 
         let stop = format!("front-stop\t{front_id}");
         assert_eq!(

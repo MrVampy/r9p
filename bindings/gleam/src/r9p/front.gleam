@@ -2,11 +2,11 @@ import gleam/int
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
-import r9p.{type Hand}
+import r9p.{type Adapter}
 import r9p/codec
 
 pub type Front {
-  Front(hand: Hand, id: Int)
+  Front(adapter: Adapter, id: Int)
 }
 
 pub type Request {
@@ -70,12 +70,12 @@ pub type MaintenanceStatus {
   )
 }
 
-pub fn new(hand: Hand) -> Result(Front, String) {
-  use line <- result.try(run(hand, "front-new", []))
+pub fn new(adapter: Adapter) -> Result(Front, String) {
+  use line <- result.try(run(adapter, "front-new", []))
   case codec.fields(line) {
     ["front", id] -> {
       use id <- result.try(codec.parse_int("front_id", id))
-      Ok(Front(hand:, id:))
+      Ok(Front(adapter:, id:))
     }
     _ -> Error("r9p_front_unexpected_new_output:" <> line)
   }
@@ -83,7 +83,7 @@ pub fn new(hand: Hand) -> Result(Front, String) {
 
 pub fn set(front: Front, path: String, data: BitArray) -> Result(Nil, String) {
   use line <- result.try(
-    run(front.hand, "front-set", [
+    run(front.adapter, "front-set", [
       int.to_string(front.id),
       text(path),
       codec.encode_hex(data),
@@ -92,13 +92,17 @@ pub fn set(front: Front, path: String, data: BitArray) -> Result(Nil, String) {
   expect_line("front-set", line)
 }
 
-pub fn set_text(front: Front, path: String, data: String) -> Result(Nil, String) {
+pub fn set_text(
+  front: Front,
+  path: String,
+  data: String,
+) -> Result(Nil, String) {
   set(front, path, <<data:utf8>>)
 }
 
 pub fn remove_subtree(front: Front, path: String) -> Result(Nil, String) {
   use line <- result.try(
-    run(front.hand, "front-remove-subtree", [
+    run(front.adapter, "front-remove-subtree", [
       int.to_string(front.id),
       text(path),
     ]),
@@ -108,7 +112,7 @@ pub fn remove_subtree(front: Front, path: String) -> Result(Nil, String) {
 
 pub fn register_log(front: Front, path: String) -> Result(Nil, String) {
   use line <- result.try(
-    run(front.hand, "front-register-log", [
+    run(front.adapter, "front-register-log", [
       int.to_string(front.id),
       text(path),
     ]),
@@ -122,7 +126,7 @@ pub fn append_event(
   data: BitArray,
 ) -> Result(Nil, String) {
   use line <- result.try(
-    run(front.hand, "front-append-event", [
+    run(front.adapter, "front-append-event", [
       int.to_string(front.id),
       text(path),
       codec.encode_hex(data),
@@ -141,14 +145,20 @@ pub fn append_event_text(
 
 pub fn register_rpc(front: Front, path: String) -> Result(Nil, String) {
   use line <- result.try(
-    run(front.hand, "front-register-rpc", [int.to_string(front.id), text(path)]),
+    run(front.adapter, "front-register-rpc", [
+      int.to_string(front.id),
+      text(path),
+    ]),
   )
   expect_line("front-register-rpc", line)
 }
 
-pub fn register_remove_relay(front: Front, path: String) -> Result(Nil, String) {
+pub fn register_remove_relay(
+  front: Front,
+  path: String,
+) -> Result(Nil, String) {
   use line <- result.try(
-    run(front.hand, "front-register-remove-relay", [
+    run(front.adapter, "front-register-remove-relay", [
       int.to_string(front.id),
       text(path),
     ]),
@@ -158,7 +168,7 @@ pub fn register_remove_relay(front: Front, path: String) -> Result(Nil, String) 
 
 pub fn serve_tcp(front: Front, bind: String) -> Result(String, String) {
   use line <- result.try(
-    run(front.hand, "front-serve-tcp", [int.to_string(front.id), text(bind)]),
+    run(front.adapter, "front-serve-tcp", [int.to_string(front.id), text(bind)]),
   )
   case codec.fields(line) {
     ["front-serve-tcp", address] -> codec.decode_text(address)
@@ -171,7 +181,7 @@ pub fn next_request(
   timeout_ms: Int,
 ) -> Result(Option(Request), String) {
   use line <- result.try(
-    run(front.hand, "front-next-request", [
+    run(front.adapter, "front-next-request", [
       int.to_string(front.id),
       int.to_string(timeout_ms),
     ]),
@@ -241,7 +251,7 @@ pub fn complete_request(
   data: BitArray,
 ) -> Result(Nil, String) {
   use line <- result.try(
-    run(front.hand, "front-complete-request", [
+    run(front.adapter, "front-complete-request", [
       int.to_string(front.id),
       text(prefix),
       int.to_string(request_id),
@@ -257,7 +267,7 @@ pub fn complete_remove(
   request_id: Int,
 ) -> Result(Nil, String) {
   use line <- result.try(
-    run(front.hand, "front-complete-remove", [
+    run(front.adapter, "front-complete-remove", [
       int.to_string(front.id),
       text(prefix),
       int.to_string(request_id),
@@ -273,7 +283,7 @@ pub fn reject_remove(
   message: String,
 ) -> Result(Nil, String) {
   use line <- result.try(
-    run(front.hand, "front-reject-remove", [
+    run(front.adapter, "front-reject-remove", [
       int.to_string(front.id),
       text(prefix),
       int.to_string(request_id),
@@ -288,7 +298,7 @@ pub fn maintain_r9p_export(
   publication: ExportPublication,
 ) -> Result(Nil, String) {
   use line <- result.try(
-    run(front.hand, "front-maintain-r9p-export", [
+    run(front.adapter, "front-maintain-r9p-export", [
       int.to_string(front.id),
       text(publication.vault_endpoint_bind),
       text(publication.vault_uname),
@@ -315,14 +325,14 @@ pub fn maintain_r9p_export(
 
 pub fn reconcile_r9p_exports(front: Front) -> Result(Nil, String) {
   use line <- result.try(
-    run(front.hand, "front-reconcile-r9p-exports", [int.to_string(front.id)]),
+    run(front.adapter, "front-reconcile-r9p-exports", [int.to_string(front.id)]),
   )
   expect_line("front-reconcile-r9p-exports", line)
 }
 
 pub fn maintenance_status(front: Front) -> Result(MaintenanceStatus, String) {
   use line <- result.try(
-    run(front.hand, "front-maintenance-status", [int.to_string(front.id)]),
+    run(front.adapter, "front-maintenance-status", [int.to_string(front.id)]),
   )
   case codec.fields(line) {
     [
@@ -355,20 +365,20 @@ pub fn maintenance_status(front: Front) -> Result(MaintenanceStatus, String) {
 
 pub fn stop(front: Front) -> Result(Nil, String) {
   use line <- result.try(
-    run(front.hand, "front-stop", [int.to_string(front.id)]),
+    run(front.adapter, "front-stop", [int.to_string(front.id)]),
   )
   expect_line("front-stop", line)
 }
 
 fn run(
-  hand: Hand,
+  adapter: Adapter,
   operation: String,
   fields: List(String),
 ) -> Result(String, String) {
   request_port(
-    hand.executable,
+    adapter.executable,
     string.join([operation, ..fields], "\t"),
-    hand.timeout_ms,
+    adapter.timeout_ms,
   )
 }
 

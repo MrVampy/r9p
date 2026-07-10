@@ -12,8 +12,8 @@ pub const default_timeout_ms: Int = 5000
 
 pub const default_executable: String = "r9p-beam-port"
 
-pub type Hand {
-  Hand(executable: String, timeout_ms: Int)
+pub type Adapter {
+  Adapter(executable: String, timeout_ms: Int)
 }
 
 pub type Target {
@@ -28,16 +28,16 @@ pub type CreateInfo {
   CreateInfo(qid: r9p_stat.Qid, iounit: Int)
 }
 
-pub fn hand(executable: String) -> Hand {
-  Hand(executable:, timeout_ms: default_timeout_ms)
+pub fn adapter(executable: String) -> Adapter {
+  Adapter(executable:, timeout_ms: default_timeout_ms)
 }
 
-pub fn default_hand() -> Hand {
-  hand(default_executable)
+pub fn default_adapter() -> Adapter {
+  adapter(default_executable)
 }
 
-pub fn with_timeout(hand: Hand, timeout_ms: Int) -> Hand {
-  Hand(..hand, timeout_ms:)
+pub fn with_timeout(adapter: Adapter, timeout_ms: Int) -> Adapter {
+  Adapter(..adapter, timeout_ms:)
 }
 
 pub fn target(bind: String, uname: String, aname: String) -> Target {
@@ -53,8 +53,11 @@ pub fn target_with_msize(
   Target(bind:, uname:, aname:, msize:)
 }
 
-pub fn version(hand: Hand, target: Target) -> Result(VersionInfo, String) {
-  use line <- result.try(run(hand, target, "version", []))
+pub fn version(
+  adapter: Adapter,
+  target: Target,
+) -> Result(VersionInfo, String) {
+  use line <- result.try(run(adapter, target, "version", []))
   case codec.fields(line) {
     ["version", version_hex, raw_msize] -> {
       use version <- result.try(codec.decode_text(version_hex))
@@ -65,59 +68,62 @@ pub fn version(hand: Hand, target: Target) -> Result(VersionInfo, String) {
   }
 }
 
-pub fn attach(hand: Hand, target: Target) -> Result(r9p_stat.Qid, String) {
-  use line <- result.try(run(hand, target, "attach", []))
+pub fn attach(
+  adapter: Adapter,
+  target: Target,
+) -> Result(r9p_stat.Qid, String) {
+  use line <- result.try(run(adapter, target, "attach", []))
   parse_qid_line("attach", line)
 }
 
 pub fn stat(
-  hand: Hand,
+  adapter: Adapter,
   target: Target,
   path: String,
 ) -> Result(r9p_stat.Stat, String) {
-  use line <- result.try(run(hand, target, "stat", [text(path)]))
+  use line <- result.try(run(adapter, target, "stat", [text(path)]))
   r9p_stat.parse_line("stat", line)
 }
 
 pub fn list(
-  hand: Hand,
+  adapter: Adapter,
   target: Target,
   path: String,
 ) -> Result(List(r9p_stat.Stat), String) {
-  use body <- result.try(run(hand, target, "list", [text(path)]))
+  use body <- result.try(run(adapter, target, "list", [text(path)]))
   body
   |> codec.lines
   |> r9p_stat.parse_lines
 }
 
 pub fn read(
-  hand: Hand,
+  adapter: Adapter,
   target: Target,
   path: String,
 ) -> Result(BitArray, String) {
-  use line <- result.try(run(hand, target, "read", [text(path)]))
+  use line <- result.try(run(adapter, target, "read", [text(path)]))
   parse_read_line(line)
 }
 
 pub fn read_text(
-  hand: Hand,
+  adapter: Adapter,
   target: Target,
   path: String,
 ) -> Result(String, String) {
-  use bytes <- result.try(read(hand, target, path))
+  use bytes <- result.try(read(adapter, target, path))
   bit_array.to_string(bytes)
   |> result.map_error(fn(_) { "r9p_beam_read_non_utf8:" <> path })
 }
 
 pub fn read_range(
-  hand: Hand,
+  adapter: Adapter,
   target: Target,
   path: String,
   offset: Int,
   count: Int,
 ) -> Result(BitArray, String) {
   use line <- result.try(
-    run(hand, target, "read-range", [
+    run(adapter, target, "read-range", [
       text(path),
       int.to_string(offset),
       int.to_string(count),
@@ -127,14 +133,14 @@ pub fn read_range(
 }
 
 pub fn write(
-  hand: Hand,
+  adapter: Adapter,
   target: Target,
   path: String,
   offset: Int,
   data: BitArray,
 ) -> Result(Int, String) {
   use line <- result.try(
-    run(hand, target, "write", [
+    run(adapter, target, "write", [
       text(path),
       int.to_string(offset),
       codec.encode_hex(data),
@@ -144,13 +150,13 @@ pub fn write(
 }
 
 pub fn rpc(
-  hand: Hand,
+  adapter: Adapter,
   target: Target,
   path: String,
   data: BitArray,
 ) -> Result(BitArray, String) {
   use line <- result.try(
-    run(hand, target, "rpc", [
+    run(adapter, target, "rpc", [
       text(path),
       codec.encode_hex(data),
     ]),
@@ -159,25 +165,25 @@ pub fn rpc(
 }
 
 pub fn rpc_text(
-  hand: Hand,
+  adapter: Adapter,
   target: Target,
   path: String,
   data: String,
 ) -> Result(String, String) {
-  use bytes <- result.try(rpc(hand, target, path, <<data:utf8>>))
+  use bytes <- result.try(rpc(adapter, target, path, <<data:utf8>>))
   bit_array.to_string(bytes)
   |> result.map_error(fn(_) { "r9p_beam_rpc_non_utf8:" <> path })
 }
 
 pub fn create(
-  hand: Hand,
+  adapter: Adapter,
   target: Target,
   path: String,
   perm: Int,
   mode: Int,
 ) -> Result(CreateInfo, String) {
   use line <- result.try(
-    run(hand, target, "create", [
+    run(adapter, target, "create", [
       text(path),
       int.to_string(perm),
       int.to_string(mode),
@@ -198,8 +204,12 @@ pub fn create(
   }
 }
 
-pub fn remove(hand: Hand, target: Target, path: String) -> Result(Nil, String) {
-  use line <- result.try(run(hand, target, "remove", [text(path)]))
+pub fn remove(
+  adapter: Adapter,
+  target: Target,
+  path: String,
+) -> Result(Nil, String) {
+  use line <- result.try(run(adapter, target, "remove", [text(path)]))
   case codec.fields(line) {
     ["remove"] -> Ok(Nil)
     _ -> Error("r9p_beam_unexpected_remove_output:" <> line)
@@ -207,13 +217,13 @@ pub fn remove(hand: Hand, target: Target, path: String) -> Result(Nil, String) {
 }
 
 fn run(
-  hand: Hand,
+  adapter: Adapter,
   target: Target,
   operation: String,
   fields: List(String),
 ) -> Result(String, String) {
   request_port(
-    hand.executable,
+    adapter.executable,
     string.join(
       list.append(
         [
@@ -227,7 +237,7 @@ fn run(
       ),
       "\t",
     ),
-    hand.timeout_ms,
+    adapter.timeout_ms,
   )
 }
 

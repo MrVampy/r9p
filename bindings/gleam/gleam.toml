@@ -2,7 +2,7 @@ name = "r9p_beam"
 version = "0.1.0"
 target = "erlang"
 
-description = "Gleam/BEAM port adapter for the r9p 9P client hand"
+description = "Gleam/BEAM port adapter for the r9p 9P client"
 licences = ["MIT", "Apache-2.0"]
 
 [dependencies]

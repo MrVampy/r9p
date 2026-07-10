@@ -37,11 +37,11 @@
  *   required length without copying. request_copy consumes the staged request
  *   bytes, so copy prefix and context first.
  * - r9p_front_set_pushed_file is the v10 public-door file push path. It
- *   installs file bytes with brain-owned qid path, qid version, generation,
+ *   installs file bytes with owner-provided qid path, qid version, generation,
  *   visibility class, freshness reference, and wake token. The front must
  *   serve those qid fields exactly; it does not increment them locally.
  * - r9p_front_set_pushed_directory is the v11 public-door directory push
- *   path. It installs a visible directory with the same brain-owned metadata
+ *   path. It installs a visible directory with the same owner-provided metadata
  *   contract as pushed files. Use it for admitted roots and visible
  *   intermediate directories; the front must not invent public qid identity.
  * - Three host-side request shapes, all drained by the same

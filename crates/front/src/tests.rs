@@ -65,7 +65,7 @@ fn overwrite_bumps_version_and_serves_new_bytes() -> Result<()> {
 }
 
 #[test]
-fn pushed_file_uses_brain_owned_qid_and_version() -> Result<()> {
+fn pushed_file_uses_owner_qid_and_version() -> Result<()> {
     let front = Front::new();
     front.set_pushed_file(
         "market/status",
@@ -105,7 +105,7 @@ fn pushed_file_uses_brain_owned_qid_and_version() -> Result<()> {
 }
 
 #[test]
-fn pushed_directory_uses_brain_owned_qid_and_version() -> Result<()> {
+fn pushed_directory_uses_owner_qid_and_version() -> Result<()> {
     let front = Front::new();
     front.set_pushed_directory(
         "views/core",
@@ -880,7 +880,7 @@ fn create_relay_delegates_existing_child_name_to_backend_policy() -> Result<()> 
 }
 
 #[test]
-fn write_relay_reports_unavailable_when_brain_is_absent() -> Result<()> {
+fn write_relay_reports_unavailable_when_owner_is_absent() -> Result<()> {
     let front = Front::new();
     front.register_write_relay("control")?;
     front.set_wait_timeout(Duration::from_millis(20))?;
@@ -892,14 +892,14 @@ fn write_relay_reports_unavailable_when_brain_is_absent() -> Result<()> {
     assert_eq!(wrote as usize, b"#M(\"command\" \"restart\")".len());
     let error = tree
         .clunk(2, qids[0])
-        .expect_err("write relay without brain must fail");
+        .expect_err("write relay without owner must fail");
     assert_eq!(error.message(), b"write relay unavailable");
     assert!(front.next_request(Duration::from_millis(0))?.is_none());
     Ok(())
 }
 
 #[test]
-fn write_relay_can_return_brain_denial() -> Result<()> {
+fn write_relay_can_return_owner_denial() -> Result<()> {
     let front = Front::new();
     front.register_write_relay("control")?;
     front.set_wait_timeout(Duration::from_secs(5))?;
@@ -929,14 +929,14 @@ fn write_relay_can_return_brain_denial() -> Result<()> {
     let error = done_rx
         .recv_timeout(Duration::from_secs(1))
         .expect("writer should finish")
-        .expect_err("brain denial should reach writer");
+        .expect_err("owner denial should reach writer");
     assert_eq!(error.message(), b"authority denied");
     writer.join().expect("writer join")?;
     Ok(())
 }
 
 #[test]
-fn remove_relay_deletes_projection_after_brain_accepts() -> Result<()> {
+fn remove_relay_deletes_projection_after_owner_accepts() -> Result<()> {
     let front = Front::new();
     front.set("trades/hyperliquid/demo/stale/state", b"closing")?;
     front.register_remove_relay("trades/hyperliquid/demo/stale")?;
@@ -983,7 +983,7 @@ fn remove_relay_deletes_projection_after_brain_accepts() -> Result<()> {
 }
 
 #[test]
-fn remove_relay_can_return_brain_denial() -> Result<()> {
+fn remove_relay_can_return_owner_denial() -> Result<()> {
     let front = Front::new();
     front.set("trades/hyperliquid/demo/protected/state", b"open")?;
     front.register_remove_relay("trades/hyperliquid/demo/protected")?;
@@ -1015,7 +1015,7 @@ fn remove_relay_can_return_brain_denial() -> Result<()> {
     let error = done_rx
         .recv_timeout(Duration::from_secs(1))
         .expect("remover should finish")
-        .expect_err("brain denial should reach remover");
+        .expect_err("owner denial should reach remover");
     assert_eq!(
         error.message(),
         b"open_node_requires_explicit_operator_choice"
@@ -1035,7 +1035,7 @@ fn remove_relay_can_return_brain_denial() -> Result<()> {
 }
 
 #[test]
-fn wstat_relay_passes_encoded_stat_to_brain() -> Result<()> {
+fn wstat_relay_passes_encoded_stat_to_owner() -> Result<()> {
     let front = Front::new();
     front.set("docs/report", b"body")?;
     front.register_wstat_relay("docs/report")?;
@@ -1121,7 +1121,7 @@ fn prefix_wait_tied_to_rpc_close_does_not_consume_later_requests() -> Result<()>
     front.register_write_relay("relay")?;
     front.set_wait_timeout(Duration::from_secs(5))?;
     let mut control = front.tree();
-    control.attach(1, b"brain", b"/")?;
+    control.attach(1, b"owner", b"/")?;
     let control_qids = walk_to(&mut control, 1, 2, &["control"]);
     control.open(2, control_qids[0], ORDWR)?;
     control.write(2, control_qids[0], 0, b"take relay")?;

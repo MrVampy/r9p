@@ -415,7 +415,9 @@ fn optional_decoded_text(value: String) -> Result(Option(String), String) {
   }
 }
 
-@external(erlang, "r9p_beam_port_ffi", "request")
+// Fronts are process-owned state. Keep them isolated from client request
+// timeouts, which may restart their own port to preserve protocol framing.
+@external(erlang, "r9p_beam_port_ffi", "front_request")
 fn request_port(
   executable: String,
   line: String,

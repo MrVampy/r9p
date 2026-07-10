@@ -3,14 +3,22 @@
 -export([
     decode_hex/1,
     encode_hex/1,
+    front_request/3,
     request/3
 ]).
 
--define(SERVER, r9p_beam_port_server).
+-define(CLIENT_SERVER, r9p_beam_client_port_server).
+-define(FRONT_SERVER, r9p_beam_front_port_server).
 -define(LINE_LIMIT, 16777216).
 
 request(Executable, Line, TimeoutMs) ->
-    case ensure_server(Executable) of
+    request_on(?CLIENT_SERVER, Executable, Line, TimeoutMs).
+
+front_request(Executable, Line, TimeoutMs) ->
+    request_on(?FRONT_SERVER, Executable, Line, TimeoutMs).
+
+request_on(ServerName, Executable, Line, TimeoutMs) ->
+    case ensure_server(ServerName, Executable) of
         {ok, Server} ->
             Ref = make_ref(),
             Server ! {request, self(), Ref, Line, TimeoutMs},
@@ -24,23 +32,23 @@ request(Executable, Line, TimeoutMs) ->
             {error, Reason}
     end.
 
-ensure_server(Executable) ->
-    case whereis(?SERVER) of
+ensure_server(ServerName, Executable) ->
+    case whereis(ServerName) of
         undefined ->
-            start_server(Executable);
+            start_server(ServerName, Executable);
         Pid ->
             {ok, Pid}
     end.
 
-start_server(Executable) ->
+start_server(ServerName, Executable) ->
     case resolve_executable(Executable) of
         {ok, Resolved} ->
             Pid = spawn(fun() -> server_loop(Resolved, start_port(Resolved)) end),
-            case catch register(?SERVER, Pid) of
+            case catch register(ServerName, Pid) of
                 true ->
                     {ok, Pid};
                 _ ->
-                    case whereis(?SERVER) of
+                    case whereis(ServerName) of
                         undefined ->
                             {ok, Pid};
                         Existing ->

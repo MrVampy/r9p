@@ -547,9 +547,9 @@ fn abi_door_rehearsal_principal_root_and_write_relay() {
     );
     assert!(Client::connect_tcp(&address, "bob", "/", 65536).is_err());
 
-    let brain_handle = handle as usize;
-    let brain = thread::spawn(move || {
-        let handle = brain_handle as *mut front::abi::FrontAbi;
+    let owner_handle = handle as usize;
+    let owner = thread::spawn(move || {
+        let handle = owner_handle as *mut front::abi::FrontAbi;
         let mut request_id = 0u64;
         let mut request_len = 0usize;
         assert_eq!(
@@ -585,7 +585,7 @@ fn abi_door_rehearsal_principal_root_and_write_relay() {
         .expect("write control");
     assert_eq!(wrote as usize, b"#M(\"command\" \"restart\")".len());
     alice.clunk(control_fid).expect("clunk control");
-    brain.join().expect("brain join");
+    owner.join().expect("owner join");
 
     assert_eq!(unsafe { r9p_front_stop(handle) }, 0);
     unsafe { r9p_front_free(handle) };
@@ -693,9 +693,9 @@ fn abi_v11_pushed_metadata_aname_gate_and_request_context() {
     );
     assert!(Client::connect_tcp(&address, "alice", bad_aname, 65_536).is_err());
 
-    let brain_handle = handle as usize;
-    let brain = thread::spawn(move || {
-        let handle = brain_handle as *mut front::abi::FrontAbi;
+    let owner_handle = handle as usize;
+    let owner = thread::spawn(move || {
+        let handle = owner_handle as *mut front::abi::FrontAbi;
         let mut request_id = 0u64;
         let mut request_len = 0usize;
         assert_eq!(
@@ -739,7 +739,7 @@ fn abi_v11_pushed_metadata_aname_gate_and_request_context() {
         .expect("write control");
     assert_eq!(wrote as usize, b"#M(\"command\" \"restart\")".len());
     alice.clunk(control_fid).expect("clunk control");
-    brain.join().expect("brain join");
+    owner.join().expect("owner join");
 
     assert_eq!(unsafe { r9p_front_stop(handle) }, 0);
     unsafe { r9p_front_free(handle) };
@@ -853,7 +853,7 @@ fn door_rehearsal_serves_pushed_principal_view_and_fails_unknown_principal() {
 }
 
 #[test]
-fn door_rehearsal_relayed_write_returns_count_after_brain_accepts() {
+fn door_rehearsal_relayed_write_returns_count_after_owner_accepts() {
     let front = Front::new();
     front
         .register_write_relay("control")
@@ -863,15 +863,15 @@ fn door_rehearsal_relayed_write_returns_count_after_brain_accepts() {
         .expect("set wait timeout");
     let serve = front.serve_tcp("127.0.0.1:0").expect("serve front");
     let address = serve.addr().to_string();
-    let brain = front.clone();
-    let brain_thread = thread::spawn(move || {
-        let request = brain
+    let owner = front.clone();
+    let owner_thread = thread::spawn(move || {
+        let request = owner
             .next_request(Duration::from_secs(1))
             .expect("next request")
             .expect("write request");
         assert_eq!(request.prefix, "control");
         assert_eq!(request.bytes, b"#M(\"command\" \"restart\")");
-        brain
+        owner
             .complete_write(
                 "control",
                 request.request_id,
@@ -889,12 +889,12 @@ fn door_rehearsal_relayed_write_returns_count_after_brain_accepts() {
     assert_eq!(wrote as usize, b"#M(\"command\" \"restart\")".len());
     client.clunk(control_fid).expect("clunk control");
 
-    brain_thread.join().expect("brain thread join");
+    owner_thread.join().expect("owner thread join");
     serve.shutdown();
 }
 
 #[test]
-fn door_rehearsal_relayed_write_reports_unavailable_when_brain_absent() {
+fn door_rehearsal_relayed_write_reports_unavailable_when_owner_absent() {
     let front = Front::new();
     front
         .register_write_relay("control")
@@ -914,7 +914,7 @@ fn door_rehearsal_relayed_write_reports_unavailable_when_brain_absent() {
     assert_eq!(wrote as usize, b"#M(\"command\" \"restart\")".len());
     let error = client
         .clunk(control_fid)
-        .expect_err("brain-absent relay must be unavailable");
+        .expect_err("owner-absent relay must be unavailable");
     assert_eq!(error.message(), b"write relay unavailable");
     assert!(front
         .next_request(Duration::from_millis(0))

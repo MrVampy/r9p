@@ -204,19 +204,7 @@ pub fn create(
       int.to_string(mode),
     ]),
   )
-  case codec.fields(line) {
-    ["create", raw_qtype, raw_version, raw_path, raw_iounit] -> {
-      use qtype <- result.try(codec.parse_int("qid_qtype", raw_qtype))
-      use version <- result.try(codec.parse_int("qid_version", raw_version))
-      use path <- result.try(codec.parse_int("qid_path", raw_path))
-      use iounit <- result.try(codec.parse_int("iounit", raw_iounit))
-      Ok(CreateInfo(
-        qid: r9p_stat.Qid(qtype: qtype, version: version, path: path),
-        iounit: iounit,
-      ))
-    }
-    _ -> Error("r9p_beam_unexpected_create_output:" <> line)
-  }
+  parse_create_line(line)
 }
 
 pub fn create_at(
@@ -235,6 +223,10 @@ pub fn create_at(
       int.to_string(mode),
     ]),
   )
+  parse_create_line(line)
+}
+
+fn parse_create_line(line: String) -> Result(CreateInfo, String) {
   case codec.fields(line) {
     ["create", raw_qtype, raw_version, raw_path, raw_iounit] -> {
       use qtype <- result.try(codec.parse_int("qid_qtype", raw_qtype))

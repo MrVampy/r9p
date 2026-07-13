@@ -54,7 +54,7 @@ fn request_context(handle: *mut front::abi::FrontAbi, request_id: u64) -> String
 
 #[test]
 fn abi_roundtrip_over_tcp() {
-    assert_eq!(r9p_front_abi_version(), 15);
+    assert_eq!(r9p_front_abi_version(), 16);
     let handle = r9p_front_new();
     let (path, path_len) = cstr("market/status");
     let (bytes, bytes_len) = cbytes(b"#M(\"state\" 'open)");
@@ -261,7 +261,7 @@ fn abi_roundtrip_over_tcp() {
 
 #[test]
 fn abi_publish_reports_last_error() {
-    assert_eq!(r9p_front_abi_version(), 15);
+    assert_eq!(r9p_front_abi_version(), 16);
     let handle = r9p_front_new();
     let (vault_bind, vault_bind_len) = cstr("127.0.0.1:1");
     let (vault_uname, vault_uname_len) = cstr("codex");
@@ -326,7 +326,7 @@ fn abi_publish_reports_last_error() {
 
 #[test]
 fn abi_reconcile_without_maintainers_is_ok() {
-    assert_eq!(r9p_front_abi_version(), 15);
+    assert_eq!(r9p_front_abi_version(), 16);
     let handle = r9p_front_new();
     assert_eq!(unsafe { r9p_front_reconcile_r9p_exports(handle) }, 0);
     unsafe { r9p_front_free(handle) };
@@ -334,7 +334,7 @@ fn abi_reconcile_without_maintainers_is_ok() {
 
 #[test]
 fn abi_client_rpc_writes_and_reads_same_fid() {
-    assert_eq!(r9p_front_abi_version(), 15);
+    assert_eq!(r9p_front_abi_version(), 16);
     let handle = r9p_front_new();
     let (rpc, rpc_len) = cstr("rpc");
     assert_eq!(unsafe { r9p_front_register_rpc(handle, rpc, rpc_len) }, 0);
@@ -405,7 +405,7 @@ fn abi_client_rpc_writes_and_reads_same_fid() {
 
 #[test]
 fn rpc_path_buffers_request_larger_than_negotiated_write_payload() {
-    assert_eq!(r9p_front_abi_version(), 15);
+    assert_eq!(r9p_front_abi_version(), 16);
     let handle = r9p_front_new();
     let (rpc, rpc_len) = cstr("rpc");
     assert_eq!(unsafe { r9p_front_register_rpc(handle, rpc, rpc_len) }, 0);
@@ -450,7 +450,7 @@ fn rpc_path_buffers_request_larger_than_negotiated_write_payload() {
 
 #[test]
 fn abi_client_read_reads_namespace_file() {
-    assert_eq!(r9p_front_abi_version(), 15);
+    assert_eq!(r9p_front_abi_version(), 16);
     let handle = r9p_front_new();
     let (path, path_len) = cstr("gateways/ibkr/api");
     let (body, body_len) =
@@ -501,7 +501,7 @@ fn abi_client_read_reads_namespace_file() {
 
 #[test]
 fn abi_door_rehearsal_principal_root_and_write_relay() {
-    assert_eq!(r9p_front_abi_version(), 15);
+    assert_eq!(r9p_front_abi_version(), 16);
     let handle = r9p_front_new();
     let (status_path, status_path_len) = cstr("views/alice/status");
     let (status_body, status_body_len) = cbytes(b"#M(\"served_state\" \"fresh\")");
@@ -593,7 +593,7 @@ fn abi_door_rehearsal_principal_root_and_write_relay() {
 
 #[test]
 fn abi_v11_pushed_metadata_aname_gate_and_request_context() {
-    assert_eq!(r9p_front_abi_version(), 15);
+    assert_eq!(r9p_front_abi_version(), 16);
     let handle = r9p_front_new();
     assert_eq!(
         unsafe { r9p_front_set_protocol_limits(handle, 65_536, 4096) },
@@ -747,7 +747,7 @@ fn abi_v11_pushed_metadata_aname_gate_and_request_context() {
 
 #[test]
 fn abi_remove_relay_uses_tremove_and_drops_projection() {
-    assert_eq!(r9p_front_abi_version(), 15);
+    assert_eq!(r9p_front_abi_version(), 16);
     let handle = r9p_front_new();
     let (state_path, state_path_len) = cstr("trades/demo/trade-1/state");
     let (state_body, state_body_len) = cbytes(br#"{"lifecycle":"archived"}"#);
@@ -926,7 +926,7 @@ fn door_rehearsal_relayed_write_reports_unavailable_when_owner_absent() {
 
 #[test]
 fn abi_maintain_reports_initial_publish_error() {
-    assert_eq!(r9p_front_abi_version(), 15);
+    assert_eq!(r9p_front_abi_version(), 16);
     let handle = r9p_front_new();
     let (vault_bind, vault_bind_len) = cstr("127.0.0.1:1");
     let (vault_uname, vault_uname_len) = cstr("codex");

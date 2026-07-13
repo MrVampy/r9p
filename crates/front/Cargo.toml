@@ -16,3 +16,6 @@ crate-type = ["lib", "cdylib"]
 
 [dependencies]
 r9p = { path = "../core" }
+
+[dev-dependencies]
+fs = { path = "../fs" }

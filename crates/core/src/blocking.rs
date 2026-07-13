@@ -354,6 +354,33 @@ impl<S: Read + Write> Client<S> {
         }
     }
 
+    pub fn create_at(&mut self, parent: &str, name: &str, perm: u32, mode: u8) -> Result<Qid> {
+        let parent_fid = self.walk_path(parent)?;
+        let result = self.create(parent_fid, name.as_bytes(), perm, mode);
+        let result = match result {
+            Ok((fid, qid)) => match self.clunk(fid) {
+                Ok(()) => Ok(qid),
+                Err(error) => Err(error),
+            },
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(qid) => {
+                self.clunk(parent_fid)?;
+                Ok(qid)
+            }
+            Err(error) => {
+                let _ = self.clunk(parent_fid);
+                Err(error)
+            }
+        }
+    }
+
+    pub fn remove_path(&mut self, path: &str) -> Result<()> {
+        let fid = self.walk_path(path)?;
+        self.remove(fid)
+    }
+
     pub fn rpc_path(&mut self, path: &str, data: &[u8]) -> Result<Vec<u8>> {
         let fid = self.walk_path(path)?;
         let open = self.open(fid, ORDWR);

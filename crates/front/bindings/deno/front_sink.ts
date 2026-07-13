@@ -1,4 +1,4 @@
-export const SUPPORTED_ABI_VERSIONS = new Set([15]);
+export const SUPPORTED_ABI_VERSIONS = new Set([16]);
 
 const SYMBOLS = {
   r9p_front_abi_version: { parameters: [], result: "u32" },
@@ -163,6 +163,61 @@ const SYMBOLS = {
     ],
     result: "i32",
   },
+  r9p_front_client_create_at: {
+    parameters: [
+      "pointer",
+      "buffer",
+      "usize",
+      "buffer",
+      "usize",
+      "buffer",
+      "usize",
+      "buffer",
+      "usize",
+      "buffer",
+      "usize",
+      "u32",
+      "u8",
+      "u32",
+      "buffer",
+      "buffer",
+      "buffer",
+    ],
+    result: "i32",
+  },
+  r9p_front_client_write_file: {
+    parameters: [
+      "pointer",
+      "buffer",
+      "usize",
+      "buffer",
+      "usize",
+      "buffer",
+      "usize",
+      "buffer",
+      "usize",
+      "buffer",
+      "usize",
+      "u32",
+      "buffer",
+    ],
+    result: "i32",
+  },
+  r9p_front_client_remove: {
+    parameters: [
+      "pointer",
+      "buffer",
+      "usize",
+      "buffer",
+      "usize",
+      "buffer",
+      "usize",
+      "buffer",
+      "usize",
+      "u32",
+    ],
+    result: "i32",
+  },
   r9p_front_last_error: {
     parameters: ["pointer", "buffer", "usize"],
     result: "isize",
@@ -236,6 +291,40 @@ export interface ClientReadOptions {
   responseCapacity?: number;
 }
 
+export interface ClientCreateAtOptions {
+  endpointBind: string;
+  uname: string;
+  aname: string;
+  parent: string;
+  name: string;
+  perm: number;
+  mode: number;
+  msize?: number;
+}
+
+export interface ClientCreateResult {
+  qidType: number;
+  qidVersion: number;
+  qidPath: bigint;
+}
+
+export interface ClientWriteFileOptions {
+  endpointBind: string;
+  uname: string;
+  aname: string;
+  path: string;
+  data: string | Uint8Array;
+  msize?: number;
+}
+
+export interface ClientRemoveOptions {
+  endpointBind: string;
+  uname: string;
+  aname: string;
+  path: string;
+  msize?: number;
+}
+
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
@@ -243,6 +332,15 @@ function bytes(value: string): [Uint8Array<ArrayBuffer>, bigint] {
   const encoded = encoder.encode(value);
   const backed = new Uint8Array(new ArrayBuffer(encoded.length));
   backed.set(encoded);
+  return [backed, BigInt(backed.length)];
+}
+
+function inputBytes(
+  value: string | Uint8Array,
+): [Uint8Array<ArrayBuffer>, bigint] {
+  if (typeof value === "string") return bytes(value);
+  const backed = new Uint8Array(new ArrayBuffer(value.length));
+  backed.set(value);
   return [backed, BigInt(backed.length)];
 }
 
@@ -525,6 +623,100 @@ export class FrontHost implements TransitionSink {
       );
     }
     return decoder.decode(response.slice(0, responseLen));
+  }
+
+  clientCreateAt(options: ClientCreateAtOptions): ClientCreateResult {
+    const [endpoint, endpointLen] = bytes(options.endpointBind);
+    const [uname, unameLen] = bytes(options.uname);
+    const [aname, anameLen] = bytes(options.aname);
+    const [parent, parentLen] = bytes(options.parent);
+    const [name, nameLen] = bytes(options.name);
+    const qidTypeOut = new Uint8Array(new ArrayBuffer(1));
+    const qidVersionOut = new Uint8Array(new ArrayBuffer(4));
+    const qidPathOut = new Uint8Array(new ArrayBuffer(8));
+    const status = this.library.symbols.r9p_front_client_create_at(
+      this.handle,
+      endpoint,
+      endpointLen,
+      uname,
+      unameLen,
+      aname,
+      anameLen,
+      parent,
+      parentLen,
+      name,
+      nameLen,
+      options.perm,
+      options.mode,
+      options.msize ?? 65_536,
+      qidTypeOut,
+      qidVersionOut,
+      qidPathOut,
+    );
+    if (status !== 0) {
+      throw new Error(
+        `front client_create_at(${options.parent}, ${options.name}) failed with status ${status}: ${this.lastError()}`,
+      );
+    }
+    return {
+      qidType: qidTypeOut[0],
+      qidVersion: new DataView(qidVersionOut.buffer).getUint32(0, true),
+      qidPath: new DataView(qidPathOut.buffer).getBigUint64(0, true),
+    };
+  }
+
+  clientWriteFile(options: ClientWriteFileOptions): number {
+    const [endpoint, endpointLen] = bytes(options.endpointBind);
+    const [uname, unameLen] = bytes(options.uname);
+    const [aname, anameLen] = bytes(options.aname);
+    const [path, pathLen] = bytes(options.path);
+    const [data, dataLen] = inputBytes(options.data);
+    const countOut = new Uint8Array(new ArrayBuffer(4));
+    const status = this.library.symbols.r9p_front_client_write_file(
+      this.handle,
+      endpoint,
+      endpointLen,
+      uname,
+      unameLen,
+      aname,
+      anameLen,
+      path,
+      pathLen,
+      data,
+      dataLen,
+      options.msize ?? 65_536,
+      countOut,
+    );
+    if (status !== 0) {
+      throw new Error(
+        `front client_write_file(${options.path}) failed with status ${status}: ${this.lastError()}`,
+      );
+    }
+    return new DataView(countOut.buffer).getUint32(0, true);
+  }
+
+  clientRemove(options: ClientRemoveOptions): void {
+    const [endpoint, endpointLen] = bytes(options.endpointBind);
+    const [uname, unameLen] = bytes(options.uname);
+    const [aname, anameLen] = bytes(options.aname);
+    const [path, pathLen] = bytes(options.path);
+    const status = this.library.symbols.r9p_front_client_remove(
+      this.handle,
+      endpoint,
+      endpointLen,
+      uname,
+      unameLen,
+      aname,
+      anameLen,
+      path,
+      pathLen,
+      options.msize ?? 65_536,
+    );
+    if (status !== 0) {
+      throw new Error(
+        `front client_remove(${options.path}) failed with status ${status}: ${this.lastError()}`,
+      );
+    }
   }
 
   set(path: string, record: unknown): void {

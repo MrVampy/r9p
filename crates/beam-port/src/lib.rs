@@ -296,26 +296,16 @@ fn create_at_output(
     perm: u32,
     mode: u8,
 ) -> R9pResult<String> {
-    let parent_fid = client.walk_path(parent)?;
-    let result: R9pResult<String> = (|| {
-        let (fid, qid) = client.create(parent_fid, name.as_bytes(), perm, mode)?;
-        let iounit = r9p::codec::max_write_payload(client.msize());
-        let output = format!(
-            "create\t{}\t{}\t{}\t{}",
-            qid.qtype, qid.version, qid.path, iounit
-        );
-        client.clunk(fid)?;
-        Ok(output)
-    })();
-    let parent_clunk = client.clunk(parent_fid);
-    let output = result?;
-    parent_clunk?;
-    Ok(output)
+    let qid = client.create_at(parent, name, perm, mode)?;
+    let iounit = r9p::codec::max_write_payload(client.msize());
+    Ok(format!(
+        "create\t{}\t{}\t{}\t{}",
+        qid.qtype, qid.version, qid.path, iounit
+    ))
 }
 
 fn remove_output(client: &mut BoxedClient, path: &str) -> R9pResult<String> {
-    let fid = client.walk_path(path)?;
-    client.remove(fid)?;
+    client.remove_path(path)?;
     Ok("remove".to_string())
 }
 

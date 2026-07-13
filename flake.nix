@@ -26,7 +26,7 @@
           };
           front = pkgs.rustPlatform.buildRustPackage {
             pname = "r9p-front";
-            version = "0.1.0-abi17";
+            version = "0.1.0-abi18";
             src = self;
             cargoLock.lockFile = ./Cargo.lock;
             cargoBuildFlags = [ "-p" "front" ];
@@ -44,6 +44,8 @@
                 "$out/share/r9p/front/deno/front_sink.ts"
               install -Dm644 crates/front/bindings/deno/export_descriptor.ts \
                 "$out/share/r9p/front/deno/export_descriptor.ts"
+              install -Dm644 crates/front/bindings/deno/request_context.ts \
+                "$out/share/r9p/front/deno/request_context.ts"
               runHook postInstall
             '';
           };

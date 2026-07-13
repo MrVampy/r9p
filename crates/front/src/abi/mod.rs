@@ -10,10 +10,10 @@ use std::time::Duration;
 mod client;
 
 pub use client::{
-    r9p_front_client_create_at, r9p_front_client_read, r9p_front_client_remove,
-    r9p_front_client_rpc, r9p_front_client_write_file,
+    r9p_front_client_create_at, r9p_front_client_create_write_at, r9p_front_client_read,
+    r9p_front_client_remove, r9p_front_client_rpc, r9p_front_client_write_file,
 };
-pub const ABI_VERSION: u32 = 17;
+pub const ABI_VERSION: u32 = 18;
 
 const OK: i32 = 0;
 const TIMEOUT: i32 = 1;

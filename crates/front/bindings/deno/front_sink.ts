@@ -1,7 +1,10 @@
-export const SUPPORTED_ABI_VERSIONS = new Set([17]);
+export const SUPPORTED_ABI_VERSIONS = new Set([18]);
 
 export { renderExportDescriptor } from "./export_descriptor.ts";
 export type { ExportDescriptorOptions } from "./export_descriptor.ts";
+import { parseRequestContext } from "./request_context.ts";
+import type { RequestContext } from "./request_context.ts";
+export type { RequestContext } from "./request_context.ts";
 
 const SYMBOLS = {
   r9p_front_abi_version: { parameters: [], result: "u32" },
@@ -148,6 +151,29 @@ const SYMBOLS = {
     ],
     result: "i32",
   },
+  r9p_front_client_create_write_at: {
+    parameters: [
+      "pointer",
+      "buffer",
+      "usize",
+      "buffer",
+      "usize",
+      "buffer",
+      "usize",
+      "buffer",
+      "usize",
+      "buffer",
+      "usize",
+      "u32",
+      "u8",
+      "u64",
+      "buffer",
+      "usize",
+      "u32",
+      "buffer",
+    ],
+    result: "i32",
+  },
   r9p_front_client_write_file: {
     parameters: [
       "pointer",
@@ -200,20 +226,6 @@ export interface IntakeRequest {
   context: RequestContext;
 }
 
-export interface RequestContext {
-  version: "r9p-front-request-context.v1";
-  principalId: string;
-  uname: string;
-  aname: string;
-  sessionId: bigint;
-  fid: bigint;
-  targetPath: string;
-  offset: bigint;
-  openMode: number;
-  pushedGeneration: bigint;
-  raw: string;
-}
-
 export interface ClientRpcOptions {
   endpointBind: string;
   uname: string;
@@ -248,6 +260,11 @@ export interface ClientCreateResult {
   qidType: number;
   qidVersion: number;
   qidPath: bigint;
+}
+
+export interface ClientCreateWriteAtOptions extends ClientCreateAtOptions {
+  offset?: bigint;
+  data: string | Uint8Array;
 }
 
 export interface ClientWriteFileOptions {
@@ -286,95 +303,9 @@ function inputBytes(
   return [backed, BigInt(backed.length)];
 }
 
-function parseRequestContext(raw: string): RequestContext {
-  const version = lfeStringField(raw, "version");
-  if (version !== "r9p-front-request-context.v1") {
-    throw new Error(`unsupported front request context version: ${version}`);
-  }
-  const openMode = lfeNumberField(raw, "open_mode");
-  if (openMode < 0n || openMode > 255n) {
-    throw new Error(
-      `front request context open_mode out of range: ${openMode}`,
-    );
-  }
-  return {
-    version,
-    principalId: lfeStringField(raw, "principal_id"),
-    uname: lfeStringField(raw, "uname"),
-    aname: lfeStringField(raw, "aname"),
-    sessionId: lfeNumberField(raw, "session_id"),
-    fid: lfeNumberField(raw, "fid"),
-    targetPath: lfeStringField(raw, "target_path"),
-    offset: lfeNumberField(raw, "offset"),
-    openMode: Number(openMode),
-    pushedGeneration: lfeNumberField(raw, "pushed_generation"),
-    raw,
-  };
-}
-
-function lfeStringField(raw: string, name: string): string {
-  const marker = `"${name}" "`;
-  const start = raw.indexOf(marker);
-  if (start < 0) {
-    throw new Error(`front request context missing string field: ${name}`);
-  }
-  let index = start + marker.length;
-  let value = "";
-  while (index < raw.length) {
-    const ch = raw[index];
-    if (ch === '"') return value;
-    if (ch !== "\\") {
-      value += ch;
-      index += 1;
-      continue;
-    }
-    index += 1;
-    const escaped = raw[index];
-    if (escaped === undefined) {
-      throw new Error(
-        `front request context unterminated escape in field: ${name}`,
-      );
-    }
-    switch (escaped) {
-      case "\\":
-        value += "\\";
-        break;
-      case '"':
-        value += '"';
-        break;
-      case "n":
-        value += "\n";
-        break;
-      case "r":
-        value += "\r";
-        break;
-      case "t":
-        value += "\t";
-        break;
-      default:
-        value += escaped;
-        break;
-    }
-    index += 1;
-  }
-  throw new Error(`front request context unterminated string field: ${name}`);
-}
-
-function lfeNumberField(raw: string, name: string): bigint {
-  const marker = `"${name}" `;
-  const start = raw.indexOf(marker);
-  if (start < 0) {
-    throw new Error(`front request context missing number field: ${name}`);
-  }
-  const rest = raw.slice(start + marker.length);
-  const match = /^-?\d+/.exec(rest);
-  if (match === null) {
-    throw new Error(`front request context invalid number field: ${name}`);
-  }
-  return BigInt(match[0]);
-}
-
 export class FrontHost implements TransitionSink {
+  private closed = false;
+
   private constructor(
     private readonly library: Deno.DynamicLibrary<typeof SYMBOLS>,
     private readonly handle: NonNullable<Deno.PointerValue>,
@@ -400,6 +331,7 @@ export class FrontHost implements TransitionSink {
   }
 
   serve(bind: string): number {
+    this.assertOpen();
     const [bindBytes, bindLen] = bytes(bind);
     const portOut = new Uint8Array(2);
     const status = this.library.symbols.r9p_front_serve_tcp(
@@ -415,6 +347,7 @@ export class FrontHost implements TransitionSink {
   }
 
   clientRpc(options: ClientRpcOptions): string {
+    this.assertOpen();
     const [endpoint, endpointLen] = bytes(options.endpointBind);
     const [uname, unameLen] = bytes(options.uname);
     const [aname, anameLen] = bytes(options.aname);
@@ -458,6 +391,7 @@ export class FrontHost implements TransitionSink {
   }
 
   clientRead(options: ClientReadOptions): string {
+    this.assertOpen();
     const [endpoint, endpointLen] = bytes(options.endpointBind);
     const [uname, unameLen] = bytes(options.uname);
     const [aname, anameLen] = bytes(options.aname);
@@ -498,6 +432,7 @@ export class FrontHost implements TransitionSink {
   }
 
   clientCreateAt(options: ClientCreateAtOptions): ClientCreateResult {
+    this.assertOpen();
     const [endpoint, endpointLen] = bytes(options.endpointBind);
     const [uname, unameLen] = bytes(options.uname);
     const [aname, anameLen] = bytes(options.aname);
@@ -537,7 +472,45 @@ export class FrontHost implements TransitionSink {
     };
   }
 
+  clientCreateWriteAt(options: ClientCreateWriteAtOptions): number {
+    this.assertOpen();
+    const [endpoint, endpointLen] = bytes(options.endpointBind);
+    const [uname, unameLen] = bytes(options.uname);
+    const [aname, anameLen] = bytes(options.aname);
+    const [parent, parentLen] = bytes(options.parent);
+    const [name, nameLen] = bytes(options.name);
+    const [data, dataLen] = inputBytes(options.data);
+    const countOut = new Uint8Array(new ArrayBuffer(4));
+    const status = this.library.symbols.r9p_front_client_create_write_at(
+      this.handle,
+      endpoint,
+      endpointLen,
+      uname,
+      unameLen,
+      aname,
+      anameLen,
+      parent,
+      parentLen,
+      name,
+      nameLen,
+      options.perm,
+      options.mode,
+      options.offset ?? 0n,
+      data,
+      dataLen,
+      options.msize ?? 65_536,
+      countOut,
+    );
+    if (status !== 0) {
+      throw new Error(
+        `front client_create_write_at(${options.parent}, ${options.name}) failed with status ${status}: ${this.lastError()}`,
+      );
+    }
+    return new DataView(countOut.buffer).getUint32(0, true);
+  }
+
   clientWriteFile(options: ClientWriteFileOptions): number {
+    this.assertOpen();
     const [endpoint, endpointLen] = bytes(options.endpointBind);
     const [uname, unameLen] = bytes(options.uname);
     const [aname, anameLen] = bytes(options.aname);
@@ -568,6 +541,7 @@ export class FrontHost implements TransitionSink {
   }
 
   clientRemove(options: ClientRemoveOptions): void {
+    this.assertOpen();
     const [endpoint, endpointLen] = bytes(options.endpointBind);
     const [uname, unameLen] = bytes(options.uname);
     const [aname, anameLen] = bytes(options.aname);
@@ -592,6 +566,7 @@ export class FrontHost implements TransitionSink {
   }
 
   set(path: string, record: unknown): void {
+    this.assertOpen();
     const [pathBytes, pathLen] = bytes(path);
     const [body, bodyLen] = bytes(`${JSON.stringify(record, null, 2)}\n`);
     const status = this.library.symbols.r9p_front_set(
@@ -607,6 +582,7 @@ export class FrontHost implements TransitionSink {
   }
 
   setText(path: string, text: string): void {
+    this.assertOpen();
     const [pathBytes, pathLen] = bytes(path);
     const [body, bodyLen] = bytes(`${text}\n`);
     const status = this.library.symbols.r9p_front_set(
@@ -622,6 +598,7 @@ export class FrontHost implements TransitionSink {
   }
 
   appendEvent(path: string, record: unknown): void {
+    this.assertOpen();
     const [pathBytes, pathLen] = bytes(path);
     const [body, bodyLen] = bytes(`${JSON.stringify(record)}\n`);
     const status = this.library.symbols.r9p_front_append_event(
@@ -639,6 +616,7 @@ export class FrontHost implements TransitionSink {
   }
 
   registerIntake(prefix: string): void {
+    this.assertOpen();
     const [prefixBytes, prefixLen] = bytes(prefix);
     const status = this.library.symbols.r9p_front_register_intake(
       this.handle,
@@ -653,6 +631,7 @@ export class FrontHost implements TransitionSink {
   }
 
   registerRpc(path: string): void {
+    this.assertOpen();
     const [pathBytes, pathLen] = bytes(path);
     const status = this.library.symbols.r9p_front_register_rpc(
       this.handle,
@@ -667,6 +646,7 @@ export class FrontHost implements TransitionSink {
   }
 
   registerWriteRelay(path: string): void {
+    this.assertOpen();
     const [pathBytes, pathLen] = bytes(path);
     const status = this.library.symbols.r9p_front_register_write_relay(
       this.handle,
@@ -681,6 +661,7 @@ export class FrontHost implements TransitionSink {
   }
 
   registerRemoveRelay(path: string): void {
+    this.assertOpen();
     const [pathBytes, pathLen] = bytes(path);
     const status = this.library.symbols.r9p_front_register_remove_relay(
       this.handle,
@@ -695,6 +676,7 @@ export class FrontHost implements TransitionSink {
   }
 
   registerWstatRelay(path: string): void {
+    this.assertOpen();
     const [pathBytes, pathLen] = bytes(path);
     const status = this.library.symbols.r9p_front_register_wstat_relay(
       this.handle,
@@ -709,6 +691,7 @@ export class FrontHost implements TransitionSink {
   }
 
   registerLog(path: string): void {
+    this.assertOpen();
     const [pathBytes, pathLen] = bytes(path);
     const status = this.library.symbols.r9p_front_register_log(
       this.handle,
@@ -723,6 +706,7 @@ export class FrontHost implements TransitionSink {
   }
 
   async nextRequest(timeoutMs: number): Promise<IntakeRequest | null> {
+    this.assertOpen();
     const idOut = new Uint8Array(8);
     const lenOut = new Uint8Array(8);
     const status = await this.library.symbols.r9p_front_next_request(
@@ -805,6 +789,7 @@ export class FrontHost implements TransitionSink {
   }
 
   completeRequest(prefix: string, requestId: bigint, result: string): void {
+    this.assertOpen();
     const [prefixBytes, prefixLen] = bytes(prefix);
     const [body, bodyLen] = bytes(result);
     const status = this.library.symbols.r9p_front_complete_request(
@@ -823,6 +808,7 @@ export class FrontHost implements TransitionSink {
   }
 
   completeWrite(prefix: string, requestId: bigint, count: number): void {
+    this.assertOpen();
     const [prefixBytes, prefixLen] = bytes(prefix);
     const status = this.library.symbols.r9p_front_complete_write(
       this.handle,
@@ -839,6 +825,7 @@ export class FrontHost implements TransitionSink {
   }
 
   rejectWrite(prefix: string, requestId: bigint, message: string): void {
+    this.assertOpen();
     const [prefixBytes, prefixLen] = bytes(prefix);
     const [messageBytes, messageLen] = bytes(message);
     const status = this.library.symbols.r9p_front_reject_write(
@@ -857,6 +844,7 @@ export class FrontHost implements TransitionSink {
   }
 
   completeRemove(prefix: string, requestId: bigint): void {
+    this.assertOpen();
     const [prefixBytes, prefixLen] = bytes(prefix);
     const status = this.library.symbols.r9p_front_complete_remove(
       this.handle,
@@ -872,6 +860,7 @@ export class FrontHost implements TransitionSink {
   }
 
   rejectRemove(prefix: string, requestId: bigint, message: string): void {
+    this.assertOpen();
     const [prefixBytes, prefixLen] = bytes(prefix);
     const [messageBytes, messageLen] = bytes(message);
     const status = this.library.symbols.r9p_front_reject_remove(
@@ -890,6 +879,7 @@ export class FrontHost implements TransitionSink {
   }
 
   completeWstat(prefix: string, requestId: bigint): void {
+    this.assertOpen();
     const [prefixBytes, prefixLen] = bytes(prefix);
     const status = this.library.symbols.r9p_front_complete_wstat(
       this.handle,
@@ -905,6 +895,7 @@ export class FrontHost implements TransitionSink {
   }
 
   rejectWstat(prefix: string, requestId: bigint, message: string): void {
+    this.assertOpen();
     const [prefixBytes, prefixLen] = bytes(prefix);
     const [messageBytes, messageLen] = bytes(message);
     const status = this.library.symbols.r9p_front_reject_wstat(
@@ -923,9 +914,15 @@ export class FrontHost implements TransitionSink {
   }
 
   close(): void {
+    if (this.closed) return;
+    this.closed = true;
     this.library.symbols.r9p_front_stop(this.handle);
     this.library.symbols.r9p_front_free(this.handle);
     this.library.close();
+  }
+
+  private assertOpen(): void {
+    if (this.closed) throw new Error("front host is closed");
   }
 
   private lastError(): string {

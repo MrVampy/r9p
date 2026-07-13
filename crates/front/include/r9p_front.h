@@ -2,10 +2,10 @@
 #define R9P_FRONT_H
 
 /*
- * r9p front C ABI, version 17.
+ * r9p front C ABI, version 18.
  *
  * Contract rules:
- * - r9p_front_abi_version() must return 17 before calls are made.
+ * - r9p_front_abi_version() must return 18 before calls are made.
  * - r9p_front_new() returns an owned handle; every handle must be released
  *   exactly once with r9p_front_free(). Calls other than r9p_front_free()
  *   are thread-safe: they may be called from any thread concurrently.
@@ -103,11 +103,11 @@
  *   endpoint_bind, attaches as uname/aname, opens path O_READ, reads the file
  *   contents, and copies the bytes into caller-provided memory. response_len_out
  *   follows the same full-length contract as r9p_front_client_rpc.
- * - r9p_front_client_create_at, r9p_front_client_write_file, and
- *   r9p_front_client_remove are the v16 outbound native mutation helpers.
- *   They perform Tcreate against an explicit parent and name, replace a file
- *   through OWRITE|OTRUNC, and perform Tremove respectively. They carry no
- *   service-registration or namespace policy.
+ * - r9p_front_client_create_at, r9p_front_client_create_write_at,
+ *   r9p_front_client_write_file, and r9p_front_client_remove are outbound
+ *   native mutation helpers. create_write_at keeps the created fid open for
+ *   its initial write; the other operations create, replace, and remove.
+ *   They carry no service-registration or namespace policy.
  */
 
 #include <stddef.h>
@@ -212,6 +212,12 @@ int32_t r9p_front_client_create_at(
     const char *parent, size_t parent_len, const char *name, size_t name_len,
     uint32_t perm, uint8_t mode, uint32_t msize, uint8_t *qid_type_out,
     uint32_t *qid_version_out, uint64_t *qid_path_out);
+int32_t r9p_front_client_create_write_at(
+    r9p_front *front, const char *endpoint_bind, size_t endpoint_bind_len,
+    const char *uname, size_t uname_len, const char *aname, size_t aname_len,
+    const char *parent, size_t parent_len, const char *name, size_t name_len,
+    uint32_t perm, uint8_t mode, uint64_t offset, const uint8_t *bytes,
+    size_t bytes_len, uint32_t msize, uint32_t *count_out);
 int32_t r9p_front_client_write_file(
     r9p_front *front, const char *endpoint_bind, size_t endpoint_bind_len,
     const char *uname, size_t uname_len, const char *aname, size_t aname_len,

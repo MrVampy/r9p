@@ -1,6 +1,6 @@
 use front::abi::{
-    r9p_front_client_create_at, r9p_front_client_remove, r9p_front_client_write_file,
-    r9p_front_free, r9p_front_new,
+    r9p_front_client_create_at, r9p_front_client_create_write_at, r9p_front_client_remove,
+    r9p_front_client_write_file, r9p_front_free, r9p_front_new,
 };
 use fs::{LocalTree, LocalTreeConfig};
 use r9p::{codec, message::TMessage, server::Server};
@@ -27,7 +27,7 @@ fn client_mutations_use_native_9p_operations() -> TestResult<()> {
     let address = listener.local_addr()?.to_string();
     let server_root = root.clone();
     let server = thread::spawn(move || -> TestResult<()> {
-        for _ in 0..3 {
+        for _ in 0..4 {
             let (stream, _) = listener.accept()?;
             let tree =
                 LocalTree::open_with_config(&server_root, LocalTreeConfig { writable: true })?;
@@ -91,6 +91,35 @@ fn client_mutations_use_native_9p_operations() -> TestResult<()> {
     assert_eq!(write_status, 0);
     assert_eq!(count as usize, body.len());
     assert_eq!(std_fs::read(root.join("created"))?, body);
+
+    let (atomic_name, atomic_name_len) = cstr("atomic");
+    let atomic_body = b"create and write\n";
+    let mut atomic_count = 0_u32;
+    let atomic_status = unsafe {
+        r9p_front_client_create_write_at(
+            handle,
+            target.endpoint,
+            target.endpoint_len,
+            target.uname,
+            target.uname_len,
+            target.aname,
+            target.aname_len,
+            parent,
+            parent_len,
+            atomic_name,
+            atomic_name_len,
+            0o600,
+            1,
+            0,
+            atomic_body.as_ptr(),
+            atomic_body.len(),
+            65_536,
+            &mut atomic_count,
+        )
+    };
+    assert_eq!(atomic_status, 0);
+    assert_eq!(atomic_count as usize, atomic_body.len());
+    assert_eq!(std_fs::read(root.join("atomic"))?, atomic_body);
 
     let remove_status = unsafe {
         r9p_front_client_remove(

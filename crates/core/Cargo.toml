@@ -3,7 +3,7 @@ name = "r9p"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 version = "0.1.0"
-description = "Reusable Rust 9P2000 protocol primitives for substrate-shaped systems"
+description = "Reusable Rust 9P2000 protocol primitives"
 repository = "https://github.com/MrVampy/r9p"
 
 [lints.clippy]

@@ -1,6 +1,6 @@
 # r9p Architecture
 
-`r9p` is the reusable 9P protocol primitive. It is intentionally narrower than a filesystem, narrower than a FUSE bridge, and narrower than any one substrate participant.
+`r9p` is the reusable 9P protocol primitive. It is intentionally narrower than a filesystem, narrower than a FUSE bridge, and narrower than any one application.
 
 ## Boundary
 
@@ -18,7 +18,7 @@ r9p client core
   9P operation builders and response admission
 
 consumer
-  Rust program, FUSE bridge, export helper, test harness, future substrate participant
+  Rust program, FUSE bridge, export helper, test harness, namespace service
 ```
 
 The core rule is: `r9p` speaks 9P; backends decide what to serve; consumers decide what to do with the bytes; runtime adapters decide how bytes move.

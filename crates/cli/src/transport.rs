@@ -220,7 +220,7 @@ mod tests {
     use super::{command_address, transport_io_error, unix_address_path};
 
     #[test]
-    fn accepts_legacy_and_descriptor_unix_address_forms() {
+    fn accepts_plan9_and_descriptor_unix_address_forms() {
         assert_eq!(
             unix_address_path("unix!/tmp/r9p.sock"),
             Some("/tmp/r9p.sock")

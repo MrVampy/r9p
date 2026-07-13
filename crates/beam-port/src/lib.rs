@@ -474,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn connect_stream_accepts_unix_colon_bind() {
+    fn connect_stream_accepts_descriptor_unix_bind() {
         let socket_path = temp_socket_path("colon-bind");
         let _ = fs::remove_file(&socket_path);
         let listener = UnixListener::bind(&socket_path);

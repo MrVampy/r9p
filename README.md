@@ -1,6 +1,6 @@
 # r9p
 
-`r9p` is the reusable Rust 9P library for substrate-shaped systems. It owns
+`r9p` is the reusable Rust 9P library. It owns
 9P2000 wire types, encoding/decoding, fid/tag/session mechanics, and generic
 client/server protocol state. It does not own any particular filesystem,
 editor, Vault, FUSE, socket, async runtime, or transport policy.

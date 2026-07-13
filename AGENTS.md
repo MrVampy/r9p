@@ -1,6 +1,6 @@
 # r9p Agent Instructions
 
-`r9p` is the reusable Rust 9P protocol crate for the substrate. It is source-grounded: before changing protocol behavior, compatibility claims, architecture docs, or implementation plans, inspect the relevant local sources listed in [`docs/source-map.md`](docs/source-map.md).
+`r9p` is the reusable Rust 9P protocol workspace. It is source-grounded: before changing protocol behavior, compatibility claims, architecture docs, or implementation plans, inspect the relevant local sources listed in [`docs/source-map.md`](docs/source-map.md).
 
 ## Required Workflow
 

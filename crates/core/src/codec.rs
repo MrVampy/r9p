@@ -507,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn stat_length_defaults_to_zero_for_compatibility() {
+    fn stat_length_defaults_to_zero() {
         let stat = Stat::new(".", Qid::dir(0), DMDIR | 0o500);
         assert_eq!(stat.length, 0);
     }

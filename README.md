@@ -13,8 +13,6 @@ Current surfaces and consumers:
 - `r9p mount`, the Linux FUSE-to-9P bridge.
 - `r9p serve`, a read-only local filesystem-backed 9P server.
 - `r9p export`, `serve` plus a machine-readable `r9p-export.v1` descriptor.
-- `r9p export git`, a Git-source facade that prepares a clean detached
-  worktree, writes a bundle inside it, and then enters `r9p export`.
 - Racme serves an Acme-compatible 9P namespace through `r9p`.
 - Vault consumes `r9p` for its runtime listener, one-shot client operations,
   local FUSE mounts, and peer export descriptors.
@@ -62,8 +60,6 @@ r9p mount [--uname uname] [--aname aname] [--attr-timeout seconds] [--entry-time
 r9p mount ensure|status|stop --mountpoint path [--unit name] [--status-file path] [--expect-endpoint endpoint] [--expect-change-feed path] [--expect-status-file path] [--attempts count] [-- mount args...]
 r9p serve [--bind address] root
 r9p export [--bind address] [--descriptor machine] [--descriptor-file path] [--auth boundary] [--descriptor-field key=value] root
-r9p export git [--repo path] [--rev rev] [--worktree path] [--bundle-path path] [--bundle-namespace-path path] [--bind address] [--max-fids count] [--descriptor-file path] [--auth boundary]
-r9p export git ensure|status|stop --unit name [--descriptor-file path]
 ```
 
 `-a` accepts `host:port`, `tcp!host!port`, bare hosts defaulting to port 564,
@@ -74,21 +70,6 @@ always uses the noauth attach path today.
 
 The CLI is a blocking client facade over the reusable library. It is not the
 boundary of the library itself.
-
-`r9p export git` is a convenience facade over `r9p export`, not a separate
-server. It resolves a commit, prepares or refreshes a clean detached worktree,
-creates a Git bundle inside that worktree, and emits the normal
-`r9p-export.v1` descriptor with a `git_bundle_path` extension field. The
-command stays backend-neutral at the r9p layer: it serves bytes and descriptor
-metadata over 9P; consumers decide how to validate Git provenance or admit a
-candidate.
-
-The lifecycle form supervises that Git export through a user systemd unit.
-`ensure` and `status` print the descriptor document on stdout by default.
-`--descriptor-file` is an optional extra sink when a caller also wants a
-durable descriptor copy. Lifecycle supervision records the resolved commit in
-the unit command, so a symbolic revision such as `HEAD` moving makes the next
-`ensure` refresh the export instead of describing stale served bytes.
 
 `r9p mount` runs a bounded worker pool rather than spawning one OS thread per
 FUSE request. The defaults follow the conservative libfuse/Linux shape:

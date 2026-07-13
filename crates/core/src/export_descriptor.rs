@@ -432,17 +432,14 @@ mod tests {
     fn descriptor_round_trips_extension_fields() {
         let mut descriptor = descriptor();
         descriptor.extra_fields.insert(
-            "git_bundle_path".to_string(),
-            "/.vault/source.bundle".to_string(),
+            "content_path".to_string(),
+            "/export/content.bin".to_string(),
         );
         let rendered = descriptor.render().expect("descriptor should render");
         let parsed = ExportDescriptor::parse(&rendered).expect("descriptor should parse");
         assert_eq!(
-            parsed
-                .extra_fields
-                .get("git_bundle_path")
-                .map(String::as_str),
-            Some("/.vault/source.bundle")
+            parsed.extra_fields.get("content_path").map(String::as_str),
+            Some("/export/content.bin")
         );
     }
 

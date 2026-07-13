@@ -744,17 +744,14 @@ mod tests {
                 "--bind".to_string(),
                 "127.0.0.1:0".to_string(),
                 "--descriptor-field".to_string(),
-                "git_bundle_path=/.vault/source-export.bundle".to_string(),
+                "content_path=/export/content.bin".to_string(),
                 "/tmp/export".to_string(),
             ],
         )
         .expect("export config should parse");
         assert_eq!(
-            config
-                .extra_fields
-                .get("git_bundle_path")
-                .map(String::as_str),
-            Some("/.vault/source-export.bundle")
+            config.extra_fields.get("content_path").map(String::as_str),
+            Some("/export/content.bin")
         );
     }
 

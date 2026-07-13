@@ -304,7 +304,14 @@ fn read_tmessage(stream: &mut impl Read) -> Result<Option<TMessage>, String> {
     let mut prefix = [0_u8; 4];
     match stream.read_exact(&mut prefix) {
         Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset
+            ) =>
+        {
+            return Ok(None);
+        }
         Err(error) => return Err(error.to_string()),
     }
     let size = u32::from_le_bytes(prefix);

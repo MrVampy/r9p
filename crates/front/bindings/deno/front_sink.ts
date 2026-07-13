@@ -1,5 +1,8 @@
 export const SUPPORTED_ABI_VERSIONS = new Set([16]);
 
+export { renderExportDescriptor } from "./export_descriptor.ts";
+export type { ExportDescriptorOptions } from "./export_descriptor.ts";
+
 const SYMBOLS = {
   r9p_front_abi_version: { parameters: [], result: "u32" },
   r9p_front_new: { parameters: [], result: "pointer" },

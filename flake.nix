@@ -42,6 +42,8 @@
                 "$out/lib/libfront.so"
               install -Dm644 crates/front/bindings/deno/front_sink.ts \
                 "$out/share/r9p/front/deno/front_sink.ts"
+              install -Dm644 crates/front/bindings/deno/export_descriptor.ts \
+                "$out/share/r9p/front/deno/export_descriptor.ts"
               runHook postInstall
             '';
           };

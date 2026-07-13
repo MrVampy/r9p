@@ -125,6 +125,19 @@ impl PeerClientServer {
                     create_at_output(client, &parent, &name, perm, mode)
                 })
             }
+            ["create-write-at", bind, uname, aname, msize, parent, name, perm, mode, offset, data] =>
+            {
+                let key = target_key(bind, uname, aname, msize)?;
+                let parent = hex::decode_text(parent)?;
+                let name = hex::decode_text(name)?;
+                let perm = parse_u32("perm", perm)?;
+                let mode = parse_u8("mode", mode)?;
+                let offset = parse_u64("offset", offset)?;
+                let data = hex::decode(data)?;
+                self.with_client(&key, |client| {
+                    create_write_at_output(client, &parent, &name, perm, mode, offset, &data)
+                })
+            }
             ["remove", bind, uname, aname, msize, path] => {
                 let key = target_key(bind, uname, aname, msize)?;
                 let path = hex::decode_text(path)?;
@@ -302,6 +315,20 @@ fn create_at_output(
         "create\t{}\t{}\t{}\t{}",
         qid.qtype, qid.version, qid.path, iounit
     ))
+}
+
+fn create_write_at_output(
+    client: &mut BoxedClient,
+    parent: &str,
+    name: &str,
+    perm: u32,
+    mode: u8,
+    offset: u64,
+    data: &[u8],
+) -> R9pResult<String> {
+    client
+        .create_write_at(parent, name, perm, mode, offset, data)
+        .map(|count| format!("create-write-at\t{count}"))
 }
 
 fn remove_output(client: &mut BoxedClient, path: &str) -> R9pResult<String> {

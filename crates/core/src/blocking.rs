@@ -376,6 +376,35 @@ impl<S: Read + Write> Client<S> {
         }
     }
 
+    pub fn create_write_at(
+        &mut self,
+        parent: &str,
+        name: &str,
+        perm: u32,
+        mode: u8,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<u32> {
+        let parent_fid = self.walk_path(parent)?;
+        let created = self.create(parent_fid, name.as_bytes(), perm, mode);
+        let parent_clunk = self.clunk(parent_fid);
+        let (fid, _) = created?;
+        if let Err(error) = parent_clunk {
+            let _ = self.clunk(fid);
+            return Err(error);
+        }
+
+        let written = self.write(fid, offset, data);
+        let clunked = self.clunk(fid);
+        match written {
+            Ok(count) => {
+                clunked?;
+                Ok(count)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn remove_path(&mut self, path: &str) -> Result<()> {
         let fid = self.walk_path(path)?;
         self.remove(fid)

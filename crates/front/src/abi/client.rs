@@ -223,29 +223,10 @@ pub unsafe extern "C" fn r9p_front_client_create_write_at(
         Ok(client) => client,
         Err(error) => return set_last_error(abi, error),
     };
-    let parent_fid = match client.walk_path(parent) {
-        Ok(fid) => fid,
-        Err(error) => return set_last_error(abi, error),
-    };
-    let created = client.create(parent_fid, name.as_bytes(), perm, mode);
-    let parent_clunk = client.clunk(parent_fid);
-    let (fid, _) = match created {
-        Ok(created) => created,
-        Err(error) => return set_last_error(abi, error),
-    };
-    if let Err(error) = parent_clunk {
-        let _ = client.clunk(fid);
-        return set_last_error(abi, error);
-    }
-    let written = client.write(fid, offset, bytes);
-    let clunked = client.clunk(fid);
-    let count = match written {
+    let count = match client.create_write_at(parent, name, perm, mode, offset, bytes) {
         Ok(count) => count,
         Err(error) => return set_last_error(abi, error),
     };
-    if let Err(error) = clunked {
-        return set_last_error(abi, error);
-    }
     unsafe {
         *count_out = count;
     }

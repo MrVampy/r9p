@@ -226,6 +226,29 @@ pub fn create_at(
   parse_create_line(line)
 }
 
+pub fn create_write_at(
+  adapter: Adapter,
+  target: Target,
+  parent: String,
+  name: String,
+  perm: Int,
+  mode: Int,
+  offset: Int,
+  data: BitArray,
+) -> Result(Int, String) {
+  use line <- result.try(
+    run(adapter, target, "create-write-at", [
+      text(parent),
+      text(name),
+      int.to_string(perm),
+      int.to_string(mode),
+      int.to_string(offset),
+      codec.encode_hex(data),
+    ]),
+  )
+  parse_count_line("create-write-at", line)
+}
+
 fn parse_create_line(line: String) -> Result(CreateInfo, String) {
   case codec.fields(line) {
     ["create", raw_qtype, raw_version, raw_path, raw_iounit] -> {

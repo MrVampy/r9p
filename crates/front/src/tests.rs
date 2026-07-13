@@ -841,35 +841,35 @@ fn create_relay_projects_slash_names_as_nested_paths() -> Result<()> {
 fn create_relay_delegates_existing_child_name_to_backend_policy() -> Result<()> {
     let front = Front::new();
     front.set_pushed_directory(
-        "srv/wait",
+        "registry/reserved",
         PushedDirectoryMetadata {
             qid_path: 8001,
             qid_version: 7,
             generation: 70,
             visibility_class: "runtime-reader".to_string(),
-            freshness_ref: "freshness:srv/wait".to_string(),
-            wake_token: "wake:srv/wait".to_string(),
+            freshness_ref: "freshness:registry/reserved".to_string(),
+            wake_token: "wake:registry/reserved".to_string(),
         },
     )?;
-    front.register_create_relay("srv")?;
+    front.register_create_relay("registry")?;
     front.set_wait_timeout(Duration::from_secs(5))?;
     let writer_front = front.clone();
     let (done_tx, done_rx) = mpsc::channel();
     let writer = thread::spawn(move || {
         let mut tree = writer_front.tree();
         tree.attach(1, b"alice", b"/")?;
-        let qids = walk_to(&mut tree, 1, 2, &["srv"]);
-        let result = tree.create(2, qids[0], b"wait", 0o666, OWRITE);
+        let qids = walk_to(&mut tree, 1, 2, &["registry"]);
+        let result = tree.create(2, qids[0], b"reserved", 0o666, OWRITE);
         done_tx.send(result).expect("send create result");
         Ok::<(), Error>(())
     });
 
-    let create = front.next_create_request_for_prefix_blocking("srv")?;
-    assert_eq!(create.prefix, "srv");
-    assert_eq!(create.name, "wait");
-    assert_eq!(create.context.front_path, "/srv/wait");
-    assert_eq!(create.context.target_path, "/srv/wait");
-    front.reject_create("srv", create.request_id, "reserved_name")?;
+    let create = front.next_create_request_for_prefix_blocking("registry")?;
+    assert_eq!(create.prefix, "registry");
+    assert_eq!(create.name, "reserved");
+    assert_eq!(create.context.front_path, "/registry/reserved");
+    assert_eq!(create.context.target_path, "/registry/reserved");
+    front.reject_create("registry", create.request_id, "reserved_name")?;
 
     let result = done_rx
         .recv_timeout(Duration::from_secs(1))

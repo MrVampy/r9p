@@ -162,24 +162,6 @@ impl ExportDescriptor {
         Ok(descriptor)
     }
 
-    pub fn vault_transport_class(&self) -> Result<String> {
-        match self.transport_class {
-            TransportClass::Unix => Ok("unix_socket".to_string()),
-            TransportClass::Tcp if tcp_endpoint_is_loopback(&self.endpoint_bind) => {
-                Ok("loopback".to_string())
-            }
-            TransportClass::Tcp => match self.auth.class {
-                AuthClass::WireGuard | AuthClass::Tailscale if !self.auth.details.is_empty() => {
-                    Ok(format!("network_class:{}", self.auth.details))
-                }
-                _ => Err(Error::from(format!(
-                    "descriptor tcp auth boundary not mountable: {}",
-                    self.auth.render()
-                ))),
-            },
-        }
-    }
-
     fn validate_authority_boundary(&self) -> Result<()> {
         match (self.transport_class, self.auth.class) {
             (TransportClass::Tcp, AuthClass::None)
@@ -547,12 +529,6 @@ mod tests {
         let rendered = descriptor.render().expect("descriptor should render");
         let parsed = ExportDescriptor::parse(&rendered).expect("descriptor should parse");
         assert_eq!(parsed.auth.render(), "wg:m7-dev-lan");
-        assert_eq!(
-            parsed
-                .vault_transport_class()
-                .expect("transport class should render"),
-            "network_class:m7-dev-lan"
-        );
     }
 
     #[test]

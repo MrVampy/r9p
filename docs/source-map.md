@@ -21,9 +21,9 @@ This map defines the local sources agents should inspect before making source-sp
 - `crates/core/src/srv_publish.rs`
   - Current `/srv` export publication and maintenance client used by the
     front ABI, BEAM adapter, and custom Rust services.
-  - This is a known crate-boundary exception: registration policy should move
-    to a dedicated registration crate in a coordinated consumer migration,
-    not remain protocol-core behavior.
+  - This is a known repository-boundary exception: registration policy should
+    move to a Vault-owned registration client crate in a coordinated consumer
+    migration, not remain protocol-core behavior.
 - `crates/core/src/multiplex/`
   - Layered blocking transport facade for concurrent tagged client calls.
 - `crates/core/src/stat.rs`

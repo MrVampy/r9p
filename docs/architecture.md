@@ -26,8 +26,10 @@ The core rule is: `r9p` speaks 9P; backends decide what to serve; consumers deci
 The current `r9p::srv_publish` module is a known exception to that boundary.
 It owns Vault `/srv` publication and lease-maintenance behavior because the
 front ABI, BEAM adapter, and custom Rust `FileTree` services all consume it.
-The correct cleanup is a dedicated registration crate with those consumers
-migrated together. Moving it into the in-memory front would couple custom
+The correct cleanup is a Vault-owned registration client crate with those
+consumers migrated together. Registration descriptors, lease maintenance, and
+the `/srv` namespace contract belong to Vault governance, not to generic 9P.
+Moving the implementation into the in-memory front would couple custom
 backends to `Front`; leaving a compatibility re-export in core would preserve
 the wrong ownership.
 

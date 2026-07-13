@@ -29,6 +29,9 @@ front ABI, BEAM adapter, and custom Rust `FileTree` services all consume it.
 The correct cleanup is a Vault-owned registration client crate with those
 consumers migrated together. Registration descriptors, lease maintenance, and
 the `/srv` namespace contract belong to Vault governance, not to generic 9P.
+That client must communicate exclusively through ordinary r9p namespace
+operations against the runtime door; it has no internal or privileged runtime
+control path.
 Moving the implementation into the in-memory front would couple custom
 backends to `Front`; leaving a compatibility re-export in core would preserve
 the wrong ownership.

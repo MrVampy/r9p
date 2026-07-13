@@ -478,7 +478,7 @@ fn create_and_write<S: std::io::Read + std::io::Write>(
     descriptor: &str,
 ) -> Result<()> {
     let (parent_path, create_name) = srv_create_parent_and_name(service_name)?;
-    let parent = client.walk_path(&parent_path)?;
+    let parent = client.walk_path(parent_path)?;
     let (fid, _) = client.create(parent, create_name.as_bytes(), 0o666, OWRITE)?;
     let write_result = client.write(fid, 0, descriptor.as_bytes());
     let clunk_result = client.clunk(fid);

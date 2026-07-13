@@ -1,5 +1,5 @@
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     thread::{self, JoinHandle},
     time::Duration,
 };
@@ -67,7 +67,7 @@ pub(crate) fn start_session_mount(
 
 fn mount_config(
     control: &ControlConfig,
-    mountpoint: &PathBuf,
+    mountpoint: &Path,
     mount: &SessionMountConfig,
 ) -> MountConfig {
     MountConfig {

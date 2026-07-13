@@ -15,6 +15,23 @@ use r9p::blocking::DEFAULT_READ_CHUNK;
 use r9p::stat::Stat;
 use std::time::Duration;
 
+pub(super) struct SnapshotRequest<'a> {
+    pub path: &'a str,
+    pub depth: usize,
+    pub timeout: Duration,
+    pub options: &'a SnapshotOptions,
+    pub cache_reads_enabled: bool,
+    pub response_freshness: &'a ResponseFreshness,
+}
+
+struct SnapshotWalk<'a> {
+    client: &'a Client,
+    cache: &'a NamespaceCache,
+    timeout: Duration,
+    options: &'a SnapshotOptions,
+    cache_reads_enabled: bool,
+}
+
 pub fn snapshot_json(
     client: &Client,
     cache: &NamespaceCache,
@@ -24,55 +41,51 @@ pub fn snapshot_json(
     cache_reads_enabled: bool,
     response_freshness: &ResponseFreshness,
 ) -> Result<String> {
+    let options = SnapshotOptions::default();
     snapshot_json_with_options(
         client,
         cache,
-        path,
-        depth,
-        timeout,
-        &SnapshotOptions::default(),
-        cache_reads_enabled,
-        response_freshness,
+        SnapshotRequest {
+            path,
+            depth,
+            timeout,
+            options: &options,
+            cache_reads_enabled,
+            response_freshness,
+        },
     )
 }
 
-pub fn snapshot_json_with_options(
+pub(super) fn snapshot_json_with_options(
     client: &Client,
     cache: &NamespaceCache,
-    path: &str,
-    depth: usize,
-    timeout: Duration,
-    options: &SnapshotOptions,
-    cache_reads_enabled: bool,
-    response_freshness: &ResponseFreshness,
+    request: SnapshotRequest<'_>,
 ) -> Result<String> {
-    let segments = parse_namespace_path(path);
+    let segments = parse_namespace_path(request.path);
     let mut report = SnapshotReport::default();
-    collect_snapshot(
+    let walk = SnapshotWalk {
         client,
         cache,
-        &segments,
-        depth,
-        timeout,
-        options,
-        cache_reads_enabled,
-        &mut report,
-    )?;
+        timeout: request.timeout,
+        options: request.options,
+        cache_reads_enabled: request.cache_reads_enabled,
+    };
+    collect_snapshot(&walk, &segments, request.depth, &mut report)?;
 
     let mut out = String::from("{\"ok\":true,\"kind\":\"session.snapshot.v1\",\"path\":");
     json::push_string(&mut out, &format_path(&segments));
     out.push_str(",\"depth\":");
-    out.push_str(&depth.to_string());
+    out.push_str(&request.depth.to_string());
     out.push_str(",\"freshness\":");
-    freshness::push_json(&mut out, response_freshness);
+    freshness::push_json(&mut out, request.response_freshness);
     out.push_str(",\"cache\":");
-    push_cache_report(&mut out, &report.cache, cache_reads_enabled);
+    push_cache_report(&mut out, &report.cache, request.cache_reads_enabled);
     out.push_str(",\"entries\":[");
     for (index, entry) in report.entries.iter().enumerate() {
         if index > 0 {
             out.push(',');
         }
-        push_snapshot_entry(&mut out, entry, options);
+        push_snapshot_entry(&mut out, entry, request.options);
     }
     out.push_str("],\"degraded\":[");
     for (index, degraded) in report.degraded.iter().enumerate() {
@@ -203,43 +216,39 @@ pub fn read_json(
 }
 
 fn collect_snapshot(
-    client: &Client,
-    cache: &NamespaceCache,
+    walk: &SnapshotWalk<'_>,
     segments: &[Vec<u8>],
     depth: usize,
-    timeout: Duration,
-    options: &SnapshotOptions,
-    cache_reads_enabled: bool,
     report: &mut SnapshotReport,
 ) -> Result<()> {
     let stat = stat_for_path(
-        client,
-        cache,
+        walk.client,
+        walk.cache,
         segments,
-        timeout,
-        cache_reads_enabled,
+        walk.timeout,
+        walk.cache_reads_enabled,
         &mut report.cache,
     )?;
     let is_directory = is_dir(&stat);
     let entry = SnapshotEntry::from_stat(format_path(segments), &stat);
-    let include_entry = options.include.includes(entry.kind());
-    if include_entry && !report.push_entry(entry, options) {
+    let include_entry = walk.options.include.includes(entry.kind());
+    if include_entry && !report.push_entry(entry, walk.options) {
         return Ok(());
     }
 
     if is_directory && depth > 0 {
-        if report.entries_full(options) {
+        if report.entries_full(walk.options) {
             report
                 .degraded
                 .push(DegradedBranch::budget_truncated(format_path(segments)));
             return Ok(());
         }
         let children = directory_entries_for_path(
-            client,
-            cache,
+            walk.client,
+            walk.cache,
             segments,
-            timeout,
-            cache_reads_enabled,
+            walk.timeout,
+            walk.cache_reads_enabled,
             &mut report.cache,
         )?;
         for child in children {
@@ -248,22 +257,13 @@ fn collect_snapshot(
             }
             let mut child_path = segments.to_vec();
             child_path.push(child.name);
-            if report.entries_full(options) {
+            if report.entries_full(walk.options) {
                 report
                     .degraded
                     .push(DegradedBranch::budget_truncated(format_path(&child_path)));
                 continue;
             }
-            if let Err(error) = collect_snapshot(
-                client,
-                cache,
-                &child_path,
-                depth - 1,
-                timeout,
-                options,
-                cache_reads_enabled,
-                report,
-            ) {
+            if let Err(error) = collect_snapshot(walk, &child_path, depth - 1, report) {
                 report
                     .degraded
                     .push(DegradedBranch::from_error(format_path(&child_path), &error));

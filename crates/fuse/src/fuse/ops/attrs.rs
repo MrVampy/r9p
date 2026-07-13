@@ -96,16 +96,14 @@ impl R9pFuse {
             }
         };
 
-        if input.valid & FATTR_SIZE != 0 {
-            if !ignore_zero_truncate {
-                let mut stat = null_wstat();
-                stat.length = input.size;
-                if let Err(error) = client.wstat_timeout(fid, stat, self.mutation_timeout()) {
-                    if input.size == 0 {
-                        self.truncate_fallback(&client, fid)?;
-                    } else {
-                        return Err(error.into());
-                    }
+        if input.valid & FATTR_SIZE != 0 && !ignore_zero_truncate {
+            let mut stat = null_wstat();
+            stat.length = input.size;
+            if let Err(error) = client.wstat_timeout(fid, stat, self.mutation_timeout()) {
+                if input.size == 0 {
+                    self.truncate_fallback(&client, fid)?;
+                } else {
+                    return Err(error.into());
                 }
             }
         }

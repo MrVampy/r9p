@@ -197,9 +197,7 @@ impl R9pFuse {
         let flushed = self
             .client
             .snapshot()
-            .and_then(|client| {
-                Ok(client.interrupt_fuse_unique(input.unique, self.interrupt_timeout())?)
-            })
+            .and_then(|client| client.interrupt_fuse_unique(input.unique, self.interrupt_timeout()))
             .unwrap_or(0);
         if self.config.debug {
             eprintln!(

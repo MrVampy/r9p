@@ -113,12 +113,17 @@ fn response_json_result(
         } => snapshot::snapshot_json_with_options(
             client,
             cache,
-            &path,
-            depth,
-            config.request_timeout,
-            &options,
-            cache_reads_enabled(feed_cache_reads_enabled, options.freshness),
-            &response_freshness,
+            snapshot::SnapshotRequest {
+                path: &path,
+                depth,
+                timeout: config.request_timeout,
+                options: &options,
+                cache_reads_enabled: cache_reads_enabled(
+                    feed_cache_reads_enabled,
+                    options.freshness,
+                ),
+                response_freshness: &response_freshness,
+            },
         ),
         QueryRequest::Stat {
             path,

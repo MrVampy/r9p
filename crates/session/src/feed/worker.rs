@@ -199,7 +199,7 @@ fn process_feed_data(
     config: &FeedWorkerConfig,
     state: &FeedState,
 ) -> Result<Option<String>> {
-    let text = String::from_utf8_lossy(&data);
+    let text = String::from_utf8_lossy(data);
     let records = text
         .lines()
         .filter_map(parse_namespace_change_record)

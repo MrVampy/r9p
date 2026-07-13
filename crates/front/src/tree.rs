@@ -67,18 +67,18 @@ fn request_context(
     open_mode: u8,
     pushed_generation: u64,
 ) -> RequestContext {
-    RequestContext::new(
-        binding.principal_id.clone(),
-        String::from_utf8_lossy(&binding.uname).into_owned(),
-        String::from_utf8_lossy(&binding.aname).into_owned(),
-        binding.session_id,
+    RequestContext {
+        principal_id: binding.principal_id.clone(),
+        uname: String::from_utf8_lossy(&binding.uname).into_owned(),
+        aname: String::from_utf8_lossy(&binding.aname).into_owned(),
+        session_id: binding.session_id,
         fid,
         front_path,
         target_path,
         offset,
         open_mode,
         pushed_generation,
-    )
+    }
 }
 
 impl FileTree for FrontTree {
@@ -227,9 +227,7 @@ impl FileTree for FrontTree {
         let id = state.insert_created_relay_node(
             parent_id,
             &name_text,
-            qtype,
-            qid_version,
-            qid_path,
+            Qid::new(qtype, qid_version, qid_path),
             parent_generation,
             create_prefix,
         )?;

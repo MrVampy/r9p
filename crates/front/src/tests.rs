@@ -874,7 +874,10 @@ fn create_relay_delegates_existing_child_name_to_backend_policy() -> Result<()> 
     let result = done_rx
         .recv_timeout(Duration::from_secs(1))
         .expect("writer should finish");
-    assert_eq!(result.unwrap_err().to_string(), "reserved_name");
+    assert_eq!(
+        result.expect_err("create should be rejected").to_string(),
+        "reserved_name"
+    );
     writer.join().expect("writer join")?;
     Ok(())
 }

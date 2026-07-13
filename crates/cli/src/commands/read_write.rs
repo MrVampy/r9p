@@ -179,39 +179,6 @@ fn rpc_exchange(client: &mut BoxedClient, fid: Fid, request: &[u8]) -> CliResult
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::rpc_open_hint;
-    use r9p::{
-        qid::{Qid, DMDIR},
-        stat::Stat,
-    };
-
-    #[test]
-    fn rpc_hint_points_read_only_files_at_read() {
-        let stat = Stat::new("status", Qid::file(7), 0o444);
-        assert_eq!(
-            rpc_open_hint("/sources/x/status", &stat),
-            Some("/sources/x/status is a read-only file; use read /sources/x/status".to_string())
-        );
-    }
-
-    #[test]
-    fn rpc_hint_points_directories_at_ls() {
-        let stat = Stat::new("sources", Qid::dir(7), DMDIR | 0o555);
-        assert_eq!(
-            rpc_open_hint("/sources", &stat),
-            Some("/sources is a directory; use ls /sources".to_string())
-        );
-    }
-
-    #[test]
-    fn rpc_hint_leaves_writeable_files_to_protocol_errors() {
-        let stat = Stat::new("run", Qid::file(7), 0o600);
-        assert_eq!(rpc_open_hint("/operations/srvcheck/run", &stat), None);
-    }
-}
-
 pub(crate) fn write_at_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
     if args.len() != 2 {
         usage();
@@ -305,4 +272,37 @@ pub(crate) fn create_write_from_cmd(config: Config, args: Vec<String>) -> CliRes
     clunk?;
     println!("write\t{count}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rpc_open_hint;
+    use r9p::{
+        qid::{Qid, DMDIR},
+        stat::Stat,
+    };
+
+    #[test]
+    fn rpc_hint_points_read_only_files_at_read() {
+        let stat = Stat::new("status", Qid::file(7), 0o444);
+        assert_eq!(
+            rpc_open_hint("/sources/x/status", &stat),
+            Some("/sources/x/status is a read-only file; use read /sources/x/status".to_string())
+        );
+    }
+
+    #[test]
+    fn rpc_hint_points_directories_at_ls() {
+        let stat = Stat::new("sources", Qid::dir(7), DMDIR | 0o555);
+        assert_eq!(
+            rpc_open_hint("/sources", &stat),
+            Some("/sources is a directory; use ls /sources".to_string())
+        );
+    }
+
+    #[test]
+    fn rpc_hint_leaves_writeable_files_to_protocol_errors() {
+        let stat = Stat::new("run", Qid::file(7), 0o600);
+        assert_eq!(rpc_open_hint("/operations/srvcheck/run", &stat), None);
+    }
 }

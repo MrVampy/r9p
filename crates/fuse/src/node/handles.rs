@@ -17,6 +17,16 @@ pub struct Handle {
     pub dir_entries: Vec<DirEntry>,
 }
 
+pub(crate) struct OpenHandle {
+    pub client: Client,
+    pub fid: Option<Fid>,
+    pub open_mode: u8,
+    pub is_dir: bool,
+    pub write_on_release: bool,
+    pub close_commit: bool,
+    pub dir_entries: Vec<DirEntry>,
+}
+
 impl fmt::Debug for Handle {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -41,30 +51,21 @@ impl Handle {
 }
 
 impl NodeTable {
-    pub fn open_handle(
-        &mut self,
-        client: Client,
-        fid: Option<Fid>,
-        open_mode: u8,
-        is_dir: bool,
-        write_on_release: bool,
-        close_commit: bool,
-        dir_entries: Vec<DirEntry>,
-    ) -> u64 {
+    pub(crate) fn open_handle(&mut self, open: OpenHandle) -> u64 {
         let handle = self.next_handle;
         self.next_handle = self.next_handle.saturating_add(1).max(1);
         self.handles.insert(
             handle,
             Handle {
-                client,
-                fid,
-                open_mode,
-                is_dir,
-                write_on_release,
-                close_commit,
+                client: open.client,
+                fid: open.fid,
+                open_mode: open.open_mode,
+                is_dir: open.is_dir,
+                write_on_release: open.write_on_release,
+                close_commit: open.close_commit,
                 close_commit_flushed: false,
                 bytes_written: 0,
-                dir_entries,
+                dir_entries: open.dir_entries,
             },
         );
         handle

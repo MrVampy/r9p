@@ -6,7 +6,7 @@ use crate::{
         wire::{FuseInHeader, FuseOpenIn, FuseOpenOut},
         R9pFuse,
     },
-    node::{has_close_commit_mode, is_dir, read_open_directory_entries},
+    node::{has_close_commit_mode, is_dir, read_open_directory_entries, OpenHandle},
 };
 use session::{OREAD, OTRUNC};
 use std::fs::File;
@@ -60,9 +60,15 @@ impl R9pFuse {
         let client = self.client_snapshot()?;
         if is_dir_open {
             if let Some(dir_entries) = self.cached_dir_entries_if_fresh(header.nodeid)? {
-                let handle =
-                    self.nodes()?
-                        .open_handle(client, None, OREAD, true, false, false, dir_entries);
+                let handle = self.nodes()?.open_handle(OpenHandle {
+                    client,
+                    fid: None,
+                    open_mode: OREAD,
+                    is_dir: true,
+                    write_on_release: false,
+                    close_commit: false,
+                    dir_entries,
+                });
                 let out = FuseOpenOut {
                     fh: handle,
                     open_flags: fuse_open_flags(true, OREAD),
@@ -117,15 +123,15 @@ impl R9pFuse {
         };
         let write_on_release = !is_dir_open && mode != OREAD;
         let close_commit = write_on_release && close_commit_target;
-        let handle = self.nodes()?.open_handle(
-            client.clone(),
-            Some(fid),
-            mode,
-            is_dir_open,
+        let handle = self.nodes()?.open_handle(OpenHandle {
+            client: client.clone(),
+            fid: Some(fid),
+            open_mode: mode,
+            is_dir: is_dir_open,
             write_on_release,
             close_commit,
             dir_entries,
-        );
+        });
         let out = FuseOpenOut {
             fh: handle,
             open_flags: fuse_open_flags(is_dir_open, mode),

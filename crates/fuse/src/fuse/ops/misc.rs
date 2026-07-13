@@ -182,6 +182,15 @@ fn requested_access_is_allowed(mask: u32, mode: u32) -> bool {
     true
 }
 
+fn flush_should_close_commit(
+    write_on_release: bool,
+    close_commit: bool,
+    close_commit_flushed: bool,
+    bytes_written: u64,
+) -> bool {
+    write_on_release && close_commit && !close_commit_flushed && bytes_written > 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::{flush_should_close_commit, requested_access_is_allowed};
@@ -203,13 +212,4 @@ mod tests {
         assert!(!flush_should_close_commit(true, false, false, 1));
         assert!(!flush_should_close_commit(false, true, false, 1));
     }
-}
-
-fn flush_should_close_commit(
-    write_on_release: bool,
-    close_commit: bool,
-    close_commit_flushed: bool,
-    bytes_written: u64,
-) -> bool {
-    write_on_release && close_commit && !close_commit_flushed && bytes_written > 0
 }

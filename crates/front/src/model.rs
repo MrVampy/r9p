@@ -121,34 +121,6 @@ pub struct RequestContext {
     pub pushed_generation: u64,
 }
 
-impl RequestContext {
-    pub(crate) fn new(
-        principal_id: String,
-        uname: String,
-        aname: String,
-        session_id: u64,
-        fid: Fid,
-        front_path: String,
-        target_path: String,
-        offset: u64,
-        open_mode: u8,
-        pushed_generation: u64,
-    ) -> Self {
-        Self {
-            principal_id,
-            uname,
-            aname,
-            session_id,
-            fid,
-            front_path,
-            target_path,
-            offset,
-            open_mode,
-            pushed_generation,
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PushedEntryMetadata {
     pub qid_path: u64,
@@ -641,13 +613,11 @@ impl State {
         &mut self,
         parent_id: u64,
         name: &str,
-        qtype: u8,
-        qid_version: u32,
-        qid_path: u64,
+        qid: Qid,
         generation: u64,
         create_prefix: String,
     ) -> Result<u64> {
-        if self.qid_index.contains_key(&qid_path) {
+        if self.qid_index.contains_key(&qid.path) {
             return Err(Error::from_static("qid path already in use"));
         }
         let segments = split_path(name)?;
@@ -667,12 +637,12 @@ impl State {
         }
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
-        let write_relay = if qtype & QTDIR != 0 {
+        let write_relay = if qid.qtype & QTDIR != 0 {
             None
         } else {
             Some(create_prefix.clone())
         };
-        let body = if qtype & QTDIR != 0 {
+        let body = if qid.qtype & QTDIR != 0 {
             Body::Dir(BTreeMap::new())
         } else {
             Body::WriteRelay(create_prefix)
@@ -682,8 +652,8 @@ impl State {
             Node {
                 name: leaf.clone(),
                 parent,
-                qid_path,
-                version: qid_version,
+                qid_path: qid.path,
+                version: qid.version,
                 generation,
                 visibility_class: None,
                 freshness_ref: None,
@@ -695,7 +665,7 @@ impl State {
                 body,
             },
         );
-        self.qid_index.insert(qid_path, id);
+        self.qid_index.insert(qid.path, id);
         if let Some(Node {
             body: Body::Dir(children),
             ..

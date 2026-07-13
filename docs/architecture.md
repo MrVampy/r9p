@@ -23,6 +23,14 @@ consumer
 
 The core rule is: `r9p` speaks 9P; backends decide what to serve; consumers decide what to do with the bytes; runtime adapters decide how bytes move.
 
+The current `r9p::srv_publish` module is a known exception to that boundary.
+It owns Vault `/srv` publication and lease-maintenance behavior because the
+front ABI, BEAM adapter, and custom Rust `FileTree` services all consume it.
+The correct cleanup is a dedicated registration crate with those consumers
+migrated together. Moving it into the in-memory front would couple custom
+backends to `Front`; leaving a compatibility re-export in core would preserve
+the wrong ownership.
+
 ## Client And Server
 
 `r9p` owns both reusable protocol sides. The server side is the generic session plus backend boundary. The client side is the runtime-neutral operation builder plus response admission boundary. Keeping both sides in one crate is deliberate: tags, fids, stat records, message limits, flush handling, and wire encoding are shared protocol concerns, not application concerns.

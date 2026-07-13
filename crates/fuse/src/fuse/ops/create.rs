@@ -8,6 +8,7 @@ use crate::{
         wire::{FuseCreateIn, FuseCreateOut, FuseInHeader, FuseMkdirIn, FuseMknodIn, FuseOpenOut},
         R9pFuse,
     },
+    node::OpenHandle,
 };
 use r9p::{
     fid::Fid,
@@ -56,15 +57,15 @@ impl R9pFuse {
                 let mut nodes = self.nodes()?;
                 let inserted = nodes.insert_lookup(header.nodeid, node_fid, stat.clone(), name)?;
                 let nodeid = inserted.nodeid;
-                let handle = nodes.open_handle(
-                    client.clone(),
-                    Some(open_fid),
-                    mode,
-                    false,
-                    mode != OREAD,
-                    false,
-                    Vec::new(),
-                );
+                let handle = nodes.open_handle(OpenHandle {
+                    client: client.clone(),
+                    fid: Some(open_fid),
+                    open_mode: mode,
+                    is_dir: false,
+                    write_on_release: mode != OREAD,
+                    close_commit: false,
+                    dir_entries: Vec::new(),
+                });
                 let generation = nodes.node(nodeid)?.generation;
                 (nodeid, generation, handle, stat, inserted.clunk_fid)
             }
@@ -72,15 +73,15 @@ impl R9pFuse {
                 let stat = synthetic_created_stat(name, created_qid, perm);
                 let mut nodes = self.nodes()?;
                 let nodeid = nodes.insert_lookup_lazy(header.nodeid, stat.clone(), name)?;
-                let handle = nodes.open_handle(
-                    client.clone(),
-                    Some(open_fid),
-                    mode,
-                    false,
-                    mode != OREAD,
-                    false,
-                    Vec::new(),
-                );
+                let handle = nodes.open_handle(OpenHandle {
+                    client: client.clone(),
+                    fid: Some(open_fid),
+                    open_mode: mode,
+                    is_dir: false,
+                    write_on_release: mode != OREAD,
+                    close_commit: false,
+                    dir_entries: Vec::new(),
+                });
                 let generation = nodes.node(nodeid)?.generation;
                 (nodeid, generation, handle, stat, None)
             }

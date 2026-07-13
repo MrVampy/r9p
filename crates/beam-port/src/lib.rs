@@ -96,6 +96,12 @@ impl PeerClientServer {
                 let data = hex::decode(data)?;
                 self.with_client(&key, |client| write_output(client, &path, offset, &data))
             }
+            ["write-file", bind, uname, aname, msize, path, data] => {
+                let key = target_key(bind, uname, aname, msize)?;
+                let path = hex::decode_text(path)?;
+                let data = hex::decode(data)?;
+                self.with_client(&key, |client| write_file_output(client, &path, &data))
+            }
             ["rpc", bind, uname, aname, msize, path, data] => {
                 let key = target_key(bind, uname, aname, msize)?;
                 let path = hex::decode_text(path)?;
@@ -108,6 +114,16 @@ impl PeerClientServer {
                 let perm = parse_u32("perm", perm)?;
                 let mode = parse_u8("mode", mode)?;
                 self.with_client(&key, |client| create_output(client, &path, perm, mode))
+            }
+            ["create-at", bind, uname, aname, msize, parent, name, perm, mode] => {
+                let key = target_key(bind, uname, aname, msize)?;
+                let parent = hex::decode_text(parent)?;
+                let name = hex::decode_text(name)?;
+                let perm = parse_u32("perm", perm)?;
+                let mode = parse_u8("mode", mode)?;
+                self.with_client(&key, |client| {
+                    create_at_output(client, &parent, &name, perm, mode)
+                })
             }
             ["remove", bind, uname, aname, msize, path] => {
                 let key = target_key(bind, uname, aname, msize)?;
@@ -256,6 +272,12 @@ fn write_output(
         .map(|count| format!("write\t{count}"))
 }
 
+fn write_file_output(client: &mut BoxedClient, path: &str, data: &[u8]) -> R9pResult<String> {
+    client
+        .write_file(path, data)
+        .map(|count| format!("write-file\t{count}"))
+}
+
 fn rpc_output(client: &mut BoxedClient, path: &str, data: &[u8]) -> R9pResult<String> {
     client
         .rpc_path(path, data)
@@ -264,7 +286,17 @@ fn rpc_output(client: &mut BoxedClient, path: &str, data: &[u8]) -> R9pResult<St
 
 fn create_output(client: &mut BoxedClient, path: &str, perm: u32, mode: u8) -> R9pResult<String> {
     let (parent, name) = split_parent(path).map_err(Error::from)?;
-    let parent_fid = client.walk_path(&parent)?;
+    create_at_output(client, &parent, &name, perm, mode)
+}
+
+fn create_at_output(
+    client: &mut BoxedClient,
+    parent: &str,
+    name: &str,
+    perm: u32,
+    mode: u8,
+) -> R9pResult<String> {
+    let parent_fid = client.walk_path(parent)?;
     let result: R9pResult<String> = (|| {
         let (fid, qid) = client.create(parent_fid, name.as_bytes(), perm, mode)?;
         let iounit = r9p::codec::max_write_payload(client.msize());

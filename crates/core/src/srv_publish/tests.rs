@@ -1,5 +1,6 @@
 use super::*;
 use crate::{
+    blocking::OTRUNC,
     codec,
     export_descriptor::{AuthBoundary, ExportMode, Protocol, TransportClass},
     message::TMessage,

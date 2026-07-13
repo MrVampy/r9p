@@ -335,6 +335,25 @@ impl<S: Read + Write> Client<S> {
         }
     }
 
+    pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<u32> {
+        let fid = self.walk_path(path)?;
+        let open = self.open(fid, OWRITE | OTRUNC);
+        let result = match open {
+            Ok(_) => self.write(fid, 0, data),
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(count) => {
+                self.clunk(fid)?;
+                Ok(count)
+            }
+            Err(error) => {
+                let _ = self.clunk(fid);
+                Err(error)
+            }
+        }
+    }
+
     pub fn rpc_path(&mut self, path: &str, data: &[u8]) -> Result<Vec<u8>> {
         let fid = self.walk_path(path)?;
         let open = self.open(fid, ORDWR);

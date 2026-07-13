@@ -149,6 +149,21 @@ pub fn write(
   parse_count_line("write", line)
 }
 
+pub fn write_file(
+  adapter: Adapter,
+  target: Target,
+  path: String,
+  data: BitArray,
+) -> Result(Int, String) {
+  use line <- result.try(
+    run(adapter, target, "write-file", [
+      text(path),
+      codec.encode_hex(data),
+    ]),
+  )
+  parse_count_line("write-file", line)
+}
+
 pub fn rpc(
   adapter: Adapter,
   target: Target,
@@ -185,6 +200,37 @@ pub fn create(
   use line <- result.try(
     run(adapter, target, "create", [
       text(path),
+      int.to_string(perm),
+      int.to_string(mode),
+    ]),
+  )
+  case codec.fields(line) {
+    ["create", raw_qtype, raw_version, raw_path, raw_iounit] -> {
+      use qtype <- result.try(codec.parse_int("qid_qtype", raw_qtype))
+      use version <- result.try(codec.parse_int("qid_version", raw_version))
+      use path <- result.try(codec.parse_int("qid_path", raw_path))
+      use iounit <- result.try(codec.parse_int("iounit", raw_iounit))
+      Ok(CreateInfo(
+        qid: r9p_stat.Qid(qtype: qtype, version: version, path: path),
+        iounit: iounit,
+      ))
+    }
+    _ -> Error("r9p_beam_unexpected_create_output:" <> line)
+  }
+}
+
+pub fn create_at(
+  adapter: Adapter,
+  target: Target,
+  parent: String,
+  name: String,
+  perm: Int,
+  mode: Int,
+) -> Result(CreateInfo, String) {
+  use line <- result.try(
+    run(adapter, target, "create-at", [
+      text(parent),
+      text(name),
       int.to_string(perm),
       int.to_string(mode),
     ]),

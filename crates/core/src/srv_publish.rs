@@ -1,5 +1,5 @@
 use crate::{
-    blocking::{Client, OREAD, OTRUNC, OWRITE},
+    blocking::{Client, OREAD, OWRITE},
     export_descriptor::ExportDescriptor,
     qid::DMDIR,
     Error, Result,
@@ -445,12 +445,12 @@ fn publish_with_client<S: std::io::Read + std::io::Write>(
     match inspect_srv_path(client, &srv_path) {
         Ok(SrvPathState::File(summary)) if ready_summary_matches(&summary, publication)? => {
             if ready_action == ReadyAction::Renew {
-                write_existing(client, &srv_path, descriptor)?;
+                client.write_file(&srv_path, descriptor.as_bytes())?;
             }
             Ok(PublishOutcome::AlreadyReady)
         }
         Ok(SrvPathState::File(_)) => {
-            write_existing(client, &srv_path, descriptor)?;
+            client.write_file(&srv_path, descriptor.as_bytes())?;
             Ok(PublishOutcome::Updated)
         }
         Ok(SrvPathState::Missing) => {
@@ -519,20 +519,6 @@ fn create_and_write<S: std::io::Read + std::io::Write>(
     let (parent_path, create_name) = srv_create_parent_and_name(service_name)?;
     let parent = client.walk_path(parent_path)?;
     let (fid, _) = client.create(parent, create_name.as_bytes(), 0o666, OWRITE)?;
-    let write_result = client.write(fid, 0, descriptor.as_bytes());
-    let clunk_result = client.clunk(fid);
-    write_result?;
-    clunk_result?;
-    Ok(())
-}
-
-fn write_existing<S: std::io::Read + std::io::Write>(
-    client: &mut Client<S>,
-    path: &str,
-    descriptor: &str,
-) -> Result<()> {
-    let fid = client.walk_path(path)?;
-    client.open(fid, OWRITE | OTRUNC)?;
     let write_result = client.write(fid, 0, descriptor.as_bytes());
     let clunk_result = client.clunk(fid);
     write_result?;

@@ -82,6 +82,13 @@ struct MaintenanceSignalState {
 }
 
 pub fn publish_r9p_export(publication: &R9pExportPublication) -> Result<PublishOutcome> {
+    publish_r9p_export_with_ready_action(publication, ReadyAction::Renew)
+}
+
+fn publish_r9p_export_with_ready_action(
+    publication: &R9pExportPublication,
+    ready_action: ReadyAction,
+) -> Result<PublishOutcome> {
     validate_service_name(&publication.service_name)?;
     let descriptor = publication.descriptor.render()?;
     let _validated = ExportDescriptor::parse(&descriptor)?;
@@ -91,7 +98,7 @@ pub fn publish_r9p_export(publication: &R9pExportPublication) -> Result<PublishO
         &publication.vault_aname,
         publication.descriptor.msize,
     )?;
-    publish_with_client(publication, &descriptor, &mut client)
+    publish_with_client(publication, &descriptor, &mut client, ready_action)
 }
 
 pub fn maintain_r9p_export(
@@ -214,33 +221,56 @@ fn maintain_loop(
     signal: Arc<MaintenanceSignal>,
     status: Arc<MaintenanceStatus>,
 ) {
+    let mut action = MaintenanceAction::Wait;
     loop {
         if stop_requested(&signal) {
             break;
         }
-        match publish_r9p_export(&publication) {
-            Ok(outcome) => {
-                status.record_success(outcome);
-                match wait_for_srv_change(&publication, &signal) {
-                    MaintenanceWait::Changed
-                    | MaintenanceWait::Interrupted
-                    | MaintenanceWait::Renew => {}
-                    MaintenanceWait::Failed(error) => {
+        match action {
+            MaintenanceAction::Wait => match wait_for_srv_change(&publication, &signal) {
+                MaintenanceWait::Changed | MaintenanceWait::Interrupted => {
+                    action = MaintenanceAction::Reconcile;
+                }
+                MaintenanceWait::Renew => {
+                    action = MaintenanceAction::Renew;
+                }
+                MaintenanceWait::Failed(error) => {
+                    status.record_failure(&error);
+                    if !wait_for_retry(&signal, config.retry_interval) {
+                        break;
+                    }
+                    action = MaintenanceAction::Renew;
+                }
+            },
+            MaintenanceAction::Reconcile | MaintenanceAction::Renew => {
+                let ready_action = if action == MaintenanceAction::Renew {
+                    ReadyAction::Renew
+                } else {
+                    ReadyAction::Observe
+                };
+                match publish_r9p_export_with_ready_action(&publication, ready_action) {
+                    Ok(outcome) => {
+                        status.record_success(outcome);
+                        action = MaintenanceAction::Wait;
+                    }
+                    Err(error) => {
                         status.record_failure(&error);
                         if !wait_for_retry(&signal, config.retry_interval) {
                             break;
                         }
+                        action = MaintenanceAction::Renew;
                     }
-                }
-            }
-            Err(error) => {
-                status.record_failure(&error);
-                if !wait_for_retry(&signal, config.retry_interval) {
-                    break;
                 }
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MaintenanceAction {
+    Wait,
+    Reconcile,
+    Renew,
 }
 
 #[derive(Debug)]
@@ -409,11 +439,14 @@ fn publish_with_client<S: std::io::Read + std::io::Write>(
     publication: &R9pExportPublication,
     descriptor: &str,
     client: &mut Client<S>,
+    ready_action: ReadyAction,
 ) -> Result<PublishOutcome> {
     let srv_path = srv_path(&publication.service_name);
     match inspect_srv_path(client, &srv_path) {
         Ok(SrvPathState::File(summary)) if ready_summary_matches(&summary, publication)? => {
-            write_keepalive(client, &srv_path, &summary)?;
+            if ready_action == ReadyAction::Renew {
+                write_keepalive(client, &srv_path, &summary)?;
+            }
             Ok(PublishOutcome::AlreadyReady)
         }
         Ok(SrvPathState::File(_)) => {
@@ -430,6 +463,12 @@ fn publish_with_client<S: std::io::Read + std::io::Write>(
         }
         Err(error) => Err(Error::from(format!("inspect {srv_path}: {error}"))),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadyAction {
+    Observe,
+    Renew,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -790,6 +829,31 @@ mod tests {
         let status = maintainer.status();
         assert!(status.success_count >= 2);
         assert_eq!(status.last_error, None);
+        maintainer.shutdown();
+    }
+
+    #[test]
+    fn maintainer_waits_before_reconciling_after_initial_publication() {
+        let tree = SharedSrvTree::new();
+        tree.set_ready_summary("polymarket", ready_summary("192.168.0.21:19590"));
+        let address = serve_tree(tree.clone());
+        let mut publication = publication(&address);
+        publication.vault_endpoint_bind = address;
+
+        let maintainer = maintain_r9p_export(
+            publication,
+            R9pExportMaintenanceConfig {
+                retry_interval: Duration::from_secs(60),
+            },
+        )
+        .expect("maintainer should start");
+        thread::sleep(Duration::from_millis(100));
+
+        let content = tree
+            .content("polymarket")
+            .expect("initial keepalive should remain current");
+        assert!(content.starts_with("#M(\"command\" \"keepalive\""));
+        assert_eq!(maintainer.status().success_count, 1);
         maintainer.shutdown();
     }
 

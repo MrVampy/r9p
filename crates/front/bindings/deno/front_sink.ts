@@ -1,4 +1,4 @@
-export const SUPPORTED_ABI_VERSIONS = new Set([16]);
+export const SUPPORTED_ABI_VERSIONS = new Set([17]);
 
 export { renderExportDescriptor } from "./export_descriptor.ts";
 export type { ExportDescriptorOptions } from "./export_descriptor.ts";
@@ -88,46 +88,6 @@ const SYMBOLS = {
     parameters: ["pointer", "buffer", "usize", "u64", "buffer", "usize"],
     result: "i32",
   },
-  r9p_front_maintain_r9p_export: {
-    parameters: [
-      "pointer",
-      "buffer",
-      "usize",
-      "buffer",
-      "usize",
-      "buffer",
-      "usize",
-      "buffer",
-      "usize",
-      "buffer",
-      "usize",
-      "buffer",
-      "usize",
-      "buffer",
-      "usize",
-      "buffer",
-      "usize",
-      "buffer",
-      "usize",
-      "buffer",
-      "usize",
-      "buffer",
-      "usize",
-      "buffer",
-      "usize",
-      "u32",
-      "u32",
-      "u32",
-      "buffer",
-      "usize",
-      "buffer",
-      "usize",
-      "buffer",
-      "usize",
-    ],
-    result: "i32",
-  },
-  r9p_front_reconcile_r9p_exports: { parameters: ["pointer"], result: "i32" },
   r9p_front_client_rpc: {
     parameters: [
       "pointer",
@@ -254,27 +214,6 @@ export interface RequestContext {
   raw: string;
 }
 
-export interface R9pExportPublicationOptions {
-  vaultBind: string;
-  vaultUname: string;
-  vaultAname: string;
-  srvName: string;
-  endpointBind: string;
-  exportUname: string;
-  exportAname: string;
-  exportedRoot: string;
-  transportClass: "tcp" | "unix";
-  auth: string;
-  protocol: "9P2000" | "9P2000.L";
-  localRootLabel: string;
-  pid: number;
-  msize: number;
-  retryIntervalMs: number;
-  serviceUnit?: string;
-  hostFirewallAdmission?: string;
-  namespaceMountPaths?: string[];
-}
-
 export interface ClientRpcOptions {
   endpointBind: string;
   uname: string;
@@ -354,7 +293,9 @@ function parseRequestContext(raw: string): RequestContext {
   }
   const openMode = lfeNumberField(raw, "open_mode");
   if (openMode < 0n || openMode > 255n) {
-    throw new Error(`front request context open_mode out of range: ${openMode}`);
+    throw new Error(
+      `front request context open_mode out of range: ${openMode}`,
+    );
   }
   return {
     version,
@@ -381,7 +322,7 @@ function lfeStringField(raw: string, name: string): string {
   let value = "";
   while (index < raw.length) {
     const ch = raw[index];
-    if (ch === "\"") return value;
+    if (ch === '"') return value;
     if (ch !== "\\") {
       value += ch;
       index += 1;
@@ -390,14 +331,16 @@ function lfeStringField(raw: string, name: string): string {
     index += 1;
     const escaped = raw[index];
     if (escaped === undefined) {
-      throw new Error(`front request context unterminated escape in field: ${name}`);
+      throw new Error(
+        `front request context unterminated escape in field: ${name}`,
+      );
     }
     switch (escaped) {
       case "\\":
         value += "\\";
         break;
-      case "\"":
-        value += "\"";
+      case '"':
+        value += '"';
         break;
       case "n":
         value += "\n";
@@ -469,80 +412,6 @@ export class FrontHost implements TransitionSink {
       throw new Error(`front serve_tcp(${bind}) failed with status ${status}`);
     }
     return new DataView(portOut.buffer).getUint16(0, true);
-  }
-
-  maintainR9pExport(options: R9pExportPublicationOptions): void {
-    const [vaultBind, vaultBindLen] = bytes(options.vaultBind);
-    const [vaultUname, vaultUnameLen] = bytes(options.vaultUname);
-    const [vaultAname, vaultAnameLen] = bytes(options.vaultAname);
-    const [srvName, srvNameLen] = bytes(options.srvName);
-    const [endpointBind, endpointBindLen] = bytes(options.endpointBind);
-    const [exportUname, exportUnameLen] = bytes(options.exportUname);
-    const [exportAname, exportAnameLen] = bytes(options.exportAname);
-    const [exportedRoot, exportedRootLen] = bytes(options.exportedRoot);
-    const [transportClass, transportClassLen] = bytes(options.transportClass);
-    const [auth, authLen] = bytes(options.auth);
-    const [protocol, protocolLen] = bytes(options.protocol);
-    const [localRootLabel, localRootLabelLen] = bytes(options.localRootLabel);
-    const [serviceUnit, serviceUnitLen] = bytes(options.serviceUnit ?? "");
-    const [hostFirewallAdmission, hostFirewallAdmissionLen] = bytes(
-      options.hostFirewallAdmission ?? "",
-    );
-    const [namespaceMountPaths, namespaceMountPathsLen] = bytes(
-      (options.namespaceMountPaths ?? []).join(","),
-    );
-    const status = this.library.symbols.r9p_front_maintain_r9p_export(
-      this.handle,
-      vaultBind,
-      vaultBindLen,
-      vaultUname,
-      vaultUnameLen,
-      vaultAname,
-      vaultAnameLen,
-      srvName,
-      srvNameLen,
-      endpointBind,
-      endpointBindLen,
-      exportUname,
-      exportUnameLen,
-      exportAname,
-      exportAnameLen,
-      exportedRoot,
-      exportedRootLen,
-      transportClass,
-      transportClassLen,
-      auth,
-      authLen,
-      protocol,
-      protocolLen,
-      localRootLabel,
-      localRootLabelLen,
-      options.pid,
-      options.msize,
-      options.retryIntervalMs,
-      serviceUnit,
-      serviceUnitLen,
-      hostFirewallAdmission,
-      hostFirewallAdmissionLen,
-      namespaceMountPaths,
-      namespaceMountPathsLen,
-    );
-    if (status !== 0) {
-      throw new Error(
-        `front maintain_r9p_export(${options.srvName}) failed with status ${status}: ${this.lastError()}`,
-      );
-    }
-  }
-
-  reconcileR9pExports(): void {
-    const status = this.library.symbols.r9p_front_reconcile_r9p_exports(
-      this.handle,
-    );
-    if (status !== 0) {
-      throw new Error(
-        `front reconcile_r9p_exports failed with status ${status}: ${this.lastError()}`,
-      );
-    }
   }
 
   clientRpc(options: ClientRpcOptions): string {
@@ -891,14 +760,18 @@ export class FrontHost implements TransitionSink {
         `front request_prefix_copy returned ${prefixCopied}, expected ${prefixLen}`,
       );
     }
-    const contextLen = Number(this.library.symbols.r9p_front_request_context_copy(
-      this.handle,
-      requestId,
-      new Uint8Array(new ArrayBuffer(0)),
-      0n,
-    ));
+    const contextLen = Number(
+      this.library.symbols.r9p_front_request_context_copy(
+        this.handle,
+        requestId,
+        new Uint8Array(new ArrayBuffer(0)),
+        0n,
+      ),
+    );
     if (contextLen < 0) {
-      throw new Error(`front request_context_copy length returned ${contextLen}`);
+      throw new Error(
+        `front request_context_copy length returned ${contextLen}`,
+      );
     }
     const contextBuf = new Uint8Array(new ArrayBuffer(contextLen));
     const contextCopied = this.library.symbols.r9p_front_request_context_copy(
@@ -923,7 +796,12 @@ export class FrontHost implements TransitionSink {
     if (Number(copied) !== len) {
       throw new Error(`front request_copy returned ${copied}, expected ${len}`);
     }
-    return { requestId, prefix: decoder.decode(prefixBuf), bytes: buf, context };
+    return {
+      requestId,
+      prefix: decoder.decode(prefixBuf),
+      bytes: buf,
+      context,
+    };
   }
 
   completeRequest(prefix: string, requestId: bigint, result: string): void {
@@ -954,7 +832,9 @@ export class FrontHost implements TransitionSink {
       count,
     );
     if (status !== 0) {
-      throw new Error(`front complete_write(${prefix}) failed with status ${status}`);
+      throw new Error(
+        `front complete_write(${prefix}) failed with status ${status}`,
+      );
     }
   }
 
@@ -970,7 +850,9 @@ export class FrontHost implements TransitionSink {
       messageLen,
     );
     if (status !== 0) {
-      throw new Error(`front reject_write(${prefix}) failed with status ${status}`);
+      throw new Error(
+        `front reject_write(${prefix}) failed with status ${status}`,
+      );
     }
   }
 
@@ -983,7 +865,9 @@ export class FrontHost implements TransitionSink {
       requestId,
     );
     if (status !== 0) {
-      throw new Error(`front complete_remove(${prefix}) failed with status ${status}`);
+      throw new Error(
+        `front complete_remove(${prefix}) failed with status ${status}`,
+      );
     }
   }
 
@@ -999,7 +883,9 @@ export class FrontHost implements TransitionSink {
       messageLen,
     );
     if (status !== 0) {
-      throw new Error(`front reject_remove(${prefix}) failed with status ${status}`);
+      throw new Error(
+        `front reject_remove(${prefix}) failed with status ${status}`,
+      );
     }
   }
 
@@ -1012,7 +898,9 @@ export class FrontHost implements TransitionSink {
       requestId,
     );
     if (status !== 0) {
-      throw new Error(`front complete_wstat(${prefix}) failed with status ${status}`);
+      throw new Error(
+        `front complete_wstat(${prefix}) failed with status ${status}`,
+      );
     }
   }
 
@@ -1028,7 +916,9 @@ export class FrontHost implements TransitionSink {
       messageLen,
     );
     if (status !== 0) {
-      throw new Error(`front reject_wstat(${prefix}) failed with status ${status}`);
+      throw new Error(
+        `front reject_wstat(${prefix}) failed with status ${status}`,
+      );
     }
   }
 

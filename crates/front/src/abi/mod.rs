@@ -2,24 +2,18 @@
 
 use crate::serve::ServeHandle;
 use crate::{Front, PushedDirectoryMetadata, PushedFileMetadata, RequestContext};
-use r9p::srv_publish::R9pExportMaintainer;
 use std::collections::BTreeMap;
 use std::ffi::c_char;
 use std::sync::Mutex;
 use std::time::Duration;
 
 mod client;
-mod publication;
 
 pub use client::{
     r9p_front_client_create_at, r9p_front_client_read, r9p_front_client_remove,
     r9p_front_client_rpc, r9p_front_client_write_file,
 };
-pub use publication::{
-    r9p_front_maintain_r9p_export, r9p_front_publish_r9p_export, r9p_front_reconcile_r9p_exports,
-};
-
-pub const ABI_VERSION: u32 = 16;
+pub const ABI_VERSION: u32 = 17;
 
 const OK: i32 = 0;
 const TIMEOUT: i32 = 1;
@@ -29,7 +23,6 @@ const INTERNAL: i32 = -2;
 pub struct FrontAbi {
     front: Front,
     serves: Mutex<Vec<ServeHandle>>,
-    publications: Mutex<Vec<R9pExportMaintainer>>,
     staged_requests: Mutex<BTreeMap<u64, StagedRequest>>,
     last_error: Mutex<Vec<u8>>,
 }
@@ -56,13 +49,6 @@ unsafe fn bytes_arg<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
         return Some(&[]);
     }
     Some(unsafe { std::slice::from_raw_parts(ptr, len) })
-}
-
-unsafe fn optional_str_arg<'a>(ptr: *const c_char, len: usize) -> Option<Option<&'a str>> {
-    if len == 0 {
-        return Some(None);
-    }
-    unsafe { str_arg(ptr, len) }.map(Some)
 }
 
 fn set_last_error(abi: &FrontAbi, error: impl ToString) -> i32 {
@@ -119,7 +105,6 @@ pub extern "C" fn r9p_front_new() -> *mut FrontAbi {
     Box::into_raw(Box::new(FrontAbi {
         front: Front::new(),
         serves: Mutex::new(Vec::new()),
-        publications: Mutex::new(Vec::new()),
         staged_requests: Mutex::new(BTreeMap::new()),
         last_error: Mutex::new(Vec::new()),
     }))
@@ -131,12 +116,6 @@ pub unsafe extern "C" fn r9p_front_free(handle: *mut FrontAbi) {
         return;
     }
     let abi = unsafe { Box::from_raw(handle) };
-    if let Ok(mut publications) = abi.publications.lock() {
-        for publication in publications.drain(..) {
-            publication.shutdown();
-        }
-        drop(publications);
-    }
     if let Ok(serves) = abi.serves.lock() {
         for serve in serves.iter() {
             serve.shutdown();
@@ -894,9 +873,6 @@ pub unsafe extern "C" fn r9p_front_stop(handle: *mut FrontAbi) -> i32 {
     let Some(abi) = (unsafe { handle.as_ref() }) else {
         return INVALID;
     };
-    if let Err(error) = publication::stop_publications(abi) {
-        return set_last_error(abi, error);
-    }
     match abi.serves.lock() {
         Ok(serves) => {
             for serve in serves.iter() {

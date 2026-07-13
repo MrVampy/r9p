@@ -33,43 +33,6 @@ pub type RequestContext {
   )
 }
 
-pub type ExportMode {
-  ReadOnly
-  ReadWrite
-}
-
-pub type ExportPublication {
-  ExportPublication(
-    vault_endpoint_bind: String,
-    vault_uname: String,
-    vault_aname: String,
-    service_name: String,
-    export_endpoint_bind: String,
-    export_uname: String,
-    export_aname: String,
-    exported_root: String,
-    transport_class: String,
-    mode: ExportMode,
-    auth: String,
-    protocol: String,
-    local_root_label: Option(String),
-    msize: Int,
-    retry_interval_ms: Int,
-    service_unit: Option(String),
-    host_firewall_admission: Option(String),
-    namespace_mount_paths: List(String),
-  )
-}
-
-pub type MaintenanceStatus {
-  MaintenanceStatus(
-    success_count: Int,
-    failure_count: Int,
-    last_success: Option(String),
-    last_error: Option(String),
-  )
-}
-
 pub fn new(adapter: Adapter) -> Result(Front, String) {
   use line <- result.try(run(adapter, "front-new", []))
   case codec.fields(line) {
@@ -304,76 +267,6 @@ pub fn reject_remove(
   expect_line("front-reject-remove", line)
 }
 
-pub fn maintain_r9p_export(
-  front: Front,
-  publication: ExportPublication,
-) -> Result(Nil, String) {
-  use line <- result.try(
-    run(front.adapter, "front-maintain-r9p-export", [
-      int.to_string(front.id),
-      text(publication.vault_endpoint_bind),
-      text(publication.vault_uname),
-      text(publication.vault_aname),
-      text(publication.service_name),
-      text(publication.export_endpoint_bind),
-      text(publication.export_uname),
-      text(publication.export_aname),
-      text(publication.exported_root),
-      text(publication.transport_class),
-      text(export_mode(publication.mode)),
-      text(publication.auth),
-      text(publication.protocol),
-      text(optional_text(publication.local_root_label)),
-      int.to_string(publication.msize),
-      int.to_string(publication.retry_interval_ms),
-      text(optional_text(publication.service_unit)),
-      text(optional_text(publication.host_firewall_admission)),
-      text(string.join(publication.namespace_mount_paths, ",")),
-    ]),
-  )
-  expect_line("front-maintain-r9p-export", line)
-}
-
-pub fn reconcile_r9p_exports(front: Front) -> Result(Nil, String) {
-  use line <- result.try(
-    run(front.adapter, "front-reconcile-r9p-exports", [int.to_string(front.id)]),
-  )
-  expect_line("front-reconcile-r9p-exports", line)
-}
-
-pub fn maintenance_status(front: Front) -> Result(MaintenanceStatus, String) {
-  use line <- result.try(
-    run(front.adapter, "front-maintenance-status", [int.to_string(front.id)]),
-  )
-  case codec.fields(line) {
-    [
-      "front-maintenance-status",
-      success_count,
-      failure_count,
-      last_success,
-      last_error,
-    ] -> {
-      use success_count <- result.try(codec.parse_int(
-        "success_count",
-        success_count,
-      ))
-      use failure_count <- result.try(codec.parse_int(
-        "failure_count",
-        failure_count,
-      ))
-      use last_success <- result.try(optional_decoded_text(last_success))
-      use last_error <- result.try(optional_decoded_text(last_error))
-      Ok(MaintenanceStatus(
-        success_count:,
-        failure_count:,
-        last_success:,
-        last_error:,
-      ))
-    }
-    _ -> Error("r9p_front_unexpected_maintenance_status_output:" <> line)
-  }
-}
-
 pub fn stop(front: Front) -> Result(Nil, String) {
   use line <- result.try(
     run(front.adapter, "front-stop", [int.to_string(front.id)]),
@@ -402,28 +295,6 @@ fn expect_line(expected: String, line: String) -> Result(Nil, String) {
 
 fn text(value: String) -> String {
   codec.encode_hex(<<value:utf8>>)
-}
-
-fn optional_text(value: Option(String)) -> String {
-  case value {
-    Some(inner) -> inner
-    None -> ""
-  }
-}
-
-fn export_mode(mode: ExportMode) -> String {
-  case mode {
-    ReadOnly -> "ro"
-    ReadWrite -> "rw"
-  }
-}
-
-fn optional_decoded_text(value: String) -> Result(Option(String), String) {
-  use decoded <- result.try(codec.decode_text(value))
-  case decoded {
-    "" -> Ok(None)
-    text -> Ok(Some(text))
-  }
 }
 
 // Fronts are process-owned state. Keep them isolated from client request

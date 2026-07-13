@@ -23,18 +23,13 @@ consumer
 
 The core rule is: `r9p` speaks 9P; backends decide what to serve; consumers decide what to do with the bytes; runtime adapters decide how bytes move.
 
-The current `r9p::srv_publish` module is a known exception to that boundary.
-It owns Vault `/srv` publication and lease-maintenance behavior because the
-front ABI, BEAM adapter, and custom Rust `FileTree` services all consume it.
-The correct cleanup is a Vault-owned registration client crate with those
-consumers migrated together. Registration descriptors, lease maintenance, and
-the `/srv` namespace contract belong to Vault governance, not to generic 9P.
-That client must communicate exclusively through ordinary r9p namespace
-operations against the runtime door; it has no internal or privileged runtime
+`r9p` provides generic client create, write, remove, read, and RPC operations,
+plus language bindings that encode the transport-neutral `r9p-export.v1`
+descriptor. An application that registers with a runtime owns the lifecycle
+that writes that descriptor through the runtime's ordinary namespace. The
+runtime owns `/srv` admission, lease interpretation, and projection. Neither
+side gives `r9p` Vault-specific registration policy or a privileged runtime
 control path.
-Moving the implementation into the in-memory front would couple custom
-backends to `Front`; leaving a compatibility re-export in core would preserve
-the wrong ownership.
 
 ## Client And Server
 
@@ -70,7 +65,7 @@ spawning unbounded per-request threads in the client process.
 server first. The extraction trigger was a second real consumer: the FUSE
 bridge that is now `crates/fuse` and exposed by `r9p mount`.
 
-The repository exception is narrow: `r9p` is one installable communication
-suite with internal crates for protocol core, CLI, FUSE bridge, and
-filesystem-backed serving. Vault-specific listener glue, editor participants,
-plumbers, and domain policy remain outside this repository.
+`r9p` is one installable communication suite with internal crates for protocol
+core, CLI, FUSE bridge, and filesystem-backed serving. Vault-specific
+registration lifecycles, listener glue, editor participants, plumbers, and
+domain policy remain outside this repository.

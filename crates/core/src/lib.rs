@@ -9,7 +9,6 @@ pub mod message;
 pub mod multiplex;
 pub mod qid;
 pub mod server;
-pub mod srv_publish;
 pub mod stat;
 
 pub use codec::Variant;

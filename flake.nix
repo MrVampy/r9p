@@ -26,7 +26,7 @@
           };
           front = pkgs.rustPlatform.buildRustPackage {
             pname = "r9p-front";
-            version = "0.1.0-abi16";
+            version = "0.1.0-abi17";
             src = self;
             cargoLock.lockFile = ./Cargo.lock;
             cargoBuildFlags = [ "-p" "front" ];

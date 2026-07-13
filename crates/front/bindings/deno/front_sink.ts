@@ -662,7 +662,7 @@ export class FrontHost implements TransitionSink {
       );
     }
     return {
-      qidType: qidTypeOut[0],
+      qidType: qidTypeOut[0] ?? 0,
       qidVersion: new DataView(qidVersionOut.buffer).getUint32(0, true),
       qidPath: new DataView(qidPathOut.buffer).getBigUint64(0, true),
     };

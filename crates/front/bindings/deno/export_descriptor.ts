@@ -105,7 +105,7 @@ function validateOptions(options: ExportDescriptorOptions): void {
   }
   const authClass = options.auth === "none"
     ? "none"
-    : options.auth.split(":", 1)[0];
+    : options.auth.split(":", 1)[0] ?? "";
   const authDetails = options.auth === "none"
     ? ""
     : options.auth.slice(authClass.length + 1);

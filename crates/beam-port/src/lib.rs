@@ -506,6 +506,12 @@ mod tests {
     fn front_commands_serve_static_file() {
         let mut server = PeerClientServer::default();
         let front_id = parse_front_id(&server.handle_line("front-new").expect("front-new"));
+        assert_eq!(
+            server
+                .handle_line(&format!("front-process-id\t{front_id}"))
+                .expect("front process id"),
+            format!("front-process-id\t{}", std::process::id())
+        );
         let set = format!(
             "front-set\t{front_id}\t{}\t{}",
             hex_text("status"),

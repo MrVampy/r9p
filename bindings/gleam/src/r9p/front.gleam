@@ -81,6 +81,17 @@ pub fn new(adapter: Adapter) -> Result(Front, String) {
   }
 }
 
+pub fn process_id(front: Front) -> Result(Int, String) {
+  use line <- result.try(
+    run(front.adapter, "front-process-id", [int.to_string(front.id)]),
+  )
+  case codec.fields(line) {
+    ["front-process-id", process_id] ->
+      codec.parse_int("front_process_id", process_id)
+    _ -> Error("r9p_front_unexpected_process_id_output:" <> line)
+  }
+}
+
 pub fn set(front: Front, path: String, data: BitArray) -> Result(Nil, String) {
   use line <- result.try(
     run(front.adapter, "front-set", [

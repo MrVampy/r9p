@@ -54,6 +54,10 @@ impl FrontManager {
                     .ok_or_else(|| format!("unknown_front:{id}"))?;
                 Ok("front-stop".to_string())
             }
+            ["front-process-id", raw_id] => {
+                let _ = self.front(raw_id)?;
+                Ok(format!("front-process-id\t{}", std::process::id()))
+            }
             ["front-set", raw_id, path, data] => {
                 let state = self.front(raw_id)?;
                 let path = hex::decode_text(path)?;

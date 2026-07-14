@@ -527,6 +527,7 @@ impl FrontTree {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn read_target(&mut self, fid: Fid) -> Result<ReadTarget> {
         self.read_target_at(fid, 0, 0)
     }

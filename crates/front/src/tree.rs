@@ -281,6 +281,7 @@ impl FileTree for FrontTree {
                 }
                 self.rpc_inflight.remove(&fid);
                 state.rpc_responses.remove(&previous);
+                state.remove_pending_request(previous);
             }
             let offset = usize::try_from(offset).map_err(|_| Error::from_static(EPERM))?;
             if offset == 0 {
@@ -393,6 +394,7 @@ impl FileTree for FrontTree {
         if let Some(request_id) = self.rpc_inflight.remove(&fid) {
             if let Ok(mut state) = self.front.lock() {
                 state.rpc_responses.remove(&request_id);
+                state.remove_pending_request(request_id);
                 drop(state);
                 self.front.shared.1.notify_all();
             }
@@ -450,6 +452,7 @@ impl FileTree for FrontTree {
         self.write_relay_buffers.remove(&fid);
         if let Some(request_id) = self.rpc_inflight.remove(&fid) {
             state.rpc_responses.remove(&request_id);
+            state.remove_pending_request(request_id);
         }
         Ok(())
     }
@@ -585,6 +588,7 @@ impl Drop for FrontTree {
         if let Ok(mut state) = self.front.lock() {
             for (_, request_id) in std::mem::take(&mut self.rpc_inflight) {
                 state.rpc_responses.remove(&request_id);
+                state.remove_pending_request(request_id);
             }
             self.rpc_buffers.clear();
             self.write_relay_buffers.clear();

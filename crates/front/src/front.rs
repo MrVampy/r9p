@@ -571,6 +571,8 @@ impl Front {
         let deadline = Instant::now() + state.wait_timeout;
         loop {
             if cancel.is_some_and(|cancel| cancel.load(Ordering::SeqCst)) {
+                state.rpc_responses.remove(&request_id);
+                state.remove_pending_request(request_id);
                 return Err(Error::from_static("request flushed"));
             }
             match state.rpc_responses.get(&request_id) {
@@ -585,6 +587,8 @@ impl Front {
             }
             let now = Instant::now();
             if now >= deadline {
+                state.rpc_responses.remove(&request_id);
+                state.remove_pending_request(request_id);
                 return Err(Error::from_static(
                     "rpc request timed out awaiting response",
                 ));

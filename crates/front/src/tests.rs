@@ -4,6 +4,7 @@ use r9p::fid::Fid;
 use r9p::qid::{Qid, DMDIR, QTDIR, QTFILE};
 use r9p::server::{FileTree, ReadData};
 use r9p::stat::Stat;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use std::{sync::mpsc, thread};
 
@@ -1114,6 +1115,110 @@ fn dropping_tree_abandons_pending_rpc_response() -> Result<()> {
         &["queries", &request.request_id.to_string(), "result"],
     );
     assert!(qids.len() < 3);
+    Ok(())
+}
+
+#[test]
+fn clunk_removes_unclaimed_pending_rpc_request() -> Result<()> {
+    let front = Front::new();
+    front.register_rpc("queries")?;
+    let mut tree = front.tree();
+    tree.attach(1, b"alice", b"/")?;
+    let qids = walk_to(&mut tree, 1, 2, &["queries"]);
+    tree.open(2, qids[0], ORDWR)?;
+    tree.write(2, qids[0], 0, b"find markets")?;
+    let target = tree.read_target(2)?;
+    assert!(matches!(target, ReadTarget::Rpc(_)));
+
+    tree.clunk(2, qids[0])?;
+
+    assert!(front.next_request(Duration::from_millis(0))?.is_none());
+    Ok(())
+}
+
+#[test]
+fn dropping_tree_removes_unclaimed_pending_rpc_request() -> Result<()> {
+    let front = Front::new();
+    front.register_rpc("queries")?;
+    let mut tree = front.tree();
+    tree.attach(1, b"alice", b"/")?;
+    let qids = walk_to(&mut tree, 1, 2, &["queries"]);
+    tree.open(2, qids[0], ORDWR)?;
+    tree.write(2, qids[0], 0, b"find markets")?;
+    let target = tree.read_target(2)?;
+    assert!(matches!(target, ReadTarget::Rpc(_)));
+
+    drop(tree);
+
+    assert!(front.next_request(Duration::from_millis(0))?.is_none());
+    Ok(())
+}
+
+#[test]
+fn rpc_timeout_removes_unclaimed_pending_request() -> Result<()> {
+    let front = Front::new();
+    front.register_rpc("queries")?;
+    front.set_wait_timeout(Duration::from_millis(1))?;
+    let mut tree = front.tree();
+    tree.attach(1, b"alice", b"/")?;
+    let qids = walk_to(&mut tree, 1, 2, &["queries"]);
+    tree.open(2, qids[0], ORDWR)?;
+    tree.write(2, qids[0], 0, b"find markets")?;
+
+    let error = tree
+        .read(2, qids[0], 0, 4096)
+        .expect_err("unanswered rpc must time out");
+
+    assert_eq!(
+        error.message(),
+        b"rpc request timed out awaiting response"
+    );
+    assert!(front.next_request(Duration::from_millis(0))?.is_none());
+    Ok(())
+}
+
+#[test]
+fn rpc_flush_removes_unclaimed_pending_request() -> Result<()> {
+    let front = Front::new();
+    front.register_rpc("queries")?;
+    let mut tree = front.tree();
+    tree.attach(1, b"alice", b"/")?;
+    let qids = walk_to(&mut tree, 1, 2, &["queries"]);
+    tree.open(2, qids[0], ORDWR)?;
+    tree.write(2, qids[0], 0, b"find markets")?;
+    let cancel = AtomicBool::new(true);
+
+    let error = tree
+        .read_with_cancel(2, 0, 4096, Some(&cancel))
+        .expect_err("flushed rpc must stop waiting");
+
+    assert!(cancel.load(Ordering::SeqCst));
+    assert_eq!(error.message(), b"request flushed");
+    assert!(front.next_request(Duration::from_millis(0))?.is_none());
+    Ok(())
+}
+
+#[test]
+fn replacing_rpc_removes_unclaimed_previous_request() -> Result<()> {
+    let front = Front::new();
+    front.register_rpc("queries")?;
+    let mut tree = front.tree();
+    tree.attach(1, b"alice", b"/")?;
+    let qids = walk_to(&mut tree, 1, 2, &["queries"]);
+    tree.open(2, qids[0], ORDWR)?;
+    tree.write(2, qids[0], 0, b"first")?;
+    let target = tree.read_target(2)?;
+    assert!(matches!(target, ReadTarget::Rpc(_)));
+
+    tree.write(2, qids[0], 0, b"second")?;
+    let target = tree.read_target(2)?;
+    assert!(matches!(target, ReadTarget::Rpc(_)));
+
+    let request = front
+        .next_request(Duration::from_millis(200))?
+        .expect("replacement request");
+    assert_eq!(request.bytes, b"second");
+    assert!(front.next_request(Duration::from_millis(0))?.is_none());
     Ok(())
 }
 

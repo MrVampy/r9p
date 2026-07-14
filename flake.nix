@@ -26,7 +26,7 @@
           };
           front = pkgs.rustPlatform.buildRustPackage {
             pname = "r9p-front";
-            version = "0.1.0-abi18";
+            version = "0.1.0-abi19";
             src = self;
             cargoLock.lockFile = ./Cargo.lock;
             cargoBuildFlags = [ "-p" "front" ];
@@ -79,6 +79,25 @@
               runHook postInstall
             '';
           };
+          frontTests = pkgs.rustPlatform.buildRustPackage {
+            pname = "r9p-front-tests";
+            version = "0.1.0";
+            src = self;
+            cargoLock.lockFile = ./Cargo.lock;
+            cargoBuildFlags = [ "-p" "front" "-p" "beam-port" ];
+            cargoTestFlags = [ "-p" "front" "-p" "beam-port" ];
+            nativeBuildInputs = with pkgs; [
+              clang
+              mold
+              binutils
+            ];
+            installPhase = ''
+              runHook preInstall
+              mkdir -p "$out"
+              printf 'passed\n' > "$out/result"
+              runHook postInstall
+            '';
+          };
         in
         {
           packages.default = r9p;
@@ -89,6 +108,7 @@
           packages.beam-gleam = beamGleam;
           packages.beam-port = beamPort;
           packages.front = front;
+          packages.front-tests = frontTests;
           packages.r9p = r9p;
 
           devShells.default = pkgs.mkShell {

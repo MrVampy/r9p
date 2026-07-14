@@ -28,6 +28,7 @@ pub type RequestContext {
     front_path: String,
     target_path: String,
     offset: Int,
+    count: Int,
     open_mode: Int,
     pushed_generation: Int,
   )
@@ -66,11 +67,7 @@ pub fn set(front: Front, path: String, data: BitArray) -> Result(Nil, String) {
   expect_line("front-set", line)
 }
 
-pub fn set_text(
-  front: Front,
-  path: String,
-  data: String,
-) -> Result(Nil, String) {
+pub fn set_text(front: Front, path: String, data: String) -> Result(Nil, String) {
   set(front, path, <<data:utf8>>)
 }
 
@@ -127,10 +124,17 @@ pub fn register_rpc(front: Front, path: String) -> Result(Nil, String) {
   expect_line("front-register-rpc", line)
 }
 
-pub fn register_remove_relay(
-  front: Front,
-  path: String,
-) -> Result(Nil, String) {
+pub fn register_read_relay(front: Front, path: String) -> Result(Nil, String) {
+  use line <- result.try(
+    run(front.adapter, "front-register-read-relay", [
+      int.to_string(front.id),
+      text(path),
+    ]),
+  )
+  expect_line("front-register-read-relay", line)
+}
+
+pub fn register_remove_relay(front: Front, path: String) -> Result(Nil, String) {
   use line <- result.try(
     run(front.adapter, "front-register-remove-relay", [
       int.to_string(front.id),
@@ -175,6 +179,7 @@ pub fn next_request(
       front_path,
       target_path,
       offset,
+      count,
       open_mode,
       pushed_generation,
     ] -> {
@@ -189,6 +194,7 @@ pub fn next_request(
       use front_path <- result.try(codec.decode_text(front_path))
       use target_path <- result.try(codec.decode_text(target_path))
       use offset <- result.try(codec.parse_int("offset", offset))
+      use count <- result.try(codec.parse_int("count", count))
       use open_mode <- result.try(codec.parse_int("open_mode", open_mode))
       use pushed_generation <- result.try(codec.parse_int(
         "pushed_generation",
@@ -208,6 +214,7 @@ pub fn next_request(
             front_path:,
             target_path:,
             offset:,
+            count:,
             open_mode:,
             pushed_generation:,
           ),
@@ -233,6 +240,23 @@ pub fn complete_request(
     ]),
   )
   expect_line("front-complete-request", line)
+}
+
+pub fn reject_request(
+  front: Front,
+  prefix: String,
+  request_id: Int,
+  message: String,
+) -> Result(Nil, String) {
+  use line <- result.try(
+    run(front.adapter, "front-reject-request", [
+      int.to_string(front.id),
+      text(prefix),
+      int.to_string(request_id),
+      text(message),
+    ]),
+  )
+  expect_line("front-reject-request", line)
 }
 
 pub fn complete_remove(

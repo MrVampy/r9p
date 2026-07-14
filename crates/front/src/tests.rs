@@ -22,6 +22,7 @@ fn test_intake_request(request_id: u64, prefix: &str, bytes: &[u8]) -> IntakeReq
             front_path: prefix.to_string(),
             target_path: prefix.to_string(),
             offset: 0,
+            count: bytes.len() as u32,
             open_mode: OWRITE,
             pushed_generation: 0,
         },
@@ -1095,7 +1096,7 @@ fn dropping_tree_abandons_pending_rpc_response() -> Result<()> {
     tree.open(2, qids[0], ORDWR)?;
     tree.write(2, qids[0], 0, b"find markets")?;
     let target = tree.read_target(2)?;
-    assert!(matches!(target, ReadTarget::Rpc(_)));
+    assert!(matches!(target, ReadTarget::Response(_, _, _)));
     let request = front
         .next_request(Duration::from_millis(200))?
         .expect("rpc request");
@@ -1128,7 +1129,7 @@ fn clunk_removes_unclaimed_pending_rpc_request() -> Result<()> {
     tree.open(2, qids[0], ORDWR)?;
     tree.write(2, qids[0], 0, b"find markets")?;
     let target = tree.read_target(2)?;
-    assert!(matches!(target, ReadTarget::Rpc(_)));
+    assert!(matches!(target, ReadTarget::Response(_, _, _)));
 
     tree.clunk(2, qids[0])?;
 
@@ -1146,7 +1147,7 @@ fn dropping_tree_removes_unclaimed_pending_rpc_request() -> Result<()> {
     tree.open(2, qids[0], ORDWR)?;
     tree.write(2, qids[0], 0, b"find markets")?;
     let target = tree.read_target(2)?;
-    assert!(matches!(target, ReadTarget::Rpc(_)));
+    assert!(matches!(target, ReadTarget::Response(_, _, _)));
 
     drop(tree);
 
@@ -1208,11 +1209,11 @@ fn replacing_rpc_removes_unclaimed_previous_request() -> Result<()> {
     tree.open(2, qids[0], ORDWR)?;
     tree.write(2, qids[0], 0, b"first")?;
     let target = tree.read_target(2)?;
-    assert!(matches!(target, ReadTarget::Rpc(_)));
+    assert!(matches!(target, ReadTarget::Response(_, _, _)));
 
     tree.write(2, qids[0], 0, b"second")?;
     let target = tree.read_target(2)?;
-    assert!(matches!(target, ReadTarget::Rpc(_)));
+    assert!(matches!(target, ReadTarget::Response(_, _, _)));
 
     let request = front
         .next_request(Duration::from_millis(200))?
@@ -1234,7 +1235,7 @@ fn prefix_wait_tied_to_rpc_close_does_not_consume_later_requests() -> Result<()>
     control.open(2, control_qids[0], ORDWR)?;
     control.write(2, control_qids[0], 0, b"take relay")?;
     let target = control.read_target(2)?;
-    assert!(matches!(target, ReadTarget::Rpc(_)));
+    assert!(matches!(target, ReadTarget::Response(_, _, _)));
     let control_request = front
         .next_request_for_prefix("control", Duration::from_millis(200))?
         .expect("control rpc request");
@@ -1290,6 +1291,80 @@ fn register_log_declares_an_empty_walkable_log() -> Result<()> {
 }
 
 #[test]
+fn read_relay_dispatches_each_range_and_consumes_its_response() -> Result<()> {
+    let front = Front::new();
+    front.register_read_relay("archive/trade/record")?;
+    let mut tree = front.tree();
+    tree.attach(1, b"claude", b"/")?;
+    let qids = walk_to(&mut tree, 1, 2, &["archive", "trade", "record"]);
+    let qid = *qids.last().expect("read relay qid");
+    let stat = tree.stat(qid)?;
+    assert_eq!(stat.length, 0);
+    assert!(tree.open(2, qid, OREAD).is_ok());
+    assert!(tree.open(2, qid, OWRITE).is_err());
+
+    let target = tree.read_target_at(2, 4, 3)?;
+    let ReadTarget::Response(request_id, response_offset, consume) = target else {
+        panic!("read relay must park a response");
+    };
+    assert_eq!(response_offset, 0);
+    assert!(consume);
+    let request = front
+        .next_request(Duration::from_millis(200))?
+        .expect("read relay request");
+    assert_eq!(request.request_id, request_id);
+    assert_eq!(request.prefix, "archive/trade/record");
+    assert!(request.bytes.is_empty());
+    assert_eq!(request.context.offset, 4);
+    assert_eq!(request.context.count, 3);
+    assert_eq!(request.context.open_mode, OREAD);
+
+    front.complete_request(&request.prefix, request_id, b"567")?;
+    let response = front.response_read(request_id, 0, 3, None, consume)?;
+    assert_eq!(response, ReadData::Bytes(b"567".to_vec()));
+    assert!(front.complete_request(&request.prefix, request_id, b"late").is_err());
+
+    let second = tree.read_target_at(2, 7, 3)?;
+    let ReadTarget::Response(second_id, _, _) = second else {
+        panic!("second range must be a fresh request");
+    };
+    assert_ne!(second_id, request_id);
+    let second_request = front
+        .next_request(Duration::from_millis(200))?
+        .expect("second read relay request");
+    front.complete_request(&second_request.prefix, second_id, b"")?;
+    assert_eq!(
+        front.response_read(second_id, 0, 3, None, true)?,
+        ReadData::Bytes(Vec::new())
+    );
+    Ok(())
+}
+
+#[test]
+fn read_relay_rejection_becomes_the_read_error() -> Result<()> {
+    let front = Front::new();
+    front.register_read_relay("archive/trade/record")?;
+    let mut tree = front.tree();
+    tree.attach(1, b"claude", b"/")?;
+    let qids = walk_to(&mut tree, 1, 2, &["archive", "trade", "record"]);
+    let qid = *qids.last().expect("read relay qid");
+    tree.open(2, qid, OREAD)?;
+    let target = tree.read_target_at(2, 0, 4096)?;
+    let ReadTarget::Response(request_id, response_offset, consume) = target else {
+        panic!("read relay must park a response");
+    };
+    let request = front
+        .next_request(Duration::from_millis(200))?
+        .expect("read relay request");
+    front.reject_request(&request.prefix, request_id, "archive record unavailable")?;
+    let error = front
+        .response_read(request_id, response_offset, 4096, None, consume)
+        .expect_err("rejected read relay");
+    assert_eq!(error.to_string(), "archive record unavailable");
+    Ok(())
+}
+
+#[test]
 fn rpc_node_only_opens_read_write() -> Result<()> {
     let front = Front::new();
     front.register_rpc("queries")?;
@@ -1313,7 +1388,7 @@ fn rpc_single_fid_request_response_roundtrip() -> Result<()> {
     let written = tree.write(2, qids[0], 0, b"find markets")?;
     assert_eq!(written as usize, "find markets".len());
     let target = tree.read_target(2)?;
-    assert!(matches!(target, ReadTarget::Rpc(_)));
+    assert!(matches!(target, ReadTarget::Response(_, _, _)));
     let request = front
         .next_request(Duration::from_millis(200))?
         .expect("a pending rpc request");
@@ -1338,12 +1413,12 @@ fn rpc_request_carries_the_registered_path() -> Result<()> {
     tree.open(2, query_qids[0], ORDWR)?;
     tree.write(2, query_qids[0], 0, b"browse")?;
     let query_target = tree.read_target(2)?;
-    assert!(matches!(query_target, ReadTarget::Rpc(_)));
+    assert!(matches!(query_target, ReadTarget::Response(_, _, _)));
     let candidate_qids = walk_to(&mut tree, 1, 3, &["candidates"]);
     tree.open(3, candidate_qids[0], ORDWR)?;
     tree.write(3, candidate_qids[0], 0, b"scan")?;
     let candidate_target = tree.read_target(3)?;
-    assert!(matches!(candidate_target, ReadTarget::Rpc(_)));
+    assert!(matches!(candidate_target, ReadTarget::Response(_, _, _)));
     let first = front
         .next_request(Duration::from_millis(200))?
         .expect("first request");
@@ -1379,14 +1454,14 @@ fn rpc_second_request_on_same_fid_replaces_the_first() -> Result<()> {
     tree.open(2, qids[0], ORDWR)?;
     let _ = tree.write(2, qids[0], 0, b"first")?;
     let target = tree.read_target(2)?;
-    assert!(matches!(target, ReadTarget::Rpc(_)));
+    assert!(matches!(target, ReadTarget::Response(_, _, _)));
     let first = front
         .next_request(Duration::from_millis(200))?
         .expect("first request");
     front.complete_request("queries", first.request_id, b"one")?;
     let _ = tree.write(2, qids[0], 0, b"second")?;
     let target = tree.read_target(2)?;
-    assert!(matches!(target, ReadTarget::Rpc(_)));
+    assert!(matches!(target, ReadTarget::Response(_, _, _)));
     let second = front
         .next_request(Duration::from_millis(200))?
         .expect("second request");
@@ -1417,7 +1492,7 @@ fn rpc_buffers_sequential_writes_until_read() -> Result<()> {
     assert!(front.next_request(Duration::from_millis(0))?.is_none());
 
     let target = tree.read_target(2)?;
-    assert!(matches!(target, ReadTarget::Rpc(_)));
+    assert!(matches!(target, ReadTarget::Response(_, _, _)));
     let request = front
         .next_request(Duration::from_millis(200))?
         .expect("assembled rpc request");

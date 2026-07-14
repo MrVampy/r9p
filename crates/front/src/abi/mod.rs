@@ -13,7 +13,7 @@ pub use client::{
     r9p_front_client_create_at, r9p_front_client_create_write_at, r9p_front_client_read,
     r9p_front_client_remove, r9p_front_client_rpc, r9p_front_client_write_file,
 };
-pub const ABI_VERSION: u32 = 18;
+pub const ABI_VERSION: u32 = 19;
 
 const OK: i32 = 0;
 const TIMEOUT: i32 = 1;
@@ -66,7 +66,7 @@ fn clear_last_error(abi: &FrontAbi) {
 
 fn request_context_lfe(context: &RequestContext) -> Vec<u8> {
     format!(
-        "#M(\"version\" \"r9p-front-request-context.v1\" \"principal_id\" \"{}\" \"uname\" \"{}\" \"aname\" \"{}\" \"session_id\" {} \"fid\" {} \"target_path\" \"{}\" \"offset\" {} \"open_mode\" {} \"pushed_generation\" {})",
+        "#M(\"version\" \"r9p-front-request-context.v2\" \"principal_id\" \"{}\" \"uname\" \"{}\" \"aname\" \"{}\" \"session_id\" {} \"fid\" {} \"target_path\" \"{}\" \"offset\" {} \"count\" {} \"open_mode\" {} \"pushed_generation\" {})",
         escape_lfe_string(&context.principal_id),
         escape_lfe_string(&context.uname),
         escape_lfe_string(&context.aname),
@@ -74,6 +74,7 @@ fn request_context_lfe(context: &RequestContext) -> Vec<u8> {
         context.fid,
         escape_lfe_string(&context.target_path),
         context.offset,
+        context.count,
         context.open_mode,
         context.pushed_generation,
     )
@@ -303,6 +304,27 @@ pub unsafe extern "C" fn r9p_front_register_rpc(
         return INVALID;
     };
     match abi.front.register_rpc(path) {
+        Ok(()) => {
+            clear_last_error(abi);
+            OK
+        }
+        Err(error) => set_last_error(abi, error),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn r9p_front_register_read_relay(
+    handle: *mut FrontAbi,
+    path: *const c_char,
+    path_len: usize,
+) -> i32 {
+    let Some(abi) = (unsafe { handle.as_ref() }) else {
+        return INVALID;
+    };
+    let Some(path) = (unsafe { str_arg(path, path_len) }) else {
+        return INVALID;
+    };
+    match abi.front.register_read_relay(path) {
         Ok(()) => {
             clear_last_error(abi);
             OK
@@ -697,6 +719,35 @@ pub unsafe extern "C" fn r9p_front_complete_request(
         requests.remove(&request_id);
     }
     match abi.front.complete_request(prefix, request_id, bytes) {
+        Ok(()) => {
+            clear_last_error(abi);
+            OK
+        }
+        Err(error) => set_last_error(abi, error),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn r9p_front_reject_request(
+    handle: *mut FrontAbi,
+    prefix: *const c_char,
+    prefix_len: usize,
+    request_id: u64,
+    message: *const c_char,
+    message_len: usize,
+) -> i32 {
+    let Some(abi) = (unsafe { handle.as_ref() }) else {
+        return INVALID;
+    };
+    let (Some(prefix), Some(message)) = (unsafe { str_arg(prefix, prefix_len) }, unsafe {
+        str_arg(message, message_len)
+    }) else {
+        return INVALID;
+    };
+    if let Ok(mut requests) = abi.staged_requests.lock() {
+        requests.remove(&request_id);
+    }
+    match abi.front.reject_request(prefix, request_id, message) {
         Ok(()) => {
             clear_last_error(abi);
             OK

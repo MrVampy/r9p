@@ -93,6 +93,15 @@ impl FrontManager {
                     .map_err(|error| error.to_string())?;
                 Ok("front-register-rpc".to_string())
             }
+            ["front-register-read-relay", raw_id, path] => {
+                let state = self.front(raw_id)?;
+                let path = hex::decode_text(path)?;
+                state
+                    .front
+                    .register_read_relay(&path)
+                    .map_err(|error| error.to_string())?;
+                Ok("front-register-read-relay".to_string())
+            }
             ["front-register-remove-relay", raw_id, path] => {
                 let state = self.front(raw_id)?;
                 let path = hex::decode_text(path)?;
@@ -135,6 +144,17 @@ impl FrontManager {
                     .complete_request(&prefix, request_id, &data)
                     .map_err(|error| error.to_string())?;
                 Ok("front-complete-request".to_string())
+            }
+            ["front-reject-request", raw_id, prefix, request_id, message] => {
+                let state = self.front(raw_id)?;
+                let prefix = hex::decode_text(prefix)?;
+                let request_id = parse_u64("request_id", request_id)?;
+                let message = hex::decode_text(message)?;
+                state
+                    .front
+                    .reject_request(&prefix, request_id, &message)
+                    .map_err(|error| error.to_string())?;
+                Ok("front-reject-request".to_string())
             }
             ["front-complete-remove", raw_id, prefix, request_id] => {
                 let state = self.front(raw_id)?;
@@ -197,6 +217,7 @@ fn context_output(context: &RequestContext) -> String {
         hex::encode(context.front_path.as_bytes()),
         hex::encode(context.target_path.as_bytes()),
         context.offset.to_string(),
+        context.count.to_string(),
         context.open_mode.to_string(),
         context.pushed_generation.to_string(),
     ]

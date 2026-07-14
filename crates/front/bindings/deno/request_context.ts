@@ -1,5 +1,5 @@
 export interface RequestContext {
-  version: "r9p-front-request-context.v1";
+  version: "r9p-front-request-context.v2";
   principalId: string;
   uname: string;
   aname: string;
@@ -7,6 +7,7 @@ export interface RequestContext {
   fid: bigint;
   targetPath: string;
   offset: bigint;
+  count: number;
   openMode: number;
   pushedGeneration: bigint;
   raw: string;
@@ -14,14 +15,18 @@ export interface RequestContext {
 
 export function parseRequestContext(raw: string): RequestContext {
   const version = lfeStringField(raw, "version");
-  if (version !== "r9p-front-request-context.v1") {
+  if (version !== "r9p-front-request-context.v2") {
     throw new Error(`unsupported front request context version: ${version}`);
   }
   const openMode = lfeNumberField(raw, "open_mode");
+  const count = lfeNumberField(raw, "count");
   if (openMode < 0n || openMode > 255n) {
     throw new Error(
       `front request context open_mode out of range: ${openMode}`,
     );
+  }
+  if (count < 0n || count > 4_294_967_295n) {
+    throw new Error(`front request context count out of range: ${count}`);
   }
   return {
     version,
@@ -32,6 +37,7 @@ export function parseRequestContext(raw: string): RequestContext {
     fid: lfeNumberField(raw, "fid"),
     targetPath: lfeStringField(raw, "target_path"),
     offset: lfeNumberField(raw, "offset"),
+    count: Number(count),
     openMode: Number(openMode),
     pushedGeneration: lfeNumberField(raw, "pushed_generation"),
     raw,

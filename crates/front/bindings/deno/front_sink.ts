@@ -1,4 +1,4 @@
-export const SUPPORTED_ABI_VERSIONS = new Set([18]);
+export const SUPPORTED_ABI_VERSIONS = new Set([19]);
 
 export { renderExportDescriptor } from "./export_descriptor.ts";
 export type { ExportDescriptorOptions } from "./export_descriptor.ts";
@@ -27,6 +27,10 @@ const SYMBOLS = {
     result: "i32",
   },
   r9p_front_register_rpc: {
+    parameters: ["pointer", "buffer", "usize"],
+    result: "i32",
+  },
+  r9p_front_register_read_relay: {
     parameters: ["pointer", "buffer", "usize"],
     result: "i32",
   },
@@ -64,6 +68,10 @@ const SYMBOLS = {
     result: "isize",
   },
   r9p_front_complete_request: {
+    parameters: ["pointer", "buffer", "usize", "u64", "buffer", "usize"],
+    result: "i32",
+  },
+  r9p_front_reject_request: {
     parameters: ["pointer", "buffer", "usize", "u64", "buffer", "usize"],
     result: "i32",
   },
@@ -645,6 +653,21 @@ export class FrontHost implements TransitionSink {
     }
   }
 
+  registerReadRelay(path: string): void {
+    this.assertOpen();
+    const [pathBytes, pathLen] = bytes(path);
+    const status = this.library.symbols.r9p_front_register_read_relay(
+      this.handle,
+      pathBytes,
+      pathLen,
+    );
+    if (status !== 0) {
+      throw new Error(
+        `front register_read_relay(${path}) failed with status ${status}`,
+      );
+    }
+  }
+
   registerWriteRelay(path: string): void {
     this.assertOpen();
     const [pathBytes, pathLen] = bytes(path);
@@ -803,6 +826,25 @@ export class FrontHost implements TransitionSink {
     if (status !== 0) {
       throw new Error(
         `front complete_request(${prefix}) failed with status ${status}`,
+      );
+    }
+  }
+
+  rejectRequest(prefix: string, requestId: bigint, message: string): void {
+    this.assertOpen();
+    const [prefixBytes, prefixLen] = bytes(prefix);
+    const [messageBytes, messageLen] = bytes(message);
+    const status = this.library.symbols.r9p_front_reject_request(
+      this.handle,
+      prefixBytes,
+      prefixLen,
+      requestId,
+      messageBytes,
+      messageLen,
+    );
+    if (status !== 0) {
+      throw new Error(
+        `front reject_request(${prefix}) failed with status ${status}`,
       );
     }
   }

@@ -1,8 +1,8 @@
 use crate::model::{
     canonical_root_path, normalise_request_prefix, Body, CreateRelayReply, CreateRelayRequest,
     Intake, IntakeRequest, LogBody, PrincipalRoot, ProtocolConfig, PushedDirectoryMetadata,
-    PushedFileMetadata, RemoveRelayReply, State, WriteRelayReply, WstatRelayReply, ENOENT, ENOTDIR,
-    EPERM,
+    PushedFileMetadata, RemoveRelayReply, RequestReply, State, WriteRelayReply, WstatRelayReply,
+    ENOENT, ENOTDIR, EPERM,
 };
 use crate::tree::FrontTree;
 use r9p::codec::{MAX_MSIZE, MIN_MSIZE};
@@ -124,6 +124,25 @@ impl Front {
             return Err(Error::from_static(EPERM));
         }
         state.place(trimmed, Body::Rpc(trimmed.to_string()))?;
+        Ok(())
+    }
+
+    pub fn register_read_relay(&self, path: &str) -> Result<()> {
+        let mut state = self.lock()?;
+        let trimmed = normalise_request_prefix(path)?;
+        match state.lookup_optional_path(&trimmed)? {
+            Some(id) => {
+                if !matches!(state.node(id)?.body, Body::ReadRelay(_)) {
+                    return Err(Error::from_static(EPERM));
+                }
+                if let Some(node) = state.nodes.get_mut(&id) {
+                    node.body = Body::ReadRelay(trimmed);
+                }
+            }
+            None => {
+                state.place(&trimmed, Body::ReadRelay(trimmed.clone()))?;
+            }
+        }
         Ok(())
     }
 
@@ -395,8 +414,16 @@ impl Front {
         let trimmed = prefix.trim_matches('/');
         {
             let mut state = self.lock()?;
-            if let Some(slot) = state.rpc_responses.get_mut(&request_id) {
-                *slot = Some(bytes.to_vec());
+            if state.rpc_responses.contains_key(&request_id) {
+                let trimmed = normalise_request_prefix(prefix)?;
+                if state.response_prefixes.get(&request_id) != Some(&trimmed) {
+                    return Err(Error::from_static(ENOENT));
+                }
+                let slot = state
+                    .rpc_responses
+                    .get_mut(&request_id)
+                    .ok_or_else(|| Error::from_static(ENOENT))?;
+                *slot = Some(RequestReply::Accepted(bytes.to_vec()));
                 drop(state);
                 self.shared.1.notify_all();
                 return Ok(());
@@ -407,6 +434,23 @@ impl Front {
         }
         let result_path = format!("{trimmed}/{request_id}/result");
         self.set(&result_path, bytes)
+    }
+
+    pub fn reject_request(&self, prefix: &str, request_id: u64, message: &str) -> Result<()> {
+        let mut state = self.lock()?;
+        let trimmed = normalise_request_prefix(prefix)?;
+        if state.response_prefixes.get(&request_id) != Some(&trimmed) {
+            return Err(Error::from_static(ENOENT));
+        }
+        match state.rpc_responses.get_mut(&request_id) {
+            Some(slot) => {
+                *slot = Some(RequestReply::Rejected(message.to_string()));
+                drop(state);
+                self.shared.1.notify_all();
+                Ok(())
+            }
+            None => Err(Error::from_static(ENOENT)),
+        }
     }
 
     pub fn complete_write(&self, prefix: &str, request_id: u64, count: u32) -> Result<()> {
@@ -571,24 +615,25 @@ impl Front {
         let deadline = Instant::now() + state.wait_timeout;
         loop {
             if cancel.is_some_and(|cancel| cancel.load(Ordering::SeqCst)) {
-                state.rpc_responses.remove(&request_id);
-                state.remove_pending_request(request_id);
+                state.remove_response_request(request_id);
                 return Err(Error::from_static("request flushed"));
             }
             match state.rpc_responses.get(&request_id) {
                 None => return Err(Error::from_static(ENOENT)),
-                Some(Some(bytes)) => {
+                Some(Some(RequestReply::Accepted(bytes))) => {
                     let start = usize::try_from(offset.min(bytes.len() as u64))
                         .map_err(|_| Error::from_static(EPERM))?;
                     let end = bytes.len().min(start.saturating_add(count as usize));
                     return Ok(ReadData::Bytes(bytes[start..end].to_vec()));
                 }
+                Some(Some(RequestReply::Rejected(message))) => {
+                    return Err(Error::from(message.clone()));
+                }
                 Some(None) => {}
             }
             let now = Instant::now();
             if now >= deadline {
-                state.rpc_responses.remove(&request_id);
-                state.remove_pending_request(request_id);
+                state.remove_response_request(request_id);
                 return Err(Error::from_static(
                     "rpc request timed out awaiting response",
                 ));
@@ -602,15 +647,21 @@ impl Front {
         }
     }
 
-    pub(crate) fn rpc_read(
+    pub(crate) fn response_read(
         &self,
         request_id: u64,
         offset: u64,
         count: u32,
         cancel: Option<&AtomicBool>,
+        consume: bool,
     ) -> Result<ReadData> {
         let state = self.lock()?;
-        self.read_rpc(state, request_id, offset, count, cancel)
+        let response = self.read_rpc(state, request_id, offset, count, cancel);
+        if consume {
+            let mut state = self.lock()?;
+            state.remove_response_request(request_id);
+        }
+        response
     }
 
     pub(crate) fn wait_write_relay(
@@ -838,6 +889,7 @@ impl Front {
             Body::Log(_) => self.read_log(state, id, offset, count, cancel),
             Body::IntakeNew(_) => Err(Error::from_static(EPERM)),
             Body::Rpc(_) => Err(Error::from_static(EPERM)),
+            Body::ReadRelay(_) => Err(Error::from_static(EPERM)),
             Body::WriteRelay(_) => Err(Error::from_static(EPERM)),
         }
     }
@@ -845,5 +897,5 @@ impl Front {
 
 pub(crate) enum ReadTarget {
     Node(u64),
-    Rpc(u64),
+    Response(u64, u64, bool),
 }

@@ -2,10 +2,10 @@
 #define R9P_FRONT_H
 
 /*
- * r9p front C ABI, version 18.
+ * r9p front C ABI, version 19.
  *
  * Contract rules:
- * - r9p_front_abi_version() must return 18 before calls are made.
+ * - r9p_front_abi_version() must return 19 before calls are made.
  * - r9p_front_new() returns an owned handle; every handle must be released
  *   exactly once with r9p_front_free(). Calls other than r9p_front_free()
  *   are thread-safe: they may be called from any thread concurrently.
@@ -30,7 +30,8 @@
  *   request_copy(request_id), then a completion/rejection call according to
  *   the registered shape. The prefix is the value to pass to the completion
  *   call: the intake prefix for register_intake, or the registered path for
- *   register_rpc, register_write_relay, register_remove_relay, or
+ *   register_rpc, register_read_relay, register_write_relay,
+ *   register_remove_relay, or
  *   register_wstat_relay.
  *   request_prefix_copy and request_context_copy with cap=0 return the
  *   required length without copying. request_copy consumes the staged request
@@ -56,6 +57,10 @@
  *     stateless query/response. A subsequent write on the same fid is a
  *     fresh request; clunk discards a pending one. A read before a write,
  *     or after the host abandons the request, errors.
+ *   - register_read_relay(path): read-only synthetic file. Each Tread
+ *     enqueues one request carrying its offset and count. complete_request
+ *     supplies that read's bytes; reject_request returns the supplied 9P
+ *     error. The response is consumed by that Tread and is not cached.
  *   - register_write_relay(path): synchronous write relay. A client opens
  *     <path> O_WRITE and writes bytes; the Rwrite count is returned only
  *     after the host calls complete_write. reject_write returns the supplied
@@ -139,6 +144,8 @@ int32_t r9p_front_register_intake(r9p_front *front, const char *prefix,
                                   size_t prefix_len);
 int32_t r9p_front_register_rpc(r9p_front *front, const char *path,
                                size_t path_len);
+int32_t r9p_front_register_read_relay(r9p_front *front, const char *path,
+                                      size_t path_len);
 int32_t r9p_front_register_write_relay(r9p_front *front, const char *path,
                                        size_t path_len);
 int32_t r9p_front_register_remove_relay(r9p_front *front, const char *path,
@@ -178,6 +185,9 @@ intptr_t r9p_front_request_context_copy(r9p_front *front, uint64_t request_id,
 int32_t r9p_front_complete_request(r9p_front *front, const char *prefix,
                                    size_t prefix_len, uint64_t request_id,
                                    const uint8_t *bytes, size_t bytes_len);
+int32_t r9p_front_reject_request(r9p_front *front, const char *prefix,
+                                 size_t prefix_len, uint64_t request_id,
+                                 const char *message, size_t message_len);
 int32_t r9p_front_complete_write(r9p_front *front, const char *prefix,
                                  size_t prefix_len, uint64_t request_id,
                                  uint32_t count);

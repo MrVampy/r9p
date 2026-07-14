@@ -333,12 +333,18 @@ fn perform_request(
                 let mut tree = tree
                     .lock()
                     .map_err(|_| Error::from_static("front tree poisoned"))?;
-                (tree.front(), tree.read_target(*fid)?)
+                (tree.front(), tree.read_target_at(*fid, *offset, *count)?)
             };
             let read = match target {
                 ReadTarget::Node(id) => front.read_node(id, *offset, *count, cancel.as_deref()),
-                ReadTarget::Rpc(request_id) => {
-                    front.rpc_read(request_id, *offset, *count, cancel.as_deref())
+                ReadTarget::Response(request_id, response_offset, consume) => {
+                    front.response_read(
+                        request_id,
+                        response_offset,
+                        *count,
+                        cancel.as_deref(),
+                        consume,
+                    )
                 }
             };
             read.map(ServerCompletion::Read)

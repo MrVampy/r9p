@@ -2,9 +2,9 @@ use front::abi::{
     r9p_front_abi_version, r9p_front_append_event, r9p_front_client_read, r9p_front_client_rpc,
     r9p_front_complete_remove, r9p_front_complete_request, r9p_front_complete_write,
     r9p_front_free, r9p_front_new, r9p_front_next_request, r9p_front_register_intake,
-    r9p_front_register_log, r9p_front_register_remove_relay, r9p_front_register_rpc,
-    r9p_front_register_write_relay, r9p_front_request_context_copy, r9p_front_request_copy,
-    r9p_front_request_prefix_copy, r9p_front_serve_tcp, r9p_front_set,
+    r9p_front_register_log, r9p_front_register_read_relay, r9p_front_register_remove_relay,
+    r9p_front_register_rpc, r9p_front_register_write_relay, r9p_front_request_context_copy,
+    r9p_front_request_copy, r9p_front_request_prefix_copy, r9p_front_serve_tcp, r9p_front_set,
     r9p_front_set_principal_class_aname, r9p_front_set_principal_root,
     r9p_front_set_protocol_limits, r9p_front_set_pushed_directory, r9p_front_set_pushed_file,
     r9p_front_stop,
@@ -53,7 +53,7 @@ fn request_context(handle: *mut front::abi::FrontAbi, request_id: u64) -> String
 
 #[test]
 fn abi_roundtrip_over_tcp() {
-    assert_eq!(r9p_front_abi_version(), 18);
+    assert_eq!(r9p_front_abi_version(), 19);
     let handle = r9p_front_new();
     let (path, path_len) = cstr("market/status");
     let (bytes, bytes_len) = cbytes(b"#M(\"state\" 'open)");
@@ -260,7 +260,7 @@ fn abi_roundtrip_over_tcp() {
 
 #[test]
 fn abi_client_rpc_writes_and_reads_same_fid() {
-    assert_eq!(r9p_front_abi_version(), 18);
+    assert_eq!(r9p_front_abi_version(), 19);
     let handle = r9p_front_new();
     let (rpc, rpc_len) = cstr("rpc");
     assert_eq!(unsafe { r9p_front_register_rpc(handle, rpc, rpc_len) }, 0);
@@ -331,7 +331,7 @@ fn abi_client_rpc_writes_and_reads_same_fid() {
 
 #[test]
 fn rpc_path_buffers_request_larger_than_negotiated_write_payload() {
-    assert_eq!(r9p_front_abi_version(), 18);
+    assert_eq!(r9p_front_abi_version(), 19);
     let handle = r9p_front_new();
     let (rpc, rpc_len) = cstr("rpc");
     assert_eq!(unsafe { r9p_front_register_rpc(handle, rpc, rpc_len) }, 0);
@@ -376,7 +376,7 @@ fn rpc_path_buffers_request_larger_than_negotiated_write_payload() {
 
 #[test]
 fn abi_client_read_reads_namespace_file() {
-    assert_eq!(r9p_front_abi_version(), 18);
+    assert_eq!(r9p_front_abi_version(), 19);
     let handle = r9p_front_new();
     let (path, path_len) = cstr("gateways/ibkr/api");
     let (body, body_len) =
@@ -426,8 +426,103 @@ fn abi_client_read_reads_namespace_file() {
 }
 
 #[test]
+fn abi_read_relay_forwards_ranges_until_eof() {
+    assert_eq!(r9p_front_abi_version(), 19);
+    let handle = r9p_front_new();
+    let (path, path_len) = cstr("archive/trade/record");
+    assert_eq!(
+        unsafe { r9p_front_register_read_relay(handle, path, path_len) },
+        0
+    );
+    let (bind, bind_len) = cstr("127.0.0.1:0");
+    let mut port = 0u16;
+    assert_eq!(
+        unsafe { r9p_front_serve_tcp(handle, bind, bind_len, &mut port) },
+        0
+    );
+    let address = format!("127.0.0.1:{port}");
+    let handle_for_client = handle as usize;
+    let reader = thread::spawn(move || {
+        let handle = handle_for_client as *mut front::abi::FrontAbi;
+        let (endpoint, endpoint_len) = cstr(&address);
+        let (uname, uname_len) = cstr("codex");
+        let (aname, aname_len) = cstr("/");
+        let (path, path_len) = cstr("/archive/trade/record");
+        let mut response = vec![0_u8; 128];
+        let mut response_len = 0_usize;
+        let status = unsafe {
+            r9p_front_client_read(
+                handle,
+                endpoint,
+                endpoint_len,
+                uname,
+                uname_len,
+                aname,
+                aname_len,
+                path,
+                path_len,
+                65_536,
+                response.as_mut_ptr(),
+                response.len(),
+                &mut response_len,
+            )
+        };
+        assert_eq!(status, 0);
+        response.truncate(response_len);
+        response
+    });
+
+    let mut request_id = 0_u64;
+    let mut request_len = 0_usize;
+    assert_eq!(
+        unsafe { r9p_front_next_request(handle, 1000, &mut request_id, &mut request_len) },
+        0
+    );
+    assert_eq!(request_len, 0);
+    assert_eq!(request_prefix(handle, request_id), "archive/trade/record");
+    let context = request_context(handle, request_id);
+    assert!(context.contains("\"version\" \"r9p-front-request-context.v2\""));
+    assert!(context.contains("\"offset\" 0"));
+    assert!(context.contains("\"count\" "));
+    assert_eq!(
+        unsafe { r9p_front_request_copy(handle, request_id, std::ptr::null_mut(), 0) },
+        0
+    );
+    let (body, body_len) = cbytes(b"cold");
+    assert_eq!(
+        unsafe {
+            r9p_front_complete_request(handle, path, path_len, request_id, body, body_len)
+        },
+        0
+    );
+
+    let mut eof_id = 0_u64;
+    let mut eof_len = 0_usize;
+    assert_eq!(
+        unsafe { r9p_front_next_request(handle, 1000, &mut eof_id, &mut eof_len) },
+        0
+    );
+    assert_eq!(eof_len, 0);
+    assert!(request_context(handle, eof_id).contains("\"offset\" 4"));
+    assert_eq!(
+        unsafe { r9p_front_request_copy(handle, eof_id, std::ptr::null_mut(), 0) },
+        0
+    );
+    assert_eq!(
+        unsafe {
+            r9p_front_complete_request(handle, path, path_len, eof_id, std::ptr::null(), 0)
+        },
+        0
+    );
+
+    assert_eq!(reader.join().expect("read relay client join"), b"cold".to_vec());
+    assert_eq!(unsafe { r9p_front_stop(handle) }, 0);
+    unsafe { r9p_front_free(handle) };
+}
+
+#[test]
 fn abi_door_rehearsal_principal_root_and_write_relay() {
-    assert_eq!(r9p_front_abi_version(), 18);
+    assert_eq!(r9p_front_abi_version(), 19);
     let handle = r9p_front_new();
     let (status_path, status_path_len) = cstr("views/alice/status");
     let (status_body, status_body_len) = cbytes(b"#M(\"served_state\" \"fresh\")");
@@ -519,7 +614,7 @@ fn abi_door_rehearsal_principal_root_and_write_relay() {
 
 #[test]
 fn abi_v11_pushed_metadata_aname_gate_and_request_context() {
-    assert_eq!(r9p_front_abi_version(), 18);
+    assert_eq!(r9p_front_abi_version(), 19);
     let handle = r9p_front_new();
     assert_eq!(
         unsafe { r9p_front_set_protocol_limits(handle, 65_536, 4096) },
@@ -630,7 +725,7 @@ fn abi_v11_pushed_metadata_aname_gate_and_request_context() {
         );
         assert_eq!(request_prefix(handle, request_id), "views/alice/control");
         let context = request_context(handle, request_id);
-        assert!(context.contains("\"version\" \"r9p-front-request-context.v1\""));
+        assert!(context.contains("\"version\" \"r9p-front-request-context.v2\""));
         assert!(context.contains("\"principal_id\" \"human.alice\""));
         assert!(context.contains("\"uname\" \"alice\""));
         assert!(context.contains("\"aname\" \"/\""));
@@ -673,7 +768,7 @@ fn abi_v11_pushed_metadata_aname_gate_and_request_context() {
 
 #[test]
 fn abi_remove_relay_uses_tremove_and_drops_projection() {
-    assert_eq!(r9p_front_abi_version(), 18);
+    assert_eq!(r9p_front_abi_version(), 19);
     let handle = r9p_front_new();
     let (state_path, state_path_len) = cstr("trades/demo/trade-1/state");
     let (state_body, state_body_len) = cbytes(br#"{"lifecycle":"archived"}"#);

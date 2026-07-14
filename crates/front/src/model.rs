@@ -28,6 +28,7 @@ pub(crate) enum Body {
     Log(LogBody),
     IntakeNew(u64),
     Rpc(String),
+    ReadRelay(String),
     WriteRelay(String),
 }
 
@@ -117,6 +118,7 @@ pub struct RequestContext {
     pub front_path: String,
     pub target_path: String,
     pub offset: u64,
+    pub count: u32,
     pub open_mode: u8,
     pub pushed_generation: u64,
 }
@@ -137,6 +139,11 @@ pub type PushedDirectoryMetadata = PushedEntryMetadata;
 
 pub(crate) enum WriteRelayReply {
     Accepted(u32),
+    Rejected(String),
+}
+
+pub(crate) enum RequestReply {
+    Accepted(Vec<u8>),
     Rejected(String),
 }
 
@@ -183,7 +190,8 @@ pub(crate) struct State {
     pub(crate) intakes: BTreeMap<u64, Intake>,
     pub(crate) pending: VecDeque<IntakeRequest>,
     pub(crate) create_pending: VecDeque<CreateRelayRequest>,
-    pub(crate) rpc_responses: BTreeMap<u64, Option<Vec<u8>>>,
+    pub(crate) rpc_responses: BTreeMap<u64, Option<RequestReply>>,
+    pub(crate) response_prefixes: BTreeMap<u64, String>,
     pub(crate) create_relay_responses: BTreeMap<u64, Option<CreateRelayReply>>,
     pub(crate) write_relay_responses: BTreeMap<u64, Option<WriteRelayReply>>,
     pub(crate) remove_relay_responses: BTreeMap<u64, Option<RemoveRelayReply>>,
@@ -256,6 +264,7 @@ impl State {
             pending: VecDeque::new(),
             create_pending: VecDeque::new(),
             rpc_responses: BTreeMap::new(),
+            response_prefixes: BTreeMap::new(),
             create_relay_responses: BTreeMap::new(),
             write_relay_responses: BTreeMap::new(),
             remove_relay_responses: BTreeMap::new(),
@@ -342,6 +351,7 @@ impl State {
             Body::Log(log) => (0o444u32, log.end()),
             Body::IntakeNew(_) => (0o222u32, 0u64),
             Body::Rpc(_) => (0o600u32, 0u64),
+            Body::ReadRelay(_) => (0o444u32, 0u64),
             Body::WriteRelay(_) => (0o222u32, 0u64),
         };
         Ok(Stat {
@@ -755,6 +765,12 @@ impl State {
             .retain(|request| request.request_id != request_id);
     }
 
+    pub(crate) fn remove_response_request(&mut self, request_id: u64) {
+        self.rpc_responses.remove(&request_id);
+        self.response_prefixes.remove(&request_id);
+        self.remove_pending_request(request_id);
+    }
+
     pub(crate) fn pop_pending_for_prefix(&mut self, prefix: &str) -> Option<IntakeRequest> {
         let index = self
             .pending
@@ -856,7 +872,9 @@ pub(crate) fn open_allowed(node: &Node, mode: u8) -> bool {
         return true;
     }
     match &node.body {
-        Body::Dir(_) | Body::File(_) | Body::Log(_) => mode & OPEN_MODE_MASK == OREAD,
+        Body::Dir(_) | Body::File(_) | Body::Log(_) | Body::ReadRelay(_) => {
+            mode & OPEN_MODE_MASK == OREAD
+        }
         Body::IntakeNew(_) | Body::WriteRelay(_) => mode & OPEN_MODE_MASK == OWRITE,
         Body::Rpc(_) => mode & OPEN_MODE_MASK == ORDWR,
     }

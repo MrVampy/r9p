@@ -1,4 +1,5 @@
 mod config;
+mod connection;
 mod handlers;
 mod session;
 mod stream;
@@ -6,6 +7,7 @@ mod types;
 mod validation;
 
 pub use config::ServerConfig;
+pub use connection::{serve_connection, ConnectionHandler, ConnectionStream};
 pub use session::Session;
 pub use stream::{Broadcaster, Stream};
 pub use types::{

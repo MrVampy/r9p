@@ -11,6 +11,9 @@ backend
 r9p server core
   9P messages, qids, fids, tags, stat records, walk/open/read/write/clunk/flush
 
+optional r9p connection facade
+  checked frames, split admission/completion, bounded cancellable workers
+
 transport adapter
   Unix socket, TCP, stdio, BEAM port, virtio transport
 
@@ -22,6 +25,14 @@ consumer
 ```
 
 The core rule is: `r9p` speaks 9P; backends decide what to serve; consumers decide what to do with the bytes; runtime adapters decide how bytes move.
+
+The optional `server::serve_connection` facade is layered over the same
+transport-neutral `Server::admit` and `Server::complete` state machine. It owns
+only a single already-created cloneable byte stream and a bounded blocking
+worker policy. It does not bind sockets or decide endpoint permissions, peer
+identity, authentication, service admission, TLS, or daemon lifecycle. A
+runtime with its own executor can continue to use `admit` and `complete`
+directly.
 
 `r9p` provides generic client create, write, remove, read, and RPC operations,
 plus language bindings that encode the transport-neutral `r9p-export.v1`

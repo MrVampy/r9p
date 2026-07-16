@@ -37,6 +37,15 @@ The architectural boundary is deliberately small:
 The crate keeps full transport loops and operator tools layered over the
 reusable client/server core.
 
+For embedded servers that need cancellable blocking work without selecting an
+async runtime, `r9p::server::serve_connection` is an optional connection
+facade. It drives one caller-supplied cloneable `Read + Write` stream, delegates
+request meaning to a `ConnectionHandler`, and bounds live asynchronous workers
+with `ServerConfig::max_async_requests`. `Tflush`, fid clunk, version reset, and
+connection teardown signal cancellation; worker capacity is released only
+when the handler actually exits. The application still owns listeners, socket
+creation and permissions, peer admission, TLS, and process lifecycle.
+
 ## CLI
 
 The operator-facing client tracks the shape of plan9port's `9p` command:

@@ -5,6 +5,7 @@ pub struct ServerConfig {
     pub default_msize: u32,
     pub max_msize: u32,
     pub max_fids: usize,
+    pub max_async_requests: usize,
     pub variant: Variant,
 }
 
@@ -14,6 +15,7 @@ impl Default for ServerConfig {
             default_msize: DEFAULT_MSIZE,
             max_msize: MAX_MSIZE,
             max_fids: 4096,
+            max_async_requests: 256,
             variant: Variant::Plain,
         }
     }

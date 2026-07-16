@@ -48,6 +48,15 @@ pub fn read_tmessage<R: Read>(reader: &mut R) -> Result<Option<TMessage>> {
         .transpose()
 }
 
+pub fn read_tmessage_checked<R: Read>(
+    reader: &mut R,
+    max_frame_size: u32,
+) -> Result<Option<TMessage>> {
+    read_frame_checked(reader, max_frame_size)?
+        .map(|frame| decode_tmessage(&frame))
+        .transpose()
+}
+
 pub fn read_rmessage<R: Read>(reader: &mut R) -> Result<Option<RMessage>> {
     read_frame(reader)?
         .map(|frame| decode_rmessage(&frame))
@@ -75,6 +84,10 @@ pub fn write_rmessage_checked<W: Write>(
 }
 
 fn read_frame<R: Read>(reader: &mut R) -> Result<Option<Vec<u8>>> {
+    read_frame_checked(reader, u32::MAX)
+}
+
+fn read_frame_checked<R: Read>(reader: &mut R, max_frame_size: u32) -> Result<Option<Vec<u8>>> {
     let mut prefix = [0_u8; 4];
     match reader.read_exact(&mut prefix) {
         Ok(()) => {}
@@ -94,6 +107,11 @@ fn read_frame<R: Read>(reader: &mut R) -> Result<Option<Vec<u8>>> {
     let size = u32::from_le_bytes(prefix);
     if size < FRAME_HEADER_SIZE {
         return Err(Error::from(format!("short 9P frame size {size}")));
+    }
+    if size > max_frame_size {
+        return Err(Error::from(format!(
+            "9P frame size {size} exceeds msize {max_frame_size}"
+        )));
     }
     let rest_len = usize::try_from(size - 4)
         .map_err(|_| Error::from(format!("oversized frame size {size}")))?;
@@ -531,6 +549,23 @@ mod tests {
             wnames: (0..=MAXWELEM).map(|_| b"x".to_vec()).collect(),
         };
         assert!(encode_tmessage(&oversized_walk).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn checked_reader_rejects_a_frame_larger_than_the_negotiated_msize() -> Result<()> {
+        let frame = encode_tmessage(&TMessage::Write {
+            tag: 1,
+            fid: 1,
+            offset: 0,
+            data: vec![0; 32],
+        })?;
+        let max_frame_size = u32::try_from(frame.len().saturating_sub(1))
+            .map_err(|_| Error::from("bad test frame size"))?;
+        let error = read_tmessage_checked(&mut frame.as_slice(), max_frame_size)
+            .err()
+            .ok_or("oversized frame accepted")?;
+        assert!(error.display_lossy().contains("exceeds msize"));
         Ok(())
     }
 

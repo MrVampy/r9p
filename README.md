@@ -46,6 +46,13 @@ connection teardown signal cancellation; worker capacity is released only
 when the handler actually exits. The application still owns listeners, socket
 creation and permissions, peer admission, TLS, and process lifecycle.
 
+Blocking TCP consumers that require finite transport calls can use
+`r9p::blocking::Client::connect_tcp_with_timeouts` with
+`TcpConnectionTimeouts`. The connect timeout applies to each resolved socket
+address, and distinct read and write timeouts are installed before the version
+and attach handshake. The original `connect_tcp` API remains available for
+callers that intentionally retain its existing unbounded behavior.
+
 ## CLI
 
 The operator-facing client tracks the shape of plan9port's `9p` command:

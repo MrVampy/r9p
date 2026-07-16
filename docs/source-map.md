@@ -18,6 +18,10 @@ This map defines the local sources agents should inspect before making source-sp
   - Generic file-tree trait, session state, open/read/write/stat/walk handling.
 - `crates/core/src/client.rs`
   - Runtime-neutral client operation builder and response admission.
+- `crates/core/src/blocking.rs`
+  - Blocking client operations and the opt-in bounded TCP connection seam.
+- `crates/core/src/blocking/tests.rs`
+  - Blocking-client address, timeout, and stalled-handshake regressions.
 - `crates/core/src/export_descriptor.rs`
   - Generic `r9p-export.v1` descriptor parsing, validation, and encoding.
   - It carries no service-registration lifecycle or runtime namespace policy.

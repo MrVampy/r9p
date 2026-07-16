@@ -42,6 +42,14 @@ runtime owns `/srv` admission, lease interpretation, and projection. Neither
 side gives `r9p` Vault-specific registration policy or a privileged runtime
 control path.
 
+The blocking TCP client has an opt-in bounded connection seam:
+`Client::connect_tcp_with_timeouts` takes independent connect, read, and write
+timeouts. It resolves the endpoint, uses `TcpStream::connect_timeout` for each
+resolved address, and installs the read and write timeouts before 9P version
+negotiation and attach. The existing `Client::connect_tcp` API remains the
+unbounded compatibility surface. Endpoint selection, retry policy, and service
+registration meaning remain application responsibilities.
+
 ## Client And Server
 
 `r9p` owns both reusable protocol sides. The server side is the generic session plus backend boundary. The client side is the runtime-neutral operation builder plus response admission boundary. Keeping both sides in one crate is deliberate: tags, fids, stat records, message limits, flush handling, and wire encoding are shared protocol concerns, not application concerns.

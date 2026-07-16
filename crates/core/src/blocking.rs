@@ -10,7 +10,8 @@ use crate::{
 };
 use std::{
     io::{Read, Write},
-    net::TcpStream,
+    net::{TcpStream, ToSocketAddrs},
+    time::Duration,
 };
 
 #[cfg(unix)]
@@ -30,6 +31,38 @@ impl<T: Read + Write + Send> ReadWrite for T {}
 
 pub type BoxedClient = Client<Box<dyn ReadWrite>>;
 
+/// Independent finite timeouts for a blocking TCP connection and its I/O.
+///
+/// Every duration must be greater than zero. `connect_timeout` applies to each
+/// socket address produced by name resolution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TcpConnectionTimeouts {
+    pub connect_timeout: Duration,
+    pub read_timeout: Duration,
+    pub write_timeout: Duration,
+}
+
+impl TcpConnectionTimeouts {
+    pub const fn new(
+        connect_timeout: Duration,
+        read_timeout: Duration,
+        write_timeout: Duration,
+    ) -> Self {
+        Self {
+            connect_timeout,
+            read_timeout,
+            write_timeout,
+        }
+    }
+
+    fn validate(self) -> Result<Self> {
+        validate_nonzero_timeout("TCP connect", self.connect_timeout)?;
+        validate_nonzero_timeout("TCP read", self.read_timeout)?;
+        validate_nonzero_timeout("TCP write", self.write_timeout)?;
+        Ok(self)
+    }
+}
+
 pub struct Client<S> {
     stream: S,
     protocol: ProtocolClient,
@@ -45,6 +78,20 @@ impl Client<TcpStream> {
         stream
             .set_nodelay(true)
             .map_err(|error| io_error("set TCP_NODELAY", error))?;
+        Self::connect(stream, uname, aname, msize)
+    }
+
+    /// Connects over TCP with finite transport timeouts installed before the
+    /// 9P version and attach handshake.
+    pub fn connect_tcp_with_timeouts(
+        address: &str,
+        uname: &str,
+        aname: &str,
+        msize: u32,
+        timeouts: TcpConnectionTimeouts,
+    ) -> Result<Self> {
+        let socket = parse_tcp_address(address)?;
+        let stream = connect_tcp_stream_with_timeouts(&socket, timeouts)?;
         Self::connect(stream, uname, aname, msize)
     }
 }
@@ -489,6 +536,49 @@ pub fn parse_tcp_address(address: &str) -> Result<String> {
     Ok(format!("{address}:564"))
 }
 
+fn connect_tcp_stream_with_timeouts(
+    socket: &str,
+    timeouts: TcpConnectionTimeouts,
+) -> Result<TcpStream> {
+    let timeouts = timeouts.validate()?;
+    let addresses = socket
+        .to_socket_addrs()
+        .map_err(|error| io_error(format!("resolve {socket}"), error))?;
+    let mut last_error = None;
+    for address in addresses {
+        match TcpStream::connect_timeout(&address, timeouts.connect_timeout) {
+            Ok(stream) => {
+                stream
+                    .set_nodelay(true)
+                    .map_err(|error| io_error("set TCP_NODELAY", error))?;
+                stream
+                    .set_read_timeout(Some(timeouts.read_timeout))
+                    .map_err(|error| io_error("set TCP read timeout", error))?;
+                stream
+                    .set_write_timeout(Some(timeouts.write_timeout))
+                    .map_err(|error| io_error("set TCP write timeout", error))?;
+                return Ok(stream);
+            }
+            Err(error) => last_error = Some((address, error)),
+        }
+    }
+    match last_error {
+        Some((address, error)) => Err(io_error(format!("connect {socket} via {address}"), error)),
+        None => Err(Error::from(format!(
+            "connect {socket}: no socket addresses resolved"
+        ))),
+    }
+}
+
+fn validate_nonzero_timeout(label: &str, timeout: Duration) -> Result<()> {
+    if timeout.is_zero() {
+        return Err(Error::from(format!(
+            "{label} timeout must be greater than zero"
+        )));
+    }
+    Ok(())
+}
+
 pub fn path_names(path: &str) -> Vec<Vec<u8>> {
     path.split('/')
         .filter(|name| !name.is_empty() && *name != ".")
@@ -523,28 +613,4 @@ fn unexpected(expected: &str, got: impl std::fmt::Debug) -> Error {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{parse_tcp_address, path_names};
-
-    #[test]
-    fn parses_plan9port_tcp_address() {
-        let parsed = parse_tcp_address("tcp!127.0.0.1!19564").expect("address should parse");
-        assert_eq!(parsed, "127.0.0.1:19564");
-    }
-
-    #[test]
-    fn defaults_bare_host_to_9p_port() {
-        let parsed = parse_tcp_address("vault.local").expect("address should parse");
-        assert_eq!(parsed, "vault.local:564");
-    }
-
-    #[test]
-    fn path_names_match_root_relative_walks() {
-        assert_eq!(
-            path_names("/entries/arch"),
-            [b"entries".to_vec(), b"arch".to_vec()]
-        );
-        assert!(path_names("/").is_empty());
-        assert!(path_names(".").is_empty());
-    }
-}
+mod tests;

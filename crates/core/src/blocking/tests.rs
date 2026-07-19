@@ -205,10 +205,7 @@ fn bounded_endpoint_client_connects_over_unix_socket() {
             .expect("client should send an attach request");
         let tag = match request {
             TMessage::Attach {
-                tag,
-                uname,
-                aname,
-                ..
+                tag, uname, aname, ..
             } => {
                 assert_eq!(uname, b"service");
                 assert_eq!(aname, b"/");

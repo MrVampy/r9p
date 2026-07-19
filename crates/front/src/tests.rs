@@ -1170,10 +1170,7 @@ fn rpc_timeout_removes_unclaimed_pending_request() -> Result<()> {
         .read(2, qids[0], 0, 4096)
         .expect_err("unanswered rpc must time out");
 
-    assert_eq!(
-        error.message(),
-        b"rpc request timed out awaiting response"
-    );
+    assert_eq!(error.message(), b"rpc request timed out awaiting response");
     assert!(front.next_request(Duration::from_millis(0))?.is_none());
     Ok(())
 }
@@ -1322,7 +1319,9 @@ fn read_relay_dispatches_each_range_and_consumes_its_response() -> Result<()> {
     front.complete_request(&request.prefix, request_id, b"567")?;
     let response = front.response_read(request_id, 0, 3, None, consume)?;
     assert_eq!(response, ReadData::Bytes(b"567".to_vec()));
-    assert!(front.complete_request(&request.prefix, request_id, b"late").is_err());
+    assert!(front
+        .complete_request(&request.prefix, request_id, b"late")
+        .is_err());
 
     let second = tree.read_target_at(2, 7, 3)?;
     let ReadTarget::Response(second_id, _, _) = second else {

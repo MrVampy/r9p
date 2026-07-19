@@ -337,15 +337,13 @@ fn perform_request(
             };
             let read = match target {
                 ReadTarget::Node(id) => front.read_node(id, *offset, *count, cancel.as_deref()),
-                ReadTarget::Response(request_id, response_offset, consume) => {
-                    front.response_read(
-                        request_id,
-                        response_offset,
-                        *count,
-                        cancel.as_deref(),
-                        consume,
-                    )
-                }
+                ReadTarget::Response(request_id, response_offset, consume) => front.response_read(
+                    request_id,
+                    response_offset,
+                    *count,
+                    cancel.as_deref(),
+                    consume,
+                ),
             };
             read.map(ServerCompletion::Read)
         }

@@ -490,9 +490,7 @@ fn abi_read_relay_forwards_ranges_until_eof() {
     );
     let (body, body_len) = cbytes(b"cold");
     assert_eq!(
-        unsafe {
-            r9p_front_complete_request(handle, path, path_len, request_id, body, body_len)
-        },
+        unsafe { r9p_front_complete_request(handle, path, path_len, request_id, body, body_len) },
         0
     );
 
@@ -509,13 +507,14 @@ fn abi_read_relay_forwards_ranges_until_eof() {
         0
     );
     assert_eq!(
-        unsafe {
-            r9p_front_complete_request(handle, path, path_len, eof_id, std::ptr::null(), 0)
-        },
+        unsafe { r9p_front_complete_request(handle, path, path_len, eof_id, std::ptr::null(), 0) },
         0
     );
 
-    assert_eq!(reader.join().expect("read relay client join"), b"cold".to_vec());
+    assert_eq!(
+        reader.join().expect("read relay client join"),
+        b"cold".to_vec()
+    );
     assert_eq!(unsafe { r9p_front_stop(handle) }, 0);
     unsafe { r9p_front_free(handle) };
 }

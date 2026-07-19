@@ -17,4 +17,3 @@ pub use epoch::SessionEpoch;
 pub use error::{errno_for_9p_error, p9_error, Error, Result};
 pub use request::{with_fuse_unique, RequestTracker};
 pub use slot::ClientSlot;
-pub use transport::parse_tcp_address;

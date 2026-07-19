@@ -58,15 +58,19 @@ struct WriteRelayBuffer {
     context: RequestContext,
 }
 
+struct RequestDetails {
+    offset: u64,
+    count: u32,
+    open_mode: u8,
+    pushed_generation: u64,
+}
+
 fn request_context(
     binding: &FidBinding,
     fid: Fid,
     front_path: String,
     target_path: String,
-    offset: u64,
-    count: u32,
-    open_mode: u8,
-    pushed_generation: u64,
+    details: RequestDetails,
 ) -> RequestContext {
     RequestContext {
         principal_id: binding.principal_id.clone(),
@@ -76,10 +80,10 @@ fn request_context(
         fid,
         front_path,
         target_path,
-        offset,
-        count,
-        open_mode,
-        pushed_generation,
+        offset: details.offset,
+        count: details.count,
+        open_mode: details.open_mode,
+        pushed_generation: details.pushed_generation,
     }
 }
 
@@ -205,10 +209,12 @@ impl FileTree for FrontTree {
             fid,
             front_path,
             target_path,
-            0,
-            0,
-            mode,
-            parent_generation,
+            RequestDetails {
+                offset: 0,
+                count: 0,
+                open_mode: mode,
+                pushed_generation: parent_generation,
+            },
         );
         let request_id = state.next_request_id;
         state.next_request_id = state.next_request_id.saturating_add(1);
@@ -275,10 +281,12 @@ impl FileTree for FrontTree {
             fid,
             front_path,
             target_path,
-            offset,
-            u32::try_from(data.len()).map_err(|_| Error::from_static(EPERM))?,
-            open_mode,
-            pushed_generation,
+            RequestDetails {
+                offset,
+                count: u32::try_from(data.len()).map_err(|_| Error::from_static(EPERM))?,
+                open_mode,
+                pushed_generation,
+            },
         );
         if let Body::Rpc(prefix) = &state.node(id)?.body {
             let prefix = prefix.clone();
@@ -431,10 +439,12 @@ impl FileTree for FrontTree {
             fid,
             front_path.clone(),
             target_path,
-            0,
-            0,
-            0,
-            pushed_generation,
+            RequestDetails {
+                offset: 0,
+                count: 0,
+                open_mode: 0,
+                pushed_generation,
+            },
         );
         let request_id = state.next_request_id;
         state.next_request_id = state.next_request_id.saturating_add(1);
@@ -488,10 +498,12 @@ impl FileTree for FrontTree {
             fid,
             front_path,
             target_path,
-            0,
-            u32::try_from(stat_bytes.len()).map_err(|_| Error::from_static(EPERM))?,
-            open_mode,
-            pushed_generation,
+            RequestDetails {
+                offset: 0,
+                count: u32::try_from(stat_bytes.len()).map_err(|_| Error::from_static(EPERM))?,
+                open_mode,
+                pushed_generation,
+            },
         );
         let request_id = state.next_request_id;
         state.next_request_id = state.next_request_id.saturating_add(1);
@@ -584,10 +596,12 @@ impl FrontTree {
                 fid,
                 front_path,
                 target_path,
-                offset,
-                count,
-                open_mode,
-                pushed_generation,
+                RequestDetails {
+                    offset,
+                    count,
+                    open_mode,
+                    pushed_generation,
+                },
             );
             let request_id = state.next_request_id;
             state.next_request_id = state.next_request_id.saturating_add(1);

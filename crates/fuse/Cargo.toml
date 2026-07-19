@@ -1,15 +1,13 @@
 [package]
 name = "fuse"
-edition = "2021"
-license = "MIT OR Apache-2.0"
-version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
 description = "Linux FUSE bridge for mounting 9P namespaces through the r9p suite"
-repository = "https://github.com/MrVampy/r9p"
+repository.workspace = true
 
-[lints.clippy]
-dbg_macro = "deny"
-todo = "deny"
-unwrap_used = "deny"
+[lints]
+workspace = true
 
 [dependencies]
 libc.workspace = true

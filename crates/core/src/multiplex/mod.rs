@@ -60,7 +60,7 @@ mod tests {
 
     use super::client::pending_for_test;
     use super::reader::write_response;
-    use super::util::io_error;
+    use crate::client_support::io_error;
 
     #[test]
     fn concurrent_calls_are_demultiplexed_by_tag() -> Result<()> {

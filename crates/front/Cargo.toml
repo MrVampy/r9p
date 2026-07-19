@@ -1,21 +1,19 @@
 [package]
 name = "front"
-edition = "2021"
-license = "MIT OR Apache-2.0"
-version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
 description = "Embeddable in-memory 9P front for the r9p communication suite"
-repository = "https://github.com/MrVampy/r9p"
+repository.workspace = true
 
-[lints.clippy]
-dbg_macro = "deny"
-todo = "deny"
-unwrap_used = "deny"
+[lints]
+workspace = true
 
 [lib]
 crate-type = ["lib", "cdylib"]
 
 [dependencies]
-r9p = { path = "../core" }
+r9p.workspace = true
 
 [dev-dependencies]
-fs = { path = "../fs" }
+fs.workspace = true

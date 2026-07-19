@@ -1,4 +1,4 @@
-use crate::{Error, Result};
+use crate::{error::client_error, Error, Result};
 use r9p::{blocking, multiplex::MultiplexTransport};
 use std::{
     env,
@@ -74,11 +74,7 @@ pub(crate) enum ConnectTarget {
 pub(crate) fn connect_stream(address: &str) -> Result<ClientStream> {
     match parse_connection_target(address)? {
         ConnectTarget::Tcp(socket) => {
-            let stream = TcpStream::connect(&socket)
-                .map_err(|error| Error::io(format!("connect {socket}"), error))?;
-            stream
-                .set_nodelay(true)
-                .map_err(|error| Error::io("set TCP_NODELAY", error))?;
+            let stream = blocking::connect_tcp_stream(&socket).map_err(client_error)?;
             stream
                 .set_write_timeout(Some(TCP_WRITE_TIMEOUT))
                 .map_err(|error| Error::io("set TCP write timeout", error))?;
@@ -97,7 +93,9 @@ pub(crate) fn parse_connection_target(address: &str) -> Result<ConnectTarget> {
             .map_err(|_| Error::new(libc::EINVAL, "NAMESPACE is required for namespace!"))?;
         return namespace_service_path(Path::new(&namespace), service).map(ConnectTarget::Unix);
     }
-    parse_tcp_address(address).map(ConnectTarget::Tcp)
+    blocking::parse_tcp_address(address)
+        .map(ConnectTarget::Tcp)
+        .map_err(|error| Error::new(libc::EINVAL, error.display_lossy().to_string()))
 }
 
 fn parse_unix_target(path: &str) -> Result<ConnectTarget> {
@@ -144,29 +142,10 @@ fn connect_unix_stream(path: &Path) -> Result<ClientStream> {
     ))
 }
 
-pub fn parse_tcp_address(address: &str) -> Result<String> {
-    blocking::parse_tcp_address(address)
-        .map_err(|error| Error::new(libc::EINVAL, error.display_lossy().to_string()))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        namespace_service_path, parse_connection_target, parse_tcp_address, ConnectTarget,
-    };
+    use super::{namespace_service_path, parse_connection_target, ConnectTarget};
     use std::{path::Path, path::PathBuf};
-
-    #[test]
-    fn parses_plan9port_tcp_address() {
-        let parsed = parse_tcp_address("tcp!127.0.0.1!19564").expect("address should parse");
-        assert_eq!(parsed, "127.0.0.1:19564");
-    }
-
-    #[test]
-    fn defaults_bare_host_to_9p_port() {
-        let parsed = parse_tcp_address("vault.local").expect("address should parse");
-        assert_eq!(parsed, "vault.local:564");
-    }
 
     #[test]
     fn parses_unix_address() {

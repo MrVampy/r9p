@@ -12,7 +12,6 @@ use r9p::{
 use std::{
     collections::HashMap,
     io::{self, BufRead, Write},
-    net::TcpStream,
 };
 
 #[cfg(unix)]
@@ -206,13 +205,7 @@ fn connect_stream(bind: &str) -> R9pResult<Box<dyn ReadWrite>> {
         return Ok(Box::new(stream));
     }
 
-    let address = blocking::parse_tcp_address(bind)?;
-    let stream = TcpStream::connect(&address)
-        .map_err(|error| Error::from(format!("connect {address}: {error}")))?;
-    stream
-        .set_nodelay(true)
-        .map_err(|error| Error::from(format!("set TCP_NODELAY: {error}")))?;
-    Ok(Box::new(stream))
+    blocking::connect_tcp_stream(bind).map(|stream| Box::new(stream) as Box<dyn ReadWrite>)
 }
 
 fn version_probe_output(bind: &str, msize: u32) -> R9pResult<String> {

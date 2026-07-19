@@ -1,5 +1,6 @@
 use crate::{
     client::{Client as ProtocolClient, ClientResponse, Completion, Op},
+    client_support::{io_error, protocol_error},
     codec,
     error::{Error, Result},
     message::{RMessage, TMessage, Tag},
@@ -10,7 +11,7 @@ use std::{
     sync::{mpsc::Sender, Arc, Mutex},
 };
 
-use super::util::{fail_all, io_error, lock, protocol_error, response_tag};
+use super::util::{fail_all, lock, response_tag};
 
 pub(super) type ReplyResult = std::result::Result<ClientResponse, Error>;
 pub(super) type Waiters = BTreeMap<Tag, Sender<ReplyResult>>;

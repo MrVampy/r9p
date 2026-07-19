@@ -1,20 +1,18 @@
 [package]
 name = "beam-port"
-edition = "2021"
-license = "MIT OR Apache-2.0"
-version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
 description = "BEAM port adapter for long-running Gleam and Erlang apps using r9p"
-repository = "https://github.com/MrVampy/r9p"
+repository.workspace = true
 
-[lints.clippy]
-dbg_macro = "deny"
-todo = "deny"
-unwrap_used = "deny"
+[lints]
+workspace = true
 
 [[bin]]
 name = "r9p-beam-port"
 path = "src/main.rs"
 
 [dependencies]
-front = { path = "../front" }
+front.workspace = true
 r9p.workspace = true

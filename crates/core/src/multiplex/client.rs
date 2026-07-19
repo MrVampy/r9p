@@ -1,6 +1,7 @@
 use crate::{
-    blocking::{parse_tcp_address, path_names},
+    blocking::{connect_tcp_stream, path_names},
     client::{Client as ProtocolClient, ClientResponse, Completion, Op},
+    client_support::{io_error, op_fid, protocol_error, unexpected, write_in_chunks},
     codec,
     error::{Error, Result},
     fid::Fid,
@@ -27,7 +28,7 @@ type CallObserverGuard = Box<dyn Send>;
 
 use super::{
     reader::{call_message_sync, call_op_sync, reader_loop, ReplyResult, Waiters},
-    util::{io_error, lock, op_fid, protocol_error, unexpected},
+    util::lock,
     MultiplexTransport,
 };
 
@@ -73,12 +74,7 @@ impl PendingCall {
 
 impl MultiplexedClient<TcpStream> {
     pub fn connect_tcp(address: &str, uname: &str, aname: &str, msize: u32) -> Result<Self> {
-        let socket = parse_tcp_address(address)?;
-        let stream = TcpStream::connect(&socket)
-            .map_err(|error| io_error(format!("connect {socket}"), error))?;
-        stream
-            .set_nodelay(true)
-            .map_err(|error| io_error("set TCP_NODELAY", error))?;
+        let stream = connect_tcp_stream(address)?;
         Self::connect(stream, uname, aname, msize)
     }
 }
@@ -455,72 +451,22 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
         Ok(out)
     }
 
-    pub fn write(&self, fid: Fid, mut offset: u64, mut data: &[u8]) -> Result<u32> {
-        if data.is_empty() {
-            return self.write_once(fid, offset, data);
-        }
-
-        let mut total = 0_u32;
-        let max = usize::try_from(self.max_write_payload()).unwrap_or(usize::MAX);
-        while !data.is_empty() {
-            let chunk_len = data.len().min(max);
-            let chunk = &data[..chunk_len];
-            let count = self.write_once(fid, offset, chunk)?;
-            if count == 0 {
-                return Err(Error::from("zero-length 9P write progress"));
-            }
-            let count_usize =
-                usize::try_from(count).map_err(|_| Error::from("write count overflow"))?;
-            if count_usize > chunk_len {
-                return Err(Error::from(
-                    "9P server reported more bytes written than requested",
-                ));
-            }
-            total = total.saturating_add(count);
-            offset = offset.saturating_add(u64::from(count));
-            data = &data[count_usize..];
-            if count_usize < chunk_len {
-                break;
-            }
-        }
-        Ok(total)
+    pub fn write(&self, fid: Fid, offset: u64, data: &[u8]) -> Result<u32> {
+        write_in_chunks(self.max_write_payload(), offset, data, |offset, chunk| {
+            self.write_once(fid, offset, chunk)
+        })
     }
 
     pub fn write_timeout(
         &self,
         fid: Fid,
-        mut offset: u64,
-        mut data: &[u8],
+        offset: u64,
+        data: &[u8],
         timeout: Duration,
     ) -> Result<u32> {
-        if data.is_empty() {
-            return self.write_once_timeout(fid, offset, data, timeout);
-        }
-
-        let mut total = 0_u32;
-        let max = usize::try_from(self.max_write_payload()).unwrap_or(usize::MAX);
-        while !data.is_empty() {
-            let chunk_len = data.len().min(max);
-            let chunk = &data[..chunk_len];
-            let count = self.write_once_timeout(fid, offset, chunk, timeout)?;
-            if count == 0 {
-                return Err(Error::from("zero-length 9P write progress"));
-            }
-            let count_usize =
-                usize::try_from(count).map_err(|_| Error::from("write count overflow"))?;
-            if count_usize > chunk_len {
-                return Err(Error::from(
-                    "9P server reported more bytes written than requested",
-                ));
-            }
-            total = total.saturating_add(count);
-            offset = offset.saturating_add(u64::from(count));
-            data = &data[count_usize..];
-            if count_usize < chunk_len {
-                break;
-            }
-        }
-        Ok(total)
+        write_in_chunks(self.max_write_payload(), offset, data, |offset, chunk| {
+            self.write_once_timeout(fid, offset, chunk, timeout)
+        })
     }
 
     pub fn write_once(&self, fid: Fid, offset: u64, data: &[u8]) -> Result<u32> {

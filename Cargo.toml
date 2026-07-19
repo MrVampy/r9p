@@ -22,9 +22,10 @@ todo = "deny"
 unwrap_used = "deny"
 
 [workspace.dependencies]
-fuse = { path = "crates/fuse" }
-fs = { path = "crates/fs" }
+front = { version = "0.1.0", path = "crates/front" }
+fuse = { version = "0.1.0", path = "crates/fuse" }
+fs = { version = "0.1.0", path = "crates/fs" }
 libc = "=0.2.186"
-r9p = { path = "crates/core" }
+r9p = { version = "0.1.0", path = "crates/core" }
 serde_json = { version = "1", default-features = false, features = ["std"] }
-session = { path = "crates/session" }
+session = { version = "0.1.0", path = "crates/session" }

@@ -9,6 +9,7 @@ pub mod flush;
 pub mod message;
 pub mod multiplex;
 pub mod qid;
+pub mod rpc;
 pub mod server;
 pub mod stat;
 

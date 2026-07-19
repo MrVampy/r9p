@@ -140,7 +140,7 @@ mod tests {
             b"RPC request too large"
         );
         assert_eq!(
-            validate_request_chunk(Some(12), 9, 12, 3, LIMITS)
+            validate_request_chunk(Some(12), 10, 12, 3, LIMITS)
                 .expect_err("connection bound")
                 .message(),
             b"RPC connection buffer limit exceeded"

@@ -2,7 +2,6 @@ use std::{env, time::Duration};
 
 mod commands;
 mod errors;
-mod export_descriptor;
 mod format;
 mod io;
 mod target;

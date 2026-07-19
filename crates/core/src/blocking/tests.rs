@@ -1,12 +1,23 @@
-use super::{parse_tcp_address, path_names, Client, TcpConnectionTimeouts};
+use super::{
+    connect_endpoint_with_timeouts, parse_tcp_address, path_names, Client, ConnectionTimeouts,
+};
 use crate::{
     codec,
     message::{RMessage, TMessage},
 };
 use std::{
+    io::{Read, Write},
     net::{TcpListener, TcpStream},
     thread,
     time::{Duration, Instant},
+};
+
+#[cfg(unix)]
+use std::{
+    fs,
+    os::unix::net::UnixListener,
+    process,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[test]
@@ -124,7 +135,7 @@ fn bounded_tcp_client_applies_distinct_transport_timeouts() {
         )
         .expect("attach reply should encode");
     });
-    let timeouts = TcpConnectionTimeouts::new(
+    let timeouts = ConnectionTimeouts::new(
         Duration::from_millis(80),
         Duration::from_millis(90),
         Duration::from_millis(100),
@@ -152,7 +163,7 @@ fn bounded_tcp_client_applies_distinct_transport_timeouts() {
 
 #[test]
 fn bounded_tcp_client_rejects_zero_timeouts() {
-    let timeouts = TcpConnectionTimeouts::new(
+    let timeouts = ConnectionTimeouts::new(
         Duration::ZERO,
         Duration::from_secs(1),
         Duration::from_secs(1),
@@ -170,19 +181,75 @@ fn bounded_tcp_client_rejects_zero_timeouts() {
     };
     assert_eq!(
         error.display_lossy(),
-        "TCP connect timeout must be greater than zero"
+        "connect timeout must be greater than zero"
     );
 }
 
-fn short_test_timeouts() -> TcpConnectionTimeouts {
-    TcpConnectionTimeouts::new(
+#[cfg(unix)]
+#[test]
+fn bounded_endpoint_client_connects_over_unix_socket() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should follow the Unix epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "r9p-blocking-endpoint-{}-{nonce}.sock",
+        process::id()
+    ));
+    let listener = UnixListener::bind(&path).expect("Unix listener should bind");
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("server should accept client");
+        reply_to_version(&mut stream);
+        let request = codec::read_tmessage(&mut stream)
+            .expect("attach request should decode")
+            .expect("client should send an attach request");
+        let tag = match request {
+            TMessage::Attach {
+                tag,
+                uname,
+                aname,
+                ..
+            } => {
+                assert_eq!(uname, b"service");
+                assert_eq!(aname, b"/");
+                tag
+            }
+            other => panic!("expected Tattach, got {other:?}"),
+        };
+        codec::write_rmessage_checked(
+            &mut stream,
+            codec::DEFAULT_MSIZE,
+            &RMessage::Attach {
+                tag,
+                qid: crate::qid::Qid::dir(1),
+            },
+        )
+        .expect("attach reply should encode");
+    });
+    let endpoint = format!("unix:{}", path.display());
+
+    let client = connect_endpoint_with_timeouts(
+        &endpoint,
+        "service",
+        "/",
+        codec::DEFAULT_MSIZE,
+        short_test_timeouts(),
+    )
+    .expect("Unix endpoint should complete the handshake");
+    drop(client);
+    server.join().expect("server thread should finish");
+    fs::remove_file(path).expect("Unix socket should be removable");
+}
+
+fn short_test_timeouts() -> ConnectionTimeouts {
+    ConnectionTimeouts::new(
         Duration::from_millis(100),
         Duration::from_millis(40),
         Duration::from_millis(100),
     )
 }
 
-fn reply_to_version(stream: &mut TcpStream) {
+fn reply_to_version(stream: &mut (impl Read + Write)) {
     let request = codec::read_tmessage(stream)
         .expect("version request should decode")
         .expect("client should send a version request");

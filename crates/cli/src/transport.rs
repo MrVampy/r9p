@@ -9,7 +9,7 @@ use std::{
 use std::os::unix::net::UnixStream;
 
 use r9p::{
-    blocking::{self, ReadWrite, TcpConnectionTimeouts},
+    blocking::{self, ConnectionTimeouts, ReadWrite},
     codec,
     message::RMessage,
 };
@@ -41,7 +41,7 @@ pub(crate) fn dial_address(
     let stream = match request_timeout {
         Some(timeout) => blocking::connect_tcp_stream_with_timeouts(
             address,
-            TcpConnectionTimeouts::new(timeout, timeout, timeout),
+            ConnectionTimeouts::new(timeout, timeout, timeout),
         )?,
         None => blocking::connect_tcp_stream(address)?,
     };

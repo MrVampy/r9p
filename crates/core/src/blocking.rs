@@ -32,18 +32,18 @@ impl<T: Read + Write + Send> ReadWrite for T {}
 
 pub type BoxedClient = Client<Box<dyn ReadWrite>>;
 
-/// Independent finite timeouts for a blocking TCP connection and its I/O.
+/// Independent finite timeouts for a blocking endpoint connection and its I/O.
 ///
 /// Every duration must be greater than zero. `connect_timeout` applies to each
-/// socket address produced by name resolution.
+/// TCP socket address produced by name resolution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TcpConnectionTimeouts {
+pub struct ConnectionTimeouts {
     pub connect_timeout: Duration,
     pub read_timeout: Duration,
     pub write_timeout: Duration,
 }
 
-impl TcpConnectionTimeouts {
+impl ConnectionTimeouts {
     pub const fn new(
         connect_timeout: Duration,
         read_timeout: Duration,
@@ -57,9 +57,9 @@ impl TcpConnectionTimeouts {
     }
 
     fn validate(self) -> Result<Self> {
-        validate_nonzero_timeout("TCP connect", self.connect_timeout)?;
-        validate_nonzero_timeout("TCP read", self.read_timeout)?;
-        validate_nonzero_timeout("TCP write", self.write_timeout)?;
+        validate_nonzero_timeout("connect", self.connect_timeout)?;
+        validate_nonzero_timeout("read", self.read_timeout)?;
+        validate_nonzero_timeout("write", self.write_timeout)?;
         Ok(self)
     }
 }
@@ -84,11 +84,31 @@ impl Client<TcpStream> {
         uname: &str,
         aname: &str,
         msize: u32,
-        timeouts: TcpConnectionTimeouts,
+        timeouts: ConnectionTimeouts,
     ) -> Result<Self> {
         let stream = connect_tcp_stream_with_timeouts(address, timeouts)?;
         Self::connect(stream, uname, aname, msize)
     }
+}
+
+pub fn connect_endpoint_with_timeouts(
+    endpoint: &str,
+    uname: &str,
+    aname: &str,
+    msize: u32,
+    timeouts: ConnectionTimeouts,
+) -> Result<BoxedClient> {
+    #[cfg(unix)]
+    if let Some(path) = endpoint
+        .strip_prefix("unix!")
+        .or_else(|| endpoint.strip_prefix("unix:"))
+    {
+        let stream = connect_unix_stream_with_timeouts(Path::new(path), timeouts)?;
+        return Client::connect(Box::new(stream) as Box<dyn ReadWrite>, uname, aname, msize);
+    }
+
+    let stream = connect_tcp_stream_with_timeouts(endpoint, timeouts)?;
+    Client::connect(Box::new(stream) as Box<dyn ReadWrite>, uname, aname, msize)
 }
 
 #[cfg(unix)]
@@ -520,7 +540,7 @@ pub fn connect_tcp_stream(address: &str) -> Result<TcpStream> {
 /// Connects a TCP stream with finite connect, read, and write timeouts.
 pub fn connect_tcp_stream_with_timeouts(
     address: &str,
-    timeouts: TcpConnectionTimeouts,
+    timeouts: ConnectionTimeouts,
 ) -> Result<TcpStream> {
     let socket = parse_tcp_address(address)?;
     let timeouts = timeouts.validate()?;
@@ -551,6 +571,23 @@ pub fn connect_tcp_stream_with_timeouts(
             "connect {socket}: no socket addresses resolved"
         ))),
     }
+}
+
+#[cfg(unix)]
+pub fn connect_unix_stream_with_timeouts(
+    path: &Path,
+    timeouts: ConnectionTimeouts,
+) -> Result<UnixStream> {
+    let timeouts = timeouts.validate()?;
+    let stream = UnixStream::connect(path)
+        .map_err(|error| io_error(format!("connect {}", path.display()), error))?;
+    stream
+        .set_read_timeout(Some(timeouts.read_timeout))
+        .map_err(|error| io_error("set Unix read timeout", error))?;
+    stream
+        .set_write_timeout(Some(timeouts.write_timeout))
+        .map_err(|error| io_error("set Unix write timeout", error))?;
+    Ok(stream)
 }
 
 fn validate_nonzero_timeout(label: &str, timeout: Duration) -> Result<()> {

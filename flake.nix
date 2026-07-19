@@ -26,7 +26,7 @@
           };
           front = pkgs.rustPlatform.buildRustPackage {
             pname = "r9p-front";
-            version = "0.1.0-abi19";
+            version = "0.1.0-abi20";
             src = self;
             cargoLock.lockFile = ./Cargo.lock;
             cargoBuildFlags = [ "-p" "front" ];
@@ -40,6 +40,8 @@
               runHook preInstall
               install -Dm644 target/${pkgs.stdenv.hostPlatform.rust.rustcTarget}/release/libfront.so \
                 "$out/lib/libfront.so"
+              install -Dm644 crates/front/include/r9p_front.h \
+                "$out/include/r9p_front.h"
               install -Dm644 crates/front/bindings/deno/front_sink.ts \
                 "$out/share/r9p/front/deno/front_sink.ts"
               install -Dm644 crates/front/bindings/deno/export_descriptor.ts \

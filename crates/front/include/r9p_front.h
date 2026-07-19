@@ -2,10 +2,16 @@
 #define R9P_FRONT_H
 
 /*
- * r9p front C ABI, version 19.
+ * r9p front C ABI, generation 20.
  *
  * Contract rules:
- * - r9p_front_abi_version() must return 19 before calls are made.
+ * - Call r9p_front_abi_version() first and require
+ *   R9P_FRONT_ABI_VERSION. ABI generations change only when an existing
+ *   signature, lifetime rule, or data contract changes incompatibly.
+ * - After the ABI check, call r9p_front_capabilities() and require every
+ *   capability used by the consumer. Additive surfaces set a new stable bit
+ *   without changing the ABI generation. Unknown bits must be ignored and
+ *   published bits are never repurposed.
  * - r9p_front_new() returns an owned handle; every handle must be released
  *   exactly once with r9p_front_free(). Calls other than r9p_front_free()
  *   are thread-safe: they may be called from any thread concurrently.
@@ -118,9 +124,18 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#define R9P_FRONT_ABI_VERSION UINT32_C(20)
+#define R9P_FRONT_CAP_PUSHED_NAMESPACE_METADATA (UINT64_C(1) << 0)
+#define R9P_FRONT_CAP_REQUEST_CONTEXT_V2 (UINT64_C(1) << 1)
+#define R9P_FRONT_CAP_SYNTHETIC_READ_RELAY (UINT64_C(1) << 2)
+#define R9P_FRONT_CAP_NATIVE_CLIENT_MUTATIONS (UINT64_C(1) << 3)
+#define R9P_FRONT_CAP_ATOMIC_CREATE_WRITE (UINT64_C(1) << 4)
+#define R9P_FRONT_CAP_NAMESPACE_MUTATION_RELAYS (UINT64_C(1) << 5)
+
 typedef struct r9p_front r9p_front;
 
 uint32_t r9p_front_abi_version(void);
+uint64_t r9p_front_capabilities(void);
 r9p_front *r9p_front_new(void);
 void r9p_front_free(r9p_front *front);
 

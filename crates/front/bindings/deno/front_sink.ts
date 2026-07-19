@@ -1,4 +1,17 @@
-export const SUPPORTED_ABI_VERSIONS = new Set([19]);
+export const SUPPORTED_ABI_VERSION = 20;
+export const FRONT_CAP_PUSHED_NAMESPACE_METADATA = 1n << 0n;
+export const FRONT_CAP_REQUEST_CONTEXT_V2 = 1n << 1n;
+export const FRONT_CAP_SYNTHETIC_READ_RELAY = 1n << 2n;
+export const FRONT_CAP_NATIVE_CLIENT_MUTATIONS = 1n << 3n;
+export const FRONT_CAP_ATOMIC_CREATE_WRITE = 1n << 4n;
+export const FRONT_CAP_NAMESPACE_MUTATION_RELAYS = 1n << 5n;
+export const REQUIRED_FRONT_CAPABILITIES =
+  FRONT_CAP_PUSHED_NAMESPACE_METADATA |
+  FRONT_CAP_REQUEST_CONTEXT_V2 |
+  FRONT_CAP_SYNTHETIC_READ_RELAY |
+  FRONT_CAP_NATIVE_CLIENT_MUTATIONS |
+  FRONT_CAP_ATOMIC_CREATE_WRITE |
+  FRONT_CAP_NAMESPACE_MUTATION_RELAYS;
 
 export { renderExportDescriptor } from "./export_descriptor.ts";
 export type { ExportDescriptorOptions } from "./export_descriptor.ts";
@@ -8,6 +21,7 @@ export type { RequestContext } from "./request_context.ts";
 
 const SYMBOLS = {
   r9p_front_abi_version: { parameters: [], result: "u32" },
+  r9p_front_capabilities: { parameters: [], result: "u64" },
   r9p_front_new: { parameters: [], result: "pointer" },
   r9p_front_free: { parameters: ["pointer"], result: "void" },
   r9p_front_set: {
@@ -322,12 +336,18 @@ export class FrontHost implements TransitionSink {
   static open(libraryPath: string): FrontHost {
     const library = Deno.dlopen(libraryPath, SYMBOLS);
     const version = library.symbols.r9p_front_abi_version();
-    if (!SUPPORTED_ABI_VERSIONS.has(version)) {
+    if (version !== SUPPORTED_ABI_VERSION) {
       library.close();
       throw new Error(
-        `front ABI version mismatch: library has ${version}, host supports ${
-          [...SUPPORTED_ABI_VERSIONS].join(",")
-        }`,
+        `front ABI version mismatch: library has ${version}, host requires ${SUPPORTED_ABI_VERSION}`,
+      );
+    }
+    const capabilities = library.symbols.r9p_front_capabilities();
+    const missingCapabilities = REQUIRED_FRONT_CAPABILITIES & ~capabilities;
+    if (missingCapabilities !== 0n) {
+      library.close();
+      throw new Error(
+        `front capability mismatch: library has 0x${capabilities.toString(16)}, missing 0x${missingCapabilities.toString(16)}`,
       );
     }
     const handle = library.symbols.r9p_front_new();

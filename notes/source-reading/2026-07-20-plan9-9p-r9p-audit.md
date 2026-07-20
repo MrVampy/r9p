@@ -188,9 +188,6 @@ transport boundary; it must not be implied by 9P negotiation.
 
 ## Remaining follow-ups
 
-- Run the host-gated FUSE mount, restart, invalidation, and parallel traversal
-  suite on the M7 execution host. Unit and conformance coverage cannot replace
-  `/dev/fuse` behavior.
 - Decide whether to formalize the internal symlink bits as 9P2000.u or as a
   documented r9p-local plain extension before exposing them to an external
   kernel client.
@@ -210,6 +207,12 @@ transport boundary; it must not be implied by 9P negotiation.
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo fmt --all -- --check`
 - `git diff --check`
+- On M7 at exact revision `028d5d04119fb87e54117dcb6705f8340c902eea`,
+  all eight host-gated FUSE tests passed: six mount/restart/parallel traversal
+  cases, one change-feed invalidation case, and one session-hosted FUSE case.
+- The live session latency matrix passed against the adopted M7 runtime at
+  `127.0.0.1:9564`, including cold and warm `/srv` snapshots with zero warm
+  stat or directory misses.
 - The built client negotiated 9P2000 and statted `/` against the local 9front
   export on `127.0.0.1:564` and the local 9legacy export on
   `127.0.0.1:1564`.

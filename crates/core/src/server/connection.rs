@@ -10,8 +10,8 @@ use std::{
     io::{self, Read, Write},
     net::TcpStream,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        Arc, Condvar, Mutex,
     },
     thread,
 };
@@ -73,7 +73,7 @@ where
     let writer = Arc::new(Mutex::new(stream));
     let server = Arc::new(Mutex::new(Server::with_config((), config)));
     let pending = Arc::new(Mutex::new(BTreeMap::new()));
-    let active_async_workers = Arc::new(AtomicUsize::new(0));
+    let active_async_workers = Arc::new(AsyncWorkerTracker::default());
 
     let result = serve_loop(
         &mut reader,
@@ -84,7 +84,7 @@ where
         &handler,
         max_async_requests,
     );
-    let cleanup = reset_connection(&server, &pending, handler.as_ref());
+    let cleanup = reset_connection(&server, &pending, &active_async_workers, handler.as_ref());
     match result {
         Err(error) => Err(error),
         Ok(()) => cleanup,
@@ -117,7 +117,7 @@ where
         };
 
         if matches!(message, TMessage::Version { .. }) {
-            reset_connection(server, pending, handler.as_ref())?;
+            reset_connection(server, pending, active_async_workers, handler.as_ref())?;
         }
 
         let (event, cancelled) = admit(server, pending, message)?;
@@ -153,7 +153,53 @@ struct PendingCancel {
 }
 
 type CancelMap = Arc<Mutex<BTreeMap<RequestKey, PendingCancel>>>;
-type ActiveAsyncWorkers = Arc<AtomicUsize>;
+type ActiveAsyncWorkers = Arc<AsyncWorkerTracker>;
+
+#[derive(Default)]
+struct AsyncWorkerTracker {
+    active: Mutex<usize>,
+    idle: Condvar,
+}
+
+impl AsyncWorkerTracker {
+    fn try_acquire(&self, limit: usize) -> Result<bool> {
+        let mut active = self
+            .active
+            .lock()
+            .map_err(|_| Error::from_static("9P async worker tracker poisoned"))?;
+        if *active >= limit {
+            return Ok(false);
+        }
+        *active += 1;
+        Ok(true)
+    }
+
+    fn release(&self) {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        debug_assert!(*active > 0, "active async worker count underflow");
+        *active = active.saturating_sub(1);
+        if *active == 0 {
+            self.idle.notify_all();
+        }
+    }
+
+    fn wait_until_idle(&self) -> Result<()> {
+        let mut active = self
+            .active
+            .lock()
+            .map_err(|_| Error::from_static("9P async worker tracker poisoned"))?;
+        while *active != 0 {
+            active = self
+                .idle
+                .wait(active)
+                .map_err(|_| Error::from_static("9P async worker tracker poisoned"))?;
+        }
+        Ok(())
+    }
+}
 
 struct ActiveAsyncWorker {
     key: RequestKey,
@@ -166,7 +212,7 @@ impl Drop for ActiveAsyncWorker {
         if let Ok(mut pending) = self.pending.lock() {
             pending.remove(&self.key);
         }
-        release_async_worker(self.active.as_ref());
+        self.active.release();
     }
 }
 
@@ -213,7 +259,7 @@ where
         let mut pending = pending
             .lock()
             .map_err(|_| Error::from_static("9P cancellation map poisoned"))?;
-        if !try_acquire_async_worker(active_async_workers.as_ref(), max_async_requests) {
+        if !active_async_workers.try_acquire(max_async_requests)? {
             drop(pending);
             return complete_and_write(
                 &server,
@@ -251,7 +297,7 @@ where
         if let Ok(mut pending) = pending.lock() {
             pending.remove(&key);
         }
-        release_async_worker(active_async_workers.as_ref());
+        active_async_workers.release();
         complete_and_write(
             &server,
             &writer,
@@ -260,23 +306,6 @@ where
         )?;
     }
     Ok(())
-}
-
-fn try_acquire_async_worker(active: &AtomicUsize, limit: usize) -> bool {
-    active
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-            if current < limit {
-                Some(current + 1)
-            } else {
-                None
-            }
-        })
-        .is_ok()
-}
-
-fn release_async_worker(active: &AtomicUsize) {
-    let previous = active.fetch_sub(1, Ordering::AcqRel);
-    debug_assert!(previous > 0, "active async worker count underflow");
 }
 
 fn complete_and_write<S>(
@@ -371,6 +400,7 @@ fn cancel_all(pending: &CancelMap) -> Result<bool> {
 fn reset_connection<H>(
     server: &Arc<Mutex<Server<()>>>,
     pending: &CancelMap,
+    active_async_workers: &ActiveAsyncWorkers,
     handler: &H,
 ) -> Result<()>
 where
@@ -386,5 +416,6 @@ where
     if cancelled {
         handler.wake_after_cancel();
     }
+    active_async_workers.wait_until_idle()?;
     handler.reset()
 }

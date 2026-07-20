@@ -112,6 +112,11 @@ handles cannot diverge across sessions. The local filesystem clears fids,
 opened descriptors, and cached stats; the front starts a new front session;
 the control tree clears fid-keyed query responses.
 
+The asynchronous adapter also waits for cancellation-aware request workers to
+exit before it resets the handler or emits `Rversion`. Signalling cancellation
+without this quiescence barrier would let a stale worker mutate freshly reset
+backend state even though its protocol completion was discarded.
+
 ### Backends use shared vocabulary
 
 Open-mode constants and predicates now have one owner in `core::mode`. Core,

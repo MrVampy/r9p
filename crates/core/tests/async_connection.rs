@@ -392,7 +392,7 @@ fn clunk_cancellation_does_not_leak_across_fid_reuse() -> TestResult<()> {
 }
 
 #[test]
-fn version_resets_handler_fids_and_pending_work() -> TestResult<()> {
+fn version_waits_for_pending_work_before_resetting_handler() -> TestResult<()> {
     let handler = Arc::new(TestHandler::new());
     let (mut stream, join) = start_server(Arc::clone(&handler))?;
     negotiate(&mut stream)?;
@@ -408,13 +408,29 @@ fn version_resets_handler_fids_and_pending_work() -> TestResult<()> {
     )?;
     handler.wait_started(old.path)?;
 
-    negotiate(&mut stream)?;
+    send(
+        &mut stream,
+        TMessage::Version {
+            tag: NOTAG,
+            msize: 1024,
+            version: b"9P2000".to_vec(),
+        },
+    )?;
     handler.wait_cancelled(old.path)?;
+    assert_eq!(handler.resets.load(Ordering::SeqCst), 1);
+    handler.release(old.path)?;
+    handler.wait_finished(old.path)?;
+    assert_eq!(
+        receive(&mut stream)?,
+        RMessage::Version {
+            tag: NOTAG,
+            msize: 1024,
+            version: b"9P2000".to_vec(),
+        }
+    );
     assert_eq!(handler.resets.load(Ordering::SeqCst), 2);
     let new = attach(&mut stream, 3, 19)?;
     assert_ne!(old, new);
-    handler.release(old.path)?;
-    handler.wait_finished(old.path)?;
     send(&mut stream, TMessage::Stat { tag: 4, fid: 19 })?;
     assert!(matches!(
         receive(&mut stream)?,
@@ -442,11 +458,12 @@ fn connection_eof_cancels_all_pending_work() -> TestResult<()> {
     handler.wait_started(qid.path)?;
 
     drop(stream);
-    join.join().map_err(|_| "connection server panicked")??;
     handler.wait_cancelled(qid.path)?;
-    assert_eq!(handler.resets.load(Ordering::SeqCst), 2);
+    assert_eq!(handler.resets.load(Ordering::SeqCst), 1);
     handler.release(qid.path)?;
     handler.wait_finished(qid.path)?;
+    join.join().map_err(|_| "connection server panicked")??;
+    assert_eq!(handler.resets.load(Ordering::SeqCst), 2);
     Ok(())
 }
 

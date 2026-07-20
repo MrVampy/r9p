@@ -9,7 +9,8 @@ backend
   Racme Acme tree, Vault namespace adapter, exportfs-style host tree, memory fixture
 
 r9p server core
-  9P messages, qids, fids, tags, stat records, walk/open/read/write/clunk/flush
+  9P messages, qids, fids, tags, stat records, version negotiation,
+  walk/open/read/write/clunk/flush lifecycle and response bounds
 
 optional r9p connection facade
   checked frames, split admission/completion, bounded cancellable workers
@@ -26,13 +27,24 @@ consumer
 
 The core rule is: `r9p` speaks 9P; backends decide what to serve; consumers decide what to do with the bytes; runtime adapters decide how bytes move.
 
-The optional `server::serve_connection` facade is layered over the same
-transport-neutral `Server::admit` and `Server::complete` state machine. It owns
-only a single already-created cloneable byte stream and a bounded blocking
-worker policy. It does not bind sockets or decide endpoint permissions, peer
-identity, authentication, service admission, TLS, or daemon lifecycle. A
-runtime with its own executor can continue to use `admit` and `complete`
-directly.
+The optional connection facade is layered over the same transport-neutral
+`Server::admit` and `Server::complete` state machine. `serve_connection`
+accepts a custom `ConnectionHandler` for asynchronous or cancellable work;
+`serve_file_tree_connection` adapts an ordinary synchronous `FileTree`. Both
+own checked framing, version resets, response serialization, and bounded worker
+accounting for one already-created cloneable byte stream. They do not bind
+sockets or decide endpoint permissions, peer identity, authentication, service
+admission, TLS, or daemon lifecycle. A runtime with its own executor can
+continue to use `admit` and `complete` directly.
+
+The server core owns wire-level fid lifecycle. It records open modes and
+directory offsets, rejects operations that violate 9P sequencing, and reserves
+fid transitions across split request completion. Clone walks share a source
+reservation so independent walks can overlap, while open, create, clunk,
+remove, in-place walk, and version reset cannot race that source transition.
+Backends still own namespace meaning, permissions, content, and application
+effects. A `FileTree` reset clears backend session-local state when `Tversion`
+starts a new session.
 
 `r9p` provides generic client create, write, remove, read, and RPC operations,
 plus language bindings that encode the transport-neutral `r9p-export.v1`
@@ -56,16 +68,20 @@ registration meaning remain application responsibilities.
 
 The plan9port `9p` command is the client UX target for the one-shot `r9p`
 operations. The installed `r9p` binary now also exposes the generic local
-communication suite: `mount` for FUSE import, `serve` for local read-only 9P
-serving, and `export` for serving plus descriptor emission. The reusable core
-crate remains broader than that binary and continues to serve embedded clients
-and servers.
+communication suite: `mount` for FUSE import, `serve` for local 9P serving
+(read-only by default, explicitly writable when requested), and `export` for
+serving plus descriptor emission. The reusable core crate remains broader than
+that binary and continues to serve embedded clients and servers.
 
 The FUSE mount adapter follows the mature libfuse/Linux concurrency shape: a
 bounded worker pool handles kernel requests, and the FUSE INIT reply advertises
 bounded `max_background` and congestion settings. This makes recursive walks
 and slow peer operations apply backpressure at the mount boundary instead of
 spawning unbounded per-request threads in the client process.
+
+The adapter advertises only capabilities it implements. In particular it does
+not claim exportfs stale-handle support, because forgotten nodeids are retired,
+and it leaves umask application to Linux rather than claiming `DONT_MASK`.
 
 ## Non-Goals
 

@@ -148,19 +148,12 @@ pub(crate) fn dial_unix_socket(
     )))
 }
 
-pub(crate) fn read_response(stream: &mut Box<dyn ReadWrite>) -> CliResult<RMessage> {
-    let mut prefix = [0_u8; 4];
-    stream.read_exact(&mut prefix)?;
-    let size = u32::from_le_bytes(prefix);
-    if size < codec::FRAME_HEADER_SIZE {
-        return Err(cli_error(format!("short 9P frame {size}")));
-    }
-    let rest_len = usize::try_from(size - 4)?;
-    let mut frame = Vec::with_capacity(rest_len + 4);
-    frame.extend(prefix);
-    frame.resize(rest_len + 4, 0);
-    stream.read_exact(&mut frame[4..])?;
-    Ok(codec::decode_rmessage(&frame)?)
+pub(crate) fn read_response(
+    stream: &mut Box<dyn ReadWrite>,
+    max_frame_size: u32,
+) -> CliResult<RMessage> {
+    codec::read_rmessage_checked(stream, max_frame_size)?
+        .ok_or_else(|| cli_error("9P transport closed before response"))
 }
 
 #[cfg(test)]

@@ -141,6 +141,8 @@ const PLAN9_ERRNO_PATTERNS: &[(&str, i32)] = &[
     ("interrupt", libc::EINTR),
     ("bad message", libc::EBADMSG),
     ("bad file", libc::EBADF),
+    ("not open", libc::EBADF),
+    ("already open", libc::EBUSY),
     ("input/output", libc::EIO),
     ("i/o", libc::EIO),
     ("protocol", libc::EPROTO),
@@ -218,6 +220,9 @@ mod tests {
         );
         assert_eq!(errno_for_9p_error("not_writable"), libc::EACCES);
         assert_eq!(errno_for_9p_error("parse_failed"), libc::EINVAL);
+        assert_eq!(errno_for_9p_error("fid not open"), libc::EBADF);
+        assert_eq!(errno_for_9p_error("fid already open"), libc::EBUSY);
+        assert_eq!(errno_for_9p_error("fid busy"), libc::EBUSY);
     }
 
     #[test]

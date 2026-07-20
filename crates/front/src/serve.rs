@@ -1,19 +1,18 @@
 use crate::Front;
 use crate::ReadTarget;
-use r9p::codec;
 use r9p::error::{Error, Result};
 use r9p::fid::{Fid, NOFID};
-use r9p::flush::{FlushOutcome, RequestKey};
-use r9p::message::{RMessage, TMessage};
 use r9p::server::{
-    FileTree, Server, ServerCompletion, ServerConfig, ServerEvent, ServerRequest, ServerRequestKind,
+    serve_connection as serve_protocol_connection, ConnectionHandler, FileTree, ServerCompletion,
+    ServerConfig, ServerRequest, ServerRequestKind,
 };
-use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
+
+pub use r9p::server::ConnectionStream as FrontServeStream;
 
 pub struct ServeHandle {
     addr: SocketAddr,
@@ -45,24 +44,12 @@ impl ServeHandle {
     }
 }
 
-pub trait FrontServeStream: Read + Write + Send + 'static {
-    fn try_clone_stream(&self) -> io::Result<Self>
-    where
-        Self: Sized;
-}
-
-impl FrontServeStream for TcpStream {
-    fn try_clone_stream(&self) -> io::Result<Self> {
-        self.try_clone()
-    }
-}
-
 impl Front {
     pub fn serve_stream<S>(&self, stream: S) -> Result<()>
     where
         S: FrontServeStream,
     {
-        serve_connection(self, stream, Arc::new(AtomicBool::new(false)))
+        serve_front_connection(self, stream)
     }
 
     pub fn serve_tcp(&self, bind: &str) -> Result<ServeHandle> {
@@ -83,7 +70,10 @@ impl Front {
                 let connection_front = front.clone();
                 let connection_stop = Arc::clone(&accept_stop);
                 thread::spawn(move || {
-                    let _ = serve_connection(&connection_front, stream, connection_stop);
+                    let _ = serve_front_connection(
+                        &connection_front,
+                        StoppableStream::new(stream, connection_stop),
+                    );
                 });
             }
         });
@@ -95,178 +85,114 @@ impl Front {
     }
 }
 
-fn serve_connection<S>(front: &Front, stream: S, stop: Arc<AtomicBool>) -> Result<()>
+struct StoppableStream<S> {
+    inner: S,
+    stop: Arc<AtomicBool>,
+}
+
+impl<S> StoppableStream<S> {
+    fn new(inner: S, stop: Arc<AtomicBool>) -> Self {
+        Self { inner, stop }
+    }
+}
+
+impl<S: Read> Read for StoppableStream<S> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.stop.load(Ordering::SeqCst) {
+            Ok(0)
+        } else {
+            self.inner.read(buffer)
+        }
+    }
+}
+
+impl<S: Write> Write for StoppableStream<S> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.inner.write(buffer)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl<S: FrontServeStream> FrontServeStream for StoppableStream<S> {
+    fn try_clone_stream(&self) -> io::Result<Self> {
+        Ok(Self::new(
+            self.inner.try_clone_stream()?,
+            Arc::clone(&self.stop),
+        ))
+    }
+}
+
+fn serve_front_connection<S>(front: &Front, stream: S) -> Result<()>
 where
     S: FrontServeStream,
 {
-    let mut reader = stream
-        .try_clone_stream()
-        .map_err(|error| Error::new(format!("clone 9P stream: {error}")))?;
-    let writer = Arc::new(Mutex::new(stream));
     let max_msize = front.max_msize()?;
-    let server = Arc::new(Mutex::new(Server::with_config(
-        (),
+    serve_protocol_connection(
+        stream,
         ServerConfig {
             default_msize: max_msize,
             max_msize,
             ..ServerConfig::default()
         },
-    )));
-    let tree = Arc::new(Mutex::new(front.tree()));
-    let cancels = Arc::new(Mutex::new(BTreeMap::new()));
-    loop {
-        if stop.load(Ordering::SeqCst) {
-            cancel_all_requests(front, &cancels)?;
-            return Ok(());
-        }
-        let message = match read_tmessage(&mut reader) {
-            Ok(message) => message,
-            Err(_) => {
-                cancel_all_requests(front, &cancels)?;
-                return Ok(());
-            }
-        };
-        let event = {
-            let mut server = server
-                .lock()
-                .map_err(|_| Error::from_static("front server session poisoned"))?;
-            server.admit(message)
-        };
-        match event {
-            ServerEvent::Reply(reply) => {
-                write_reply(&server, &writer, &reply)?;
-            }
-            ServerEvent::Flush { reply, outcome } => {
-                cancel_request(front, &cancels, outcome)?;
-                write_reply(&server, &writer, &reply)?;
-            }
-            ServerEvent::Dispatch(request) if request_is_async(&request) => {
-                let cancel = Arc::new(AtomicBool::new(false));
-                let fid = request_fid(&request);
-                cancels
-                    .lock()
-                    .map_err(|_| Error::from_static("front cancel map poisoned"))?
-                    .insert(
-                        request.key,
-                        PendingCancel {
-                            fid,
-                            cancel: Arc::clone(&cancel),
-                        },
-                    );
-                let server = Arc::clone(&server);
-                let writer = Arc::clone(&writer);
-                let tree = Arc::clone(&tree);
-                let cancels = Arc::clone(&cancels);
-                thread::spawn(move || {
-                    let key = request.key;
-                    let completion = perform_request(&tree, &request, Some(cancel));
-                    let reply = match server.lock() {
-                        Ok(mut server) => server.complete(request, completion),
-                        Err(_) => None,
-                    };
-                    if let Ok(mut cancels) = cancels.lock() {
-                        cancels.remove(&key);
-                    }
-                    if let Some(reply) = reply {
-                        let _ = write_reply(&server, &writer, &reply);
-                    }
-                });
-            }
-            ServerEvent::Dispatch(request) => {
-                if let ServerRequestKind::Clunk { fid, .. } = &request.kind {
-                    cancel_fid_requests(front, &cancels, *fid)?;
-                }
-                let completion = perform_request(&tree, &request, None);
-                let reply = {
-                    let mut server = server
-                        .lock()
-                        .map_err(|_| Error::from_static("front server session poisoned"))?;
-                    server.complete(request, completion)
-                };
-                if let Some(reply) = reply {
-                    write_reply(&server, &writer, &reply)?;
-                }
-            }
+        Arc::new(FrontConnectionHandler::new(front.clone())),
+    )
+}
+
+struct FrontConnectionHandler {
+    front: Front,
+    tree: Mutex<crate::FrontTree>,
+}
+
+impl FrontConnectionHandler {
+    fn new(front: Front) -> Self {
+        let tree = front.tree();
+        Self {
+            front,
+            tree: Mutex::new(tree),
         }
     }
 }
 
-struct PendingCancel {
-    fid: Fid,
-    cancel: Arc<AtomicBool>,
-}
+impl ConnectionHandler for FrontConnectionHandler {
+    fn perform(
+        &self,
+        request: &ServerRequest,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<ServerCompletion> {
+        perform_request(&self.tree, request, cancel)
+    }
 
-type CancelMap = Arc<Mutex<BTreeMap<RequestKey, PendingCancel>>>;
+    fn is_async(&self, request: &ServerRequest) -> bool {
+        matches!(request.kind, ServerRequestKind::Read { .. })
+    }
 
-fn cancel_request(front: &Front, cancels: &CancelMap, outcome: FlushOutcome) -> Result<()> {
-    if let FlushOutcome::Cancelled(key) = outcome {
-        if let Some(pending) = cancels
+    fn cancellation_fid(&self, request: &ServerRequest) -> Option<Fid> {
+        match &request.kind {
+            ServerRequestKind::Read { fid, .. } => Some(*fid),
+            _ => None,
+        }
+    }
+
+    fn reset(&self) -> Result<()> {
+        let mut tree = self
+            .tree
             .lock()
-            .map_err(|_| Error::from_static("front cancel map poisoned"))?
-            .remove(&key)
-        {
-            pending.cancel.store(true, Ordering::SeqCst);
-            front.wake_readers();
-        }
+            .map_err(|_| Error::from_static("front tree poisoned"))?;
+        tree.reset()
     }
-    Ok(())
-}
 
-fn cancel_fid_requests(front: &Front, cancels: &CancelMap, fid: Fid) -> Result<()> {
-    let mut cancelled = false;
-    {
-        let mut cancels = cancels
-            .lock()
-            .map_err(|_| Error::from_static("front cancel map poisoned"))?;
-        let keys: Vec<RequestKey> = cancels
-            .iter()
-            .filter_map(|(key, pending)| (pending.fid == fid).then_some(*key))
-            .collect();
-        for key in keys {
-            if let Some(pending) = cancels.remove(&key) {
-                pending.cancel.store(true, Ordering::SeqCst);
-                cancelled = true;
-            }
-        }
-    }
-    if cancelled {
-        front.wake_readers();
-    }
-    Ok(())
-}
-
-fn cancel_all_requests(front: &Front, cancels: &CancelMap) -> Result<()> {
-    let cancelled = {
-        let mut cancels = cancels
-            .lock()
-            .map_err(|_| Error::from_static("front cancel map poisoned"))?;
-        let cancelled = !cancels.is_empty();
-        for (_, pending) in std::mem::take(&mut *cancels) {
-            pending.cancel.store(true, Ordering::SeqCst);
-        }
-        cancelled
-    };
-    if cancelled {
-        front.wake_readers();
-    }
-    Ok(())
-}
-
-fn request_is_async(request: &ServerRequest) -> bool {
-    matches!(request.kind, ServerRequestKind::Read { .. })
-}
-
-fn request_fid(request: &ServerRequest) -> Fid {
-    match &request.kind {
-        ServerRequestKind::Read { fid, .. } => *fid,
-        _ => 0,
+    fn wake_after_cancel(&self) {
+        self.front.wake_readers();
     }
 }
 
 fn perform_request(
-    tree: &Arc<Mutex<crate::FrontTree>>,
+    tree: &Mutex<crate::FrontTree>,
     request: &ServerRequest,
-    cancel: Option<Arc<AtomicBool>>,
+    cancel: Option<&AtomicBool>,
 ) -> Result<ServerCompletion> {
     match &request.kind {
         ServerRequestKind::Auth { afid, uname, aname } => {
@@ -336,14 +262,10 @@ fn perform_request(
                 (tree.front(), tree.read_target_at(*fid, *offset, *count)?)
             };
             let read = match target {
-                ReadTarget::Node(id) => front.read_node(id, *offset, *count, cancel.as_deref()),
-                ReadTarget::Response(request_id, response_offset, consume) => front.response_read(
-                    request_id,
-                    response_offset,
-                    *count,
-                    cancel.as_deref(),
-                    consume,
-                ),
+                ReadTarget::Node(id) => front.read_node(id, *offset, *count, cancel),
+                ReadTarget::Response(request_id, response_offset, consume) => {
+                    front.response_read(request_id, response_offset, *count, cancel, consume)
+                }
             };
             read.map(ServerCompletion::Read)
         }
@@ -385,50 +307,4 @@ fn perform_request(
                 .map(|()| ServerCompletion::Wstat)
         }
     }
-}
-
-fn write_reply<S>(
-    server: &Arc<Mutex<Server<()>>>,
-    writer: &Arc<Mutex<S>>,
-    reply: &RMessage,
-) -> Result<()>
-where
-    S: FrontServeStream,
-{
-    let msize = server
-        .lock()
-        .map_err(|_| Error::from_static("front server session poisoned"))?
-        .session()
-        .msize();
-    let frame = codec::encode_rmessage_checked(reply, msize)?;
-    let mut writer = writer
-        .lock()
-        .map_err(|_| Error::from_static("front writer poisoned"))?;
-    if writer.write_all(&frame).is_err() || writer.flush().is_err() {
-        return Err(Error::from_static("write 9P reply"));
-    }
-    Ok(())
-}
-
-fn read_tmessage(stream: &mut impl Read) -> Result<TMessage> {
-    let mut prefix = [0_u8; 4];
-    stream
-        .read_exact(&mut prefix)
-        .map_err(|error| Error::new(format!("read 9P frame size: {error}")))?;
-    let size = u32::from_le_bytes(prefix);
-    if size < codec::FRAME_HEADER_SIZE {
-        return Err(Error::from_static("short 9P frame"));
-    }
-    if size > codec::MAX_MSIZE {
-        return Err(Error::from_static("oversized 9P frame"));
-    }
-    let rest_len =
-        usize::try_from(size - 4).map_err(|_| Error::from_static("oversized 9P frame"))?;
-    let mut frame = Vec::with_capacity(rest_len + 4);
-    frame.extend(prefix);
-    frame.resize(rest_len + 4, 0);
-    stream
-        .read_exact(&mut frame[4..])
-        .map_err(|error| Error::new(format!("read 9P frame body: {error}")))?;
-    codec::decode_tmessage(&frame)
 }

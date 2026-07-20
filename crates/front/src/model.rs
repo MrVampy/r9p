@@ -1,24 +1,14 @@
 use r9p::codec::MAX_MSIZE;
-use r9p::error::{Error, Result};
+use r9p::error::{Error, Result, EEXIST, ENOENT, ENOTDIR, EPERM};
 use r9p::fid::Fid;
+use r9p::mode;
 use r9p::qid::{Qid, DMDIR, QTDIR, QTFILE};
 use r9p::stat::Stat;
+use r9p::{ORCLOSE, ORDWR, OREAD, OTRUNC, OWRITE};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Duration;
 
-pub(crate) const EBADFID: &str = "unknown fid";
-pub(crate) const ENOENT: &str = "file does not exist";
-pub(crate) const EPERM: &str = "permission denied";
-pub(crate) const ENOTDIR: &str = "not a directory";
-
 pub(crate) const ROOT_ID: u64 = 0;
-pub(crate) const OREAD: u8 = 0;
-pub(crate) const OWRITE: u8 = 1;
-pub(crate) const ORDWR: u8 = 2;
-pub(crate) const OTRUNC: u8 = 0x10;
-pub(crate) const ORCLOSE: u8 = 0x40;
-pub(crate) const OPEN_MODE_MASK: u8 = 0x03;
-pub(crate) const KNOWN_OPEN_BITS: u8 = OPEN_MODE_MASK | OTRUNC | ORCLOSE;
 
 pub const DEFAULT_LOG_CAPACITY: usize = 1 << 20;
 
@@ -643,7 +633,7 @@ impl State {
             _ => return Err(Error::from_static(ENOTDIR)),
         };
         if existing.is_some() {
-            return Err(Error::from_static("file exists"));
+            return Err(Error::from_static(EEXIST));
         }
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
@@ -865,17 +855,17 @@ pub(crate) fn created_child_path(parent_path: &str, name: &str) -> String {
 }
 
 pub(crate) fn open_allowed(node: &Node, mode: u8) -> bool {
-    if mode & !KNOWN_OPEN_BITS != 0 || mode & (OTRUNC | ORCLOSE) != 0 {
+    if !mode::is_valid(mode) || mode & (OTRUNC | ORCLOSE) != 0 {
         return false;
     }
-    if node.write_relay.is_some() && mode & OPEN_MODE_MASK == OWRITE {
+    if node.write_relay.is_some() && mode & mode::ACCESS_MASK == OWRITE {
         return true;
     }
     match &node.body {
         Body::Dir(_) | Body::File(_) | Body::Log(_) | Body::ReadRelay(_) => {
-            mode & OPEN_MODE_MASK == OREAD
+            mode & mode::ACCESS_MASK == OREAD
         }
-        Body::IntakeNew(_) | Body::WriteRelay(_) => mode & OPEN_MODE_MASK == OWRITE,
-        Body::Rpc(_) => mode & OPEN_MODE_MASK == ORDWR,
+        Body::IntakeNew(_) | Body::WriteRelay(_) => mode & mode::ACCESS_MASK == OWRITE,
+        Body::Rpc(_) => mode & mode::ACCESS_MASK == ORDWR,
     }
 }

@@ -1,5 +1,6 @@
 mod config;
 mod connection;
+mod file_tree_handler;
 mod handlers;
 mod session;
 mod stream;
@@ -8,6 +9,7 @@ mod validation;
 
 pub use config::ServerConfig;
 pub use connection::{serve_connection, ConnectionHandler, ConnectionStream};
+pub use file_tree_handler::serve_file_tree_connection;
 pub use session::Session;
 pub use stream::{Broadcaster, Stream};
 pub use types::{
@@ -28,6 +30,10 @@ pub trait FileTree {
     fn open(&mut self, fid: Fid, qid: Qid, mode: u8) -> Result<OpenFile>;
     fn read(&mut self, fid: Fid, qid: Qid, offset: u64, count: u32) -> Result<ReadData>;
     fn stat(&mut self, qid: Qid) -> Result<Stat>;
+
+    fn reset(&mut self) -> Result<()> {
+        Ok(())
+    }
 
     fn auth(&mut self, _afid: Fid, _uname: &[u8], _aname: &[u8]) -> Result<Qid> {
         Err(Error::from_static(crate::error::ENOAUTH))
@@ -118,15 +124,30 @@ mod tests {
     #[derive(Debug)]
     struct RootOnly {
         root: Qid,
+        resets: usize,
+        fail_reset: bool,
     }
 
     impl RootOnly {
         fn new() -> Self {
-            Self { root: Qid::dir(1) }
+            Self {
+                root: Qid::dir(1),
+                resets: 0,
+                fail_reset: false,
+            }
         }
     }
 
     impl FileTree for RootOnly {
+        fn reset(&mut self) -> Result<()> {
+            self.resets += 1;
+            if self.fail_reset {
+                Err(Error::from_static("backend reset failed"))
+            } else {
+                Ok(())
+            }
+        }
+
         fn attach(&mut self, _fid: Fid, _uname: &[u8], _aname: &[u8]) -> Result<Qid> {
             Ok(self.root)
         }
@@ -158,6 +179,21 @@ mod tests {
         }
     }
 
+    fn negotiate<T: FileTree>(server: &mut Server<T>) {
+        assert_eq!(
+            server.handle(TMessage::Version {
+                tag: crate::message::NOTAG,
+                msize: 8192,
+                version: b"9P2000".to_vec(),
+            }),
+            RMessage::Version {
+                tag: crate::message::NOTAG,
+                msize: 8192,
+                version: b"9P2000".to_vec(),
+            }
+        );
+    }
+
     #[test]
     fn tversion_resets_fids_and_requests() -> Result<()> {
         let mut server = Server::with_config(
@@ -167,6 +203,7 @@ mod tests {
                 ..ServerConfig::default()
             },
         );
+        negotiate(&mut server);
         let attached = server.handle(TMessage::Attach {
             tag: 1,
             fid: 1,
@@ -184,7 +221,28 @@ mod tests {
         });
         assert!(matches!(version, RMessage::Version { .. }));
         assert_eq!(server.session().fid_count(), 0);
+        assert_eq!(server.tree_mut().resets, 2);
         Ok(())
+    }
+
+    #[test]
+    fn failed_backend_reset_leaves_the_session_unnegotiated() {
+        let mut server = Server::new(RootOnly::new());
+        negotiate(&mut server);
+        server.tree_mut().fail_reset = true;
+
+        assert_eq!(
+            server.handle(TMessage::Version {
+                tag: crate::message::NOTAG,
+                msize: 8192,
+                version: b"9P2000".to_vec(),
+            }),
+            RMessage::Error {
+                tag: crate::message::NOTAG,
+                ename: b"backend reset failed".to_vec(),
+            }
+        );
+        assert!(!server.session().is_negotiated());
     }
 
     #[test]
@@ -196,6 +254,7 @@ mod tests {
                 ..ServerConfig::default()
             },
         );
+        negotiate(&mut server);
         let attached = server.handle(TMessage::Attach {
             tag: 1,
             fid: 4_000_000,
@@ -224,6 +283,7 @@ mod tests {
     #[test]
     fn bad_walk_names_are_rejected_before_backend() -> Result<()> {
         let mut server = Server::new(RootOnly::new());
+        negotiate(&mut server);
         let _reply = server.handle(TMessage::Attach {
             tag: 1,
             fid: 1,
@@ -250,6 +310,7 @@ mod tests {
     #[test]
     fn remove_clunks_fid_even_when_backend_rejects_remove() -> Result<()> {
         let mut server = Server::new(RootOnly::new());
+        negotiate(&mut server);
         let attach = server.handle(TMessage::Attach {
             tag: 1,
             fid: 1,
@@ -275,6 +336,7 @@ mod tests {
     #[test]
     fn split_attach_completion_binds_fid_when_request_is_live() -> Result<()> {
         let mut server = Server::new(RootOnly::new());
+        negotiate(&mut server);
         let request = match server.admit(TMessage::Attach {
             tag: 1,
             fid: 1,
@@ -304,6 +366,7 @@ mod tests {
     #[test]
     fn split_flush_cancels_request_and_drops_stale_completion() -> Result<()> {
         let mut server = Server::new(RootOnly::new());
+        negotiate(&mut server);
         let request = match server.admit(TMessage::Attach {
             tag: 1,
             fid: 1,

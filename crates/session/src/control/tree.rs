@@ -1,8 +1,9 @@
 use super::{freshness::ResponseFreshness, json, query, snapshot, status_json, ControlConfig};
 use crate::{feed::FeedState, ClientSlot, NamespaceCache, SessionEpoch, ORDWR, OREAD};
 use r9p::{
-    error::{Error as P9Error, EEXIST, EPERM},
+    error::{Error as P9Error, ENOENT, EPERM},
     fid::Fid,
+    mode::ACCESS_MASK,
     qid::{Qid, DMDIR},
     server::{FileTree, OpenFile, ReadData},
     stat::Stat,
@@ -90,7 +91,7 @@ impl ControlTree {
         self.nodes
             .get(&qid.path)
             .cloned()
-            .ok_or_else(|| P9Error::from_static(EEXIST))
+            .ok_or_else(|| P9Error::from_static(ENOENT))
     }
 
     fn stat_for(&mut self, node: ControlNode) -> Stat {
@@ -112,6 +113,11 @@ impl ControlTree {
 }
 
 impl FileTree for ControlTree {
+    fn reset(&mut self) -> r9p::Result<()> {
+        self.query_responses.clear();
+        Ok(())
+    }
+
     fn attach(&mut self, _fid: Fid, _uname: &[u8], _aname: &[u8]) -> r9p::Result<Qid> {
         Ok(self.qid_for(ControlNode::Root))
     }
@@ -138,7 +144,7 @@ impl FileTree for ControlTree {
 
     fn open(&mut self, _fid: Fid, qid: Qid, mode: u8) -> r9p::Result<OpenFile> {
         let node = self.node_for(qid)?;
-        let access = mode & 0x3;
+        let access = mode & ACCESS_MASK;
         if matches!(node, ControlNode::Query) {
             if access != OREAD && access != ORDWR {
                 return Err(P9Error::from_static(EPERM));

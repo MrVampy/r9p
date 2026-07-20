@@ -6,14 +6,13 @@ use super::{
         FuseInHeader, FuseInitIn, FuseInitOut, FuseInterruptIn, DEFAULT_MAX_WRITE, FUSE_ACCESS,
         FUSE_ASYNC_READ, FUSE_ATOMIC_O_TRUNC, FUSE_AUTO_INVAL_DATA, FUSE_BATCH_FORGET,
         FUSE_BIG_WRITES, FUSE_BUFFER_SIZE, FUSE_COMPAT_22_INIT_OUT_SIZE, FUSE_COMPAT_INIT_OUT_SIZE,
-        FUSE_CREATE, FUSE_DESTROY, FUSE_DONT_MASK, FUSE_DO_READDIRPLUS, FUSE_EXPORT_SUPPORT,
-        FUSE_FLUSH, FUSE_FORGET, FUSE_FSYNC, FUSE_FSYNCDIR, FUSE_GETATTR, FUSE_GETLK,
-        FUSE_GETXATTR, FUSE_INIT, FUSE_INTERRUPT, FUSE_KERNEL_MINOR_VERSION, FUSE_KERNEL_VERSION,
-        FUSE_LINK, FUSE_LISTXATTR, FUSE_LOOKUP, FUSE_MKDIR, FUSE_MKNOD, FUSE_OPEN, FUSE_OPENDIR,
-        FUSE_PARALLEL_DIROPS, FUSE_POLL, FUSE_READ, FUSE_READDIR, FUSE_READDIRPLUS,
-        FUSE_READDIRPLUS_AUTO, FUSE_READLINK, FUSE_RELEASE, FUSE_RELEASEDIR, FUSE_REMOVEXATTR,
-        FUSE_RENAME, FUSE_RMDIR, FUSE_SETATTR, FUSE_SETLK, FUSE_SETLKW, FUSE_SETXATTR, FUSE_STATFS,
-        FUSE_SYMLINK, FUSE_UNLINK, FUSE_WRITE,
+        FUSE_CREATE, FUSE_DESTROY, FUSE_DO_READDIRPLUS, FUSE_FLUSH, FUSE_FORGET, FUSE_FSYNC,
+        FUSE_FSYNCDIR, FUSE_GETATTR, FUSE_GETLK, FUSE_GETXATTR, FUSE_INIT, FUSE_INTERRUPT,
+        FUSE_KERNEL_MINOR_VERSION, FUSE_KERNEL_VERSION, FUSE_LINK, FUSE_LISTXATTR, FUSE_LOOKUP,
+        FUSE_MKDIR, FUSE_MKNOD, FUSE_OPEN, FUSE_OPENDIR, FUSE_PARALLEL_DIROPS, FUSE_POLL,
+        FUSE_READ, FUSE_READDIR, FUSE_READDIRPLUS, FUSE_READDIRPLUS_AUTO, FUSE_READLINK,
+        FUSE_RELEASE, FUSE_RELEASEDIR, FUSE_REMOVEXATTR, FUSE_RENAME, FUSE_RMDIR, FUSE_SETATTR,
+        FUSE_SETLK, FUSE_SETLKW, FUSE_SETXATTR, FUSE_STATFS, FUSE_SYMLINK, FUSE_UNLINK, FUSE_WRITE,
     },
     R9pFuse,
 };
@@ -213,23 +212,17 @@ impl R9pFuse {
         let negotiated_minor = input.minor.min(FUSE_KERNEL_MINOR_VERSION);
         // Capabilities we both want and the kernel advertised. Each opt-in is
         // safe with our current handlers: ATOMIC_O_TRUNC short-circuits the
-        // separate truncate round trip on OPEN, EXPORT_SUPPORT allows NFS
-        // export and stable inodes, DONT_MASK tells the kernel not to apply
-        // umask to mode bits we already pass through verbatim, BIG_WRITES is
-        // governed by max_write, AUTO_INVAL_DATA invalidates page-cache pages
-        // when mtime changes (relevant once non-zero attr_timeout returns),
+        // separate truncate round trip on OPEN, BIG_WRITES is governed by
+        // max_write, AUTO_INVAL_DATA invalidates page-cache pages when mtime
+        // changes (relevant once non-zero attr_timeout returns),
         // PARALLEL_DIROPS unblocks concurrent lookups inside one dir, and
         // adaptive READDIRPLUS lets the kernel seed dentry/attribute cache
-        // when traversal tools actually inspect returned entries.
-        let supported = FUSE_ASYNC_READ
-            | FUSE_ATOMIC_O_TRUNC
-            | FUSE_EXPORT_SUPPORT
-            | FUSE_BIG_WRITES
-            | FUSE_DONT_MASK
-            | FUSE_AUTO_INVAL_DATA
-            | FUSE_DO_READDIRPLUS
-            | FUSE_READDIRPLUS_AUTO
-            | FUSE_PARALLEL_DIROPS;
+        // when traversal tools actually inspect returned entries. We do not
+        // advertise EXPORT_SUPPORT: forgotten FUSE nodeids are intentionally
+        // retired, so the bridge cannot satisfy exportfs stale-handle lookup.
+        // Nor do we advertise DONT_MASK: Linux must apply the caller's umask
+        // before r9p forwards the requested permission bits to the 9P server.
+        let supported = supported_init_flags();
         let mut output = FuseInitOut {
             major: FUSE_KERNEL_VERSION,
             minor: negotiated_minor,
@@ -484,6 +477,16 @@ fn should_log_operation_error(error: &Error) -> bool {
             | libc::ECONNRESET
             | libc::ECONNABORTED
     )
+}
+
+pub(super) fn supported_init_flags() -> u32 {
+    FUSE_ASYNC_READ
+        | FUSE_ATOMIC_O_TRUNC
+        | FUSE_BIG_WRITES
+        | FUSE_AUTO_INVAL_DATA
+        | FUSE_DO_READDIRPLUS
+        | FUSE_READDIRPLUS_AUTO
+        | FUSE_PARALLEL_DIROPS
 }
 
 fn init_out_size(minor: u32) -> usize {

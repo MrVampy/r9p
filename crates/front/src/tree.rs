@@ -1,10 +1,10 @@
 use crate::front::Front;
 use crate::model::{
     created_child_path, open_allowed, Body, CreateRelayRequest, IntakeRequest, RequestContext,
-    EBADFID, ENOENT, ENOTDIR, EPERM, ROOT_ID,
+    ROOT_ID,
 };
 use crate::ReadTarget;
-use r9p::error::{Error, Result};
+use r9p::error::{Error, Result, EBADFID, EEXIST, ENOENT, ENOTDIR, EPERM};
 use r9p::fid::Fid;
 use r9p::qid::Qid;
 use r9p::server::{FileTree, OpenFile, ReadData};
@@ -88,6 +88,12 @@ fn request_context(
 }
 
 impl FileTree for FrontTree {
+    fn reset(&mut self) -> Result<()> {
+        let replacement = self.front.tree();
+        *self = replacement;
+        Ok(())
+    }
+
     fn attach(&mut self, fid: Fid, uname: &[u8], aname: &[u8]) -> Result<Qid> {
         let state = self.front.lock()?;
         let root = state.attach_root_for(uname, aname)?;
@@ -191,7 +197,7 @@ impl FileTree for FrontTree {
         if create_prefix.is_none() {
             if let Body::Dir(children) = &state.node(parent_id)?.body {
                 if children.contains_key(name) {
-                    return Err(Error::from_static("file exists"));
+                    return Err(Error::from_static(EEXIST));
                 }
             }
         }

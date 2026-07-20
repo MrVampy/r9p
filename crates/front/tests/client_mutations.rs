@@ -1,13 +1,12 @@
 use front::abi::{
     r9p_front_client_create_at, r9p_front_client_create_write_at, r9p_front_client_remove,
-    r9p_front_client_write_file, r9p_front_free, r9p_front_new,
+    r9p_front_client_write_file, r9p_front_free, r9p_front_last_error, r9p_front_new, FrontAbi,
 };
 use fs::{LocalTree, LocalTreeConfig};
-use r9p::{codec, message::TMessage, server::Server};
+use r9p::{codec, server::Server};
 use std::{
     ffi::c_char,
     fs as std_fs,
-    io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::PathBuf,
     thread,
@@ -64,7 +63,7 @@ fn client_mutations_use_native_9p_operations() -> TestResult<()> {
             &mut qid_path,
         )
     };
-    assert_eq!(create_status, 0);
+    assert_status(handle, create_status);
     assert_eq!(qid_type, 0);
     assert_ne!(qid_path, 0);
 
@@ -88,7 +87,7 @@ fn client_mutations_use_native_9p_operations() -> TestResult<()> {
             &mut count,
         )
     };
-    assert_eq!(write_status, 0);
+    assert_status(handle, write_status);
     assert_eq!(count as usize, body.len());
     assert_eq!(std_fs::read(root.join("created"))?, body);
 
@@ -117,7 +116,7 @@ fn client_mutations_use_native_9p_operations() -> TestResult<()> {
             &mut atomic_count,
         )
     };
-    assert_eq!(atomic_status, 0);
+    assert_status(handle, atomic_status);
     assert_eq!(atomic_count as usize, atomic_body.len());
     assert_eq!(std_fs::read(root.join("atomic"))?, atomic_body);
 
@@ -135,7 +134,7 @@ fn client_mutations_use_native_9p_operations() -> TestResult<()> {
             65_536,
         )
     };
-    assert_eq!(remove_status, 0);
+    assert_status(handle, remove_status);
     assert!(!root.join("created").exists());
 
     unsafe { r9p_front_free(handle) };
@@ -144,6 +143,23 @@ fn client_mutations_use_native_9p_operations() -> TestResult<()> {
         .map_err(|_| "mutation server thread panicked")??;
     std_fs::remove_dir_all(root)?;
     Ok(())
+}
+
+fn assert_status(handle: *mut FrontAbi, status: i32) {
+    if status == 0 {
+        return;
+    }
+    let error_len = unsafe { r9p_front_last_error(handle, std::ptr::null_mut(), 0) };
+    let mut error = vec![0; usize::try_from(error_len).unwrap_or_default()];
+    if !error.is_empty() {
+        unsafe {
+            r9p_front_last_error(handle, error.as_mut_ptr(), error.len());
+        }
+    }
+    panic!(
+        "front ABI status {status}: {}",
+        String::from_utf8_lossy(&error)
+    );
 }
 
 struct TargetArgs {
@@ -173,35 +189,11 @@ impl TargetArgs {
 
 fn serve_connection(mut stream: TcpStream, tree: LocalTree) -> TestResult<()> {
     let mut server = Server::new(tree);
-    while let Some(message) = read_tmessage(&mut stream)? {
+    while let Some(message) = codec::read_tmessage_checked(&mut stream, server.session().msize())? {
         let reply = server.handle(message);
-        let frame = codec::encode_rmessage_checked(&reply, server.session().msize())?;
-        stream.write_all(&frame)?;
+        codec::write_rmessage_checked(&mut stream, server.session().msize(), &reply)?;
     }
     Ok(())
-}
-
-fn read_tmessage(stream: &mut TcpStream) -> TestResult<Option<TMessage>> {
-    let mut prefix = [0_u8; 4];
-    match stream.read_exact(&mut prefix) {
-        Ok(()) => {}
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset
-            ) =>
-        {
-            return Ok(None);
-        }
-        Err(error) => return Err(Box::new(error)),
-    }
-    let size = u32::from_le_bytes(prefix);
-    let rest_len = usize::try_from(size.saturating_sub(4))?;
-    let mut frame = Vec::with_capacity(rest_len + 4);
-    frame.extend(prefix);
-    frame.resize(rest_len + 4, 0);
-    stream.read_exact(&mut frame[4..])?;
-    Ok(Some(codec::decode_tmessage(&frame)?))
 }
 
 fn fixture_root(label: &str) -> TestResult<PathBuf> {

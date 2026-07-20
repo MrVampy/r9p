@@ -22,7 +22,14 @@ pub(super) fn reader_loop<S: super::MultiplexTransport>(
     waiters: Arc<Mutex<Waiters>>,
 ) {
     loop {
-        let response = match read_response(&mut reader) {
+        let max_frame_size = match lock(&protocol, "lock 9P protocol client") {
+            Ok(protocol) => protocol.msize(),
+            Err(error) => {
+                fail_all(&waiters, error);
+                return;
+            }
+        };
+        let response = match read_response(&mut reader, max_frame_size) {
             Ok(response) => response,
             Err(error) => {
                 fail_all(&waiters, error);
@@ -75,32 +82,25 @@ pub(super) fn call_message_sync<S: Read + Write>(
     protocol: &mut ProtocolClient,
     message: TMessage,
 ) -> Result<ClientResponse> {
-    let frame = codec::encode_tmessage(&message)
-        .map_err(|error| Error::from(format!("encode 9P frame: {error}")))?;
-    writer
-        .write_all(&frame)
-        .map_err(|error| io_error("write 9P frame", error))?;
-    let response = read_response(reader)?;
+    let tag = message.tag();
+    let frame = match codec::encode_tmessage_checked(&message, protocol.msize()) {
+        Ok(frame) => frame,
+        Err(error) => {
+            protocol.abandon(tag);
+            return Err(Error::from(format!("encode 9P frame: {error}")));
+        }
+    };
+    if let Err(error) = writer.write_all(&frame) {
+        protocol.abandon(tag);
+        return Err(io_error("write 9P frame", error));
+    }
+    let response = read_response(reader, protocol.msize())?;
     protocol.receive(response).map_err(protocol_error)
 }
 
-pub(super) fn read_response(reader: &mut impl Read) -> Result<RMessage> {
-    let mut prefix = [0_u8; 4];
-    reader
-        .read_exact(&mut prefix)
-        .map_err(|error| io_error("read 9P frame size", error))?;
-    let size = u32::from_le_bytes(prefix);
-    if size < codec::FRAME_HEADER_SIZE {
-        return Err(Error::from("short 9P frame"));
-    }
-    let rest_len = usize::try_from(size - 4).map_err(|_| Error::from("oversized 9P frame"))?;
-    let mut frame = Vec::with_capacity(usize::try_from(size).unwrap_or(rest_len + 4));
-    frame.extend(prefix);
-    frame.resize(rest_len + 4, 0);
-    reader
-        .read_exact(&mut frame[4..])
-        .map_err(|error| io_error("read 9P frame body", error))?;
-    codec::decode_rmessage(&frame).map_err(|error| Error::from(format!("decode 9P frame: {error}")))
+pub(super) fn read_response(reader: &mut impl Read, max_frame_size: u32) -> Result<RMessage> {
+    codec::read_rmessage_checked(reader, max_frame_size)?
+        .ok_or_else(|| Error::from("9P transport closed before response"))
 }
 
 #[cfg(test)]

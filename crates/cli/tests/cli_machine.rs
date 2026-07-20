@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     error::Error,
     fs,
-    io::{self, Read, Write},
+    io::{self, Write},
     net::{TcpListener, TcpStream},
     path::PathBuf,
     process::{Command, Output, Stdio},
@@ -18,7 +18,6 @@ use r9p::{
     blocking::OTRUNC,
     codec,
     fid::Fid,
-    message::TMessage,
     qid::{Qid, DMDIR},
     server::{FileTree, OpenFile, ReadData, Server},
     stat::Stat,
@@ -270,19 +269,27 @@ impl FileTree for MachineTree {
     fn create(
         &mut self,
         _fid: Fid,
-        qid: Qid,
+        _qid: Qid,
         name: &[u8],
         perm: u32,
         _mode: u8,
     ) -> R9pResult<OpenFile> {
         match name {
             b"created" if perm & DMDIR == 0 => {
-                self.created_qid = Some(qid);
-                Ok(OpenFile { qid, iounit: 0 })
+                let created = Qid::file(6);
+                self.created_qid = Some(created);
+                Ok(OpenFile {
+                    qid: created,
+                    iounit: 0,
+                })
             }
             b"made" if perm & DMDIR != 0 => {
-                self.created_dir_qid = Some(qid);
-                Ok(OpenFile { qid, iounit: 0 })
+                let created = Qid::dir(7);
+                self.created_dir_qid = Some(created);
+                Ok(OpenFile {
+                    qid: created,
+                    iounit: 0,
+                })
             }
             _ => Err(R9pError::from("unexpected create")),
         }
@@ -418,7 +425,7 @@ fn machine_list_on_file_prints_stat_without_reading_content() -> TestResult<()> 
     assert_success(&output)?;
     assert_stdout(
         &output,
-        "entry\t64617461\t0\t0\t2\t6\t384\t0\t0\t0\t0\t7261636d65\t7261636d65\t7261636d65\n",
+        "entry\t64617461\t0\t0\t2\t6\t384\t0\t0\t0\t0\t6e6f6e65\t6e6f6e65\t6e6f6e65\n",
     )?;
     if shared.read_count() != 0 {
         return Err(test_error("list read file content instead of using stat"));
@@ -689,45 +696,14 @@ fn start_server_connections(
 
 fn serve_connection(mut stream: TcpStream, file: SharedFile) -> Result<(), String> {
     let mut server = Server::new(MachineTree::new(file));
-    while let Some(message) = read_tmessage(&mut stream)? {
+    while let Some(message) = codec::read_tmessage_checked(&mut stream, server.session().msize())
+        .map_err(|error| format!("read request: {error}"))?
+    {
         let reply = server.handle(message);
-        let frame = codec::encode_rmessage_checked(&reply, server.session().msize())
-            .map_err(|error| format!("encode reply: {error}"))?;
-        stream
-            .write_all(&frame)
+        codec::write_rmessage_checked(&mut stream, server.session().msize(), &reply)
             .map_err(|error| format!("write reply: {error}"))?;
     }
     Ok(())
-}
-
-fn read_tmessage(stream: &mut TcpStream) -> Result<Option<TMessage>, String> {
-    let mut prefix = [0_u8; 4];
-    match stream.read_exact(&mut prefix) {
-        Ok(()) => {}
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset
-            ) =>
-        {
-            return Ok(None);
-        }
-        Err(error) => return Err(format!("read frame size: {error}")),
-    }
-    let size = u32::from_le_bytes(prefix);
-    if size < codec::FRAME_HEADER_SIZE {
-        return Err(format!("short frame: {size}"));
-    }
-    let rest_len = usize::try_from(size - 4).map_err(|_| "frame too large".to_string())?;
-    let mut frame = Vec::with_capacity(rest_len + 4);
-    frame.extend(prefix);
-    frame.resize(rest_len + 4, 0);
-    stream
-        .read_exact(&mut frame[4..])
-        .map_err(|error| format!("read frame body: {error}"))?;
-    codec::decode_tmessage(&frame)
-        .map(Some)
-        .map_err(|error| format!("decode request: {error}"))
 }
 
 fn run_machine(address: &str, args: &[&str], stdin: Option<&[u8]>) -> TestResult<Output> {

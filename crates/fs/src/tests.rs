@@ -104,8 +104,14 @@ fn serves_symlink_target_without_following_outside_export() -> Result<()> {
         wnames: vec![b"secret-link".to_vec()],
     });
     assert!(matches!(reply, RMessage::Walk { .. }));
-    let reply = server.handle(TMessage::Read {
+    let reply = server.handle(TMessage::Open {
         tag: 3,
+        fid: 2,
+        mode: OREAD,
+    });
+    assert!(matches!(reply, RMessage::Open { .. }));
+    let reply = server.handle(TMessage::Read {
+        tag: 4,
         fid: 2,
         offset: 0,
         count: 8192,
@@ -113,7 +119,7 @@ fn serves_symlink_target_without_following_outside_export() -> Result<()> {
     assert_eq!(
         reply,
         RMessage::Read {
-            tag: 3,
+            tag: 4,
             data: outside.join("secret").as_os_str().as_bytes().to_vec()
         }
     );
@@ -203,6 +209,12 @@ fn writable_export_creates_truncates_and_writes() -> Result<()> {
 }
 
 fn attach(server: &mut Server<LocalTree>) {
+    let version = server.handle(TMessage::Version {
+        tag: r9p::NOTAG,
+        msize: 8192,
+        version: b"9P2000".to_vec(),
+    });
+    assert!(matches!(version, RMessage::Version { .. }));
     let reply = server.handle(TMessage::Attach {
         tag: 1,
         fid: 1,

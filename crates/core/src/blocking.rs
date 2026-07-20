@@ -1,11 +1,15 @@
 use crate::{
     client::{Client as ProtocolClient, ClientResponse, Completion, Op},
-    client_support::{io_error, op_fid, protocol_error, unexpected, write_in_chunks},
+    client_support::{
+        checked_advance_offset, checked_read_data, checked_write_count, io_error, op_fid,
+        protocol_error, unexpected, write_in_chunks,
+    },
     codec,
     error::ENOTDIR,
     error::{Error, Result},
     fid::{Fid, NOFID},
     message::TMessage,
+    mode,
     qid::{Qid, DMDIR},
     stat::{decode_dir_entries, Stat},
 };
@@ -18,12 +22,7 @@ use std::{
 #[cfg(unix)]
 use std::{os::unix::net::UnixStream, path::Path};
 
-pub const OREAD: u8 = 0;
-pub const OWRITE: u8 = 1;
-pub const ORDWR: u8 = 2;
-pub const OEXEC: u8 = 3;
-pub const OTRUNC: u8 = 0x10;
-pub const ORCLOSE: u8 = 0x40;
+pub use mode::{OEXEC, ORCLOSE, ORDWR, OREAD, OTRUNC, OWRITE};
 pub const DEFAULT_READ_CHUNK: u32 = 65_536;
 
 pub trait ReadWrite: Read + Write + Send {}
@@ -257,7 +256,7 @@ impl<S: Read + Write> Client<S> {
             .read(fid, offset, count)
             .map_err(protocol_error)?;
         match self.call_op(op)? {
-            Completion::Read { data } => Ok(data),
+            Completion::Read { data } => checked_read_data(data, count),
             other => Err(unexpected("Rread", other)),
         }
     }
@@ -274,7 +273,7 @@ impl<S: Read + Write> Client<S> {
             .write(fid, offset, data.to_vec())
             .map_err(protocol_error)?;
         match self.call_op(op)? {
-            Completion::Write { count } => Ok(count),
+            Completion::Write { count } => checked_write_count(count, data.len()),
             other => Err(unexpected("Rwrite", other)),
         }
     }
@@ -473,9 +472,10 @@ impl<S: Read + Write> Client<S> {
             if data.is_empty() {
                 break;
             }
-            offset = offset.saturating_add(
+            offset = checked_advance_offset(
+                offset,
                 u64::try_from(data.len()).map_err(|_| Error::from("read count overflow"))?,
-            );
+            )?;
             out.extend(data);
         }
         Ok(out)
@@ -498,13 +498,19 @@ impl<S: Read + Write> Client<S> {
     }
 
     fn call_message(&mut self, message: TMessage) -> Result<ClientResponse> {
-        codec::write_tmessage(&mut self.stream, &message)?;
+        let tag = message.tag();
+        if let Err(error) =
+            codec::write_tmessage_checked(&mut self.stream, self.protocol.msize(), &message)
+        {
+            self.protocol.abandon(tag);
+            return Err(error);
+        }
         let response = self.read_response()?;
         self.protocol.receive(response).map_err(protocol_error)
     }
 
     fn read_response(&mut self) -> Result<crate::message::RMessage> {
-        codec::read_rmessage(&mut self.stream)?
+        codec::read_rmessage_checked(&mut self.stream, self.protocol.msize())?
             .ok_or_else(|| Error::from("9P transport closed before response"))
     }
 }

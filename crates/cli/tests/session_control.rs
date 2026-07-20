@@ -1,7 +1,6 @@
 use std::{
     error::Error,
     fs, io,
-    io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::PathBuf,
     process::{Child, Command, Output, Stdio},
@@ -12,7 +11,6 @@ use std::{
 use r9p::{
     codec,
     fid::Fid,
-    message::TMessage,
     qid::{Qid, DMDIR},
     server::{FileTree, OpenFile, ReadData, Server},
     stat::Stat,
@@ -289,44 +287,14 @@ fn start_server() -> TestResult<(String, JoinHandle<Result<(), String>>)> {
 
 fn serve_connection(mut stream: TcpStream) -> Result<(), String> {
     let mut server = Server::new(SessionTree);
-    while let Some(message) = read_tmessage(&mut stream)? {
+    while let Some(message) = codec::read_tmessage_checked(&mut stream, server.session().msize())
+        .map_err(|error| error.to_string())?
+    {
         let reply = server.handle(message);
-        let frame = codec::encode_rmessage_checked(&reply, server.session().msize())
-            .map_err(|error| error.to_string())?;
-        stream
-            .write_all(&frame)
+        codec::write_rmessage_checked(&mut stream, server.session().msize(), &reply)
             .map_err(|error| error.to_string())?;
     }
     Ok(())
-}
-
-fn read_tmessage(stream: &mut impl Read) -> Result<Option<TMessage>, String> {
-    let mut prefix = [0_u8; 4];
-    match stream.read_exact(&mut prefix) {
-        Ok(()) => {}
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset
-            ) =>
-        {
-            return Ok(None);
-        }
-        Err(error) => return Err(error.to_string()),
-    }
-    let size = u32::from_le_bytes(prefix);
-    if size < codec::FRAME_HEADER_SIZE {
-        return Err("short 9P frame".to_string());
-    }
-    let frame_len = usize::try_from(size).map_err(|_| "oversized 9P frame".to_string())?;
-    let mut frame = vec![0_u8; frame_len];
-    frame[..4].copy_from_slice(&prefix);
-    stream
-        .read_exact(&mut frame[4..])
-        .map_err(|error| error.to_string())?;
-    codec::decode_tmessage(&frame)
-        .map(Some)
-        .map_err(|error| error.to_string())
 }
 
 fn run_session_until_success(args: &[&str]) -> TestResult<Output> {

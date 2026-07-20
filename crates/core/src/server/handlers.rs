@@ -1,13 +1,18 @@
 use crate::{
-    codec::{clamp_read_count, max_write_payload},
-    error::{Error, Result, EEXIST, EFIDINUSE, EFIDLIMIT, ENOAUTH},
+    codec::{clamp_read_count, max_iounit, max_write_payload},
+    error::{
+        Error, Result, EBADDIROFFSET, EBADMODE, EFIDNOTOPEN, EFIDOPEN, ENOAUTH, ENOENT, ENOTDIR,
+    },
     fid::{FidState, NOFID},
-    flush::RequestKey,
+    flush::{FlushOutcome, RequestKey},
     message::{RMessage, TMessage, Tag},
+    mode,
+    qid::DMDIR,
     stat::dirread_chunk,
 };
 
 use super::{
+    session::VersionNegotiation,
     types::{ReadData, ServerCompletion, ServerEvent, ServerRequest, ServerRequestKind},
     validation::{error_reply, take_count, validate_walk_names},
     FileTree, Server,
@@ -22,13 +27,22 @@ impl<T> Server<T> {
         } = message
         {
             return match self.session.reset_for_version(msize, &version) {
-                Ok(()) => ServerEvent::Reply(RMessage::Version {
-                    tag,
-                    msize: self.session.msize(),
-                    version: self.session.version().to_vec(),
-                }),
+                Ok(VersionNegotiation::Accepted | VersionNegotiation::Unknown) => {
+                    ServerEvent::Reply(RMessage::Version {
+                        tag,
+                        msize: self.session.msize(),
+                        version: self.session.version().to_vec(),
+                    })
+                }
                 Err(error) => ServerEvent::Reply(error_reply(tag, error)),
             };
+        }
+
+        if !self.session.is_negotiated() {
+            return ServerEvent::Reply(error_reply(
+                message.tag(),
+                Error::from_static("version not negotiated"),
+            ));
         }
 
         let tag = message.tag();
@@ -51,6 +65,7 @@ impl<T> Server<T> {
         if !self.session.requests.finish(request.key) {
             return None;
         }
+        self.session.release_reservations(request.key);
         let tag = request.tag();
         let result = match completion {
             Ok(completion) => self.apply_completion(tag, &request.kind, completion),
@@ -63,7 +78,16 @@ impl<T> Server<T> {
     where
         T: FileTree,
     {
-        match self.admit(message) {
+        let tag = message.tag();
+        let resets_backend = matches!(message, TMessage::Version { .. });
+        let event = self.admit(message);
+        if resets_backend {
+            if let Err(error) = self.tree.reset() {
+                self.session.invalidate();
+                return error_reply(tag, error);
+            }
+        }
+        match event {
             ServerEvent::Reply(reply) | ServerEvent::Flush { reply, .. } => reply,
             ServerEvent::Dispatch(request) => {
                 let tag = request.tag();
@@ -84,12 +108,7 @@ impl<T> Server<T> {
                 if afid == NOFID {
                     return Err(Error::from_static(ENOAUTH));
                 }
-                if self.session.contains_fid(afid) {
-                    return Err(Error::from_static(EFIDINUSE));
-                }
-                if self.session.fid_count() >= self.session.config.max_fids {
-                    return Err(Error::from_static(EFIDLIMIT));
-                }
+                self.session.reserve_new_fid(key, afid)?;
                 Ok(ServerEvent::Dispatch(ServerRequest {
                     key,
                     kind: ServerRequestKind::Auth { afid, uname, aname },
@@ -107,13 +126,9 @@ impl<T> Server<T> {
                     if !auth_state.qid.is_auth() {
                         return Err(Error::from_static(ENOAUTH));
                     }
+                    self.session.reserve_existing_fid(key, afid)?;
                 }
-                if self.session.contains_fid(fid) {
-                    return Err(Error::from_static(EFIDINUSE));
-                }
-                if self.session.fid_count() >= self.session.config.max_fids {
-                    return Err(Error::from_static(EFIDLIMIT));
-                }
+                self.session.reserve_new_fid(key, fid)?;
                 Ok(ServerEvent::Dispatch(ServerRequest {
                     key,
                     kind: ServerRequestKind::Attach {
@@ -126,6 +141,9 @@ impl<T> Server<T> {
             }
             TMessage::Flush { oldtag, .. } => {
                 let outcome = self.session.requests.flush(oldtag)?;
+                if let FlushOutcome::Cancelled(cancelled) = outcome {
+                    self.session.release_reservations(cancelled);
+                }
                 let reply = RMessage::Flush { tag };
                 let _finished = self.session.requests.finish(key);
                 Ok(ServerEvent::Flush { reply, outcome })
@@ -138,14 +156,17 @@ impl<T> Server<T> {
             } => {
                 validate_walk_names(&wnames)?;
                 let source = self.session.fid(fid)?;
-                if newfid != fid && self.session.contains_fid(newfid) {
-                    return Err(Error::from_static(EFIDINUSE));
+                if source.open_mode().is_some() {
+                    return Err(Error::from_static(EFIDOPEN));
                 }
-                if newfid != fid
-                    && !self.session.contains_fid(newfid)
-                    && self.session.fid_count() >= self.session.config.max_fids
-                {
-                    return Err(Error::from_static(EFIDLIMIT));
+                if !wnames.is_empty() && !source.qid.is_dir() {
+                    return Err(Error::from_static(ENOTDIR));
+                }
+                if newfid == fid {
+                    self.session.reserve_existing_fid(key, fid)?;
+                } else {
+                    self.session.reserve_shared_fid(key, fid)?;
+                    self.session.reserve_new_fid(key, newfid)?;
                 }
                 Ok(ServerEvent::Dispatch(ServerRequest {
                     key,
@@ -159,6 +180,8 @@ impl<T> Server<T> {
             }
             TMessage::Open { fid, mode, .. } => {
                 let state = self.session.fid(fid)?;
+                validate_open(state, mode)?;
+                self.session.reserve_existing_fid(key, fid)?;
                 Ok(ServerEvent::Dispatch(ServerRequest {
                     key,
                     kind: ServerRequestKind::Open {
@@ -176,6 +199,8 @@ impl<T> Server<T> {
                 ..
             } => {
                 let state = self.session.fid(fid)?;
+                validate_create(state, perm, mode)?;
+                self.session.reserve_existing_fid(key, fid)?;
                 Ok(ServerEvent::Dispatch(ServerRequest {
                     key,
                     kind: ServerRequestKind::Create {
@@ -191,6 +216,10 @@ impl<T> Server<T> {
                 fid, offset, count, ..
             } => {
                 let state = self.session.fid(fid)?;
+                validate_read(state, offset)?;
+                if state.qid.is_dir() {
+                    self.session.reserve_existing_fid(key, fid)?;
+                }
                 Ok(ServerEvent::Dispatch(ServerRequest {
                     key,
                     kind: ServerRequestKind::Read {
@@ -210,6 +239,7 @@ impl<T> Server<T> {
                     return Err(Error::from("write exceeds msize"));
                 }
                 let state = self.session.fid(fid)?;
+                validate_write(state)?;
                 Ok(ServerEvent::Dispatch(ServerRequest {
                     key,
                     kind: ServerRequestKind::Write {
@@ -221,7 +251,7 @@ impl<T> Server<T> {
                 }))
             }
             TMessage::Clunk { fid, .. } => {
-                let state = self.session.remove_fid(fid)?;
+                let state = self.session.retire_fid(key, fid)?;
                 Ok(ServerEvent::Dispatch(ServerRequest {
                     key,
                     kind: ServerRequestKind::Clunk {
@@ -231,7 +261,7 @@ impl<T> Server<T> {
                 }))
             }
             TMessage::Remove { fid, .. } => {
-                let state = self.session.remove_fid(fid)?;
+                let state = self.session.retire_fid(key, fid)?;
                 Ok(ServerEvent::Dispatch(ServerRequest {
                     key,
                     kind: ServerRequestKind::Remove {
@@ -252,6 +282,7 @@ impl<T> Server<T> {
             }
             TMessage::Wstat { fid, stat, .. } => {
                 let state = self.session.fid(fid)?;
+                self.session.reserve_existing_fid(key, fid)?;
                 Ok(ServerEvent::Dispatch(ServerRequest {
                     key,
                     kind: ServerRequestKind::Wstat {
@@ -266,6 +297,7 @@ impl<T> Server<T> {
 
     fn finish_with_reply(&mut self, key: RequestKey, reply: RMessage) -> ServerEvent {
         let _finished = self.session.requests.finish(key);
+        self.session.release_reservations(key);
         ServerEvent::Reply(reply)
     }
 
@@ -280,7 +312,8 @@ impl<T> Server<T> {
                 if !qid.is_auth() {
                     return Err(Error::from_static(ENOAUTH));
                 }
-                self.session.insert_new_fid(*afid, FidState::new(qid))?;
+                self.session
+                    .insert_new_fid(*afid, FidState::opened(qid, mode::ORDWR))?;
                 Ok(RMessage::Auth { tag, aqid: qid })
             }
             (ServerRequestKind::Attach { fid, .. }, ServerCompletion::Attach { qid }) => {
@@ -310,7 +343,7 @@ impl<T> Server<T> {
                     });
                 }
                 if qids.is_empty() {
-                    return Err(Error::from_static(EEXIST));
+                    return Err(Error::from_static(ENOENT));
                 }
                 if qids.len() == wnames.len() {
                     let qid = qids[qids.len() - 1];
@@ -322,30 +355,53 @@ impl<T> Server<T> {
                 }
                 Ok(RMessage::Walk { tag, qids })
             }
-            (ServerRequestKind::Open { fid, .. }, ServerCompletion::Open(opened)) => {
-                self.session.bind_fid(*fid, FidState::opened(opened.qid))?;
+            (ServerRequestKind::Open { fid, mode, .. }, ServerCompletion::Open(opened)) => {
+                self.session
+                    .bind_fid(*fid, FidState::opened(opened.qid, *mode))?;
                 Ok(RMessage::Open {
                     tag,
                     qid: opened.qid,
-                    iounit: opened.iounit,
+                    iounit: clamp_iounit(self.session.msize(), opened.iounit),
                 })
             }
-            (ServerRequestKind::Create { fid, .. }, ServerCompletion::Create(opened)) => {
-                self.session.bind_fid(*fid, FidState::opened(opened.qid))?;
+            (ServerRequestKind::Create { fid, mode, .. }, ServerCompletion::Create(opened)) => {
+                self.session
+                    .bind_fid(*fid, FidState::opened(opened.qid, *mode))?;
                 Ok(RMessage::Create {
                     tag,
                     qid: opened.qid,
-                    iounit: opened.iounit,
+                    iounit: clamp_iounit(self.session.msize(), opened.iounit),
                 })
             }
-            (ServerRequestKind::Read { offset, count, .. }, ServerCompletion::Read(data)) => {
+            (
+                ServerRequestKind::Read {
+                    fid,
+                    qid,
+                    offset,
+                    count,
+                },
+                ServerCompletion::Read(data),
+            ) => {
                 let data = match data {
                     ReadData::Bytes(bytes) => take_count(bytes, *count)?,
                     ReadData::Directory(stats) => dirread_chunk(&stats, *offset, *count)?,
                 };
+                if qid.is_dir() {
+                    let state = self.session.fid(*fid)?;
+                    let count = u64::try_from(data.len())
+                        .map_err(|_| Error::from("directory read count too large"))?;
+                    let next_offset = offset
+                        .checked_add(count)
+                        .ok_or_else(|| Error::from("directory offset overflow"))?;
+                    self.session
+                        .bind_fid(*fid, state.with_directory_offset(next_offset))?;
+                }
                 Ok(RMessage::Read { tag, data })
             }
-            (ServerRequestKind::Write { .. }, ServerCompletion::Write { count }) => {
+            (ServerRequestKind::Write { data, .. }, ServerCompletion::Write { count }) => {
+                if usize::try_from(count).map_or(true, |count| count > data.len()) {
+                    return Err(Error::from("write completion exceeds request count"));
+                }
                 Ok(RMessage::Write { tag, count })
             }
             (ServerRequestKind::Clunk { .. }, ServerCompletion::Clunk) => {
@@ -368,81 +424,144 @@ impl<T> Server<T> {
     where
         T: FileTree,
     {
-        match &request.kind {
-            ServerRequestKind::Auth { afid, uname, aname } => self
-                .tree
-                .auth(*afid, uname, aname)
-                .map(|qid| ServerCompletion::Auth { qid }),
-            ServerRequestKind::Attach {
-                fid,
-                afid,
-                uname,
-                aname,
-            } => {
-                let qid = if *afid == NOFID {
-                    self.tree.attach(*fid, uname, aname)?
-                } else {
-                    self.tree.attach_with_auth(*fid, *afid, uname, aname)?
-                };
-                Ok(ServerCompletion::Attach { qid })
-            }
-            ServerRequestKind::Walk {
-                fid,
-                newfid,
-                wnames,
-                start,
-            } => self
-                .tree
-                .walk(*fid, *newfid, *start, wnames)
-                .map(|qids| ServerCompletion::Walk { qids }),
-            ServerRequestKind::Open { fid, qid, mode } => self
-                .tree
-                .open(*fid, *qid, *mode)
-                .map(ServerCompletion::Open),
-            ServerRequestKind::Create {
-                fid,
-                qid,
-                name,
-                perm,
-                mode,
-            } => self
-                .tree
-                .create(*fid, *qid, name, *perm, *mode)
-                .map(ServerCompletion::Create),
-            ServerRequestKind::Read {
-                fid,
-                qid,
-                offset,
-                count,
-            } => self
-                .tree
-                .read(*fid, *qid, *offset, *count)
-                .map(ServerCompletion::Read),
-            ServerRequestKind::Write {
-                fid,
-                qid,
-                offset,
-                data,
-            } => self
-                .tree
-                .write(*fid, *qid, *offset, data)
-                .map(|count| ServerCompletion::Write { count }),
-            ServerRequestKind::Clunk { fid, qid } => self
-                .tree
-                .clunk(*fid, *qid)
-                .map(|()| ServerCompletion::Clunk),
-            ServerRequestKind::Remove { fid, qid } => self
-                .tree
-                .remove(*fid, *qid)
-                .map(|()| ServerCompletion::Remove),
-            ServerRequestKind::Stat { qid, .. } => self
-                .tree
-                .stat(*qid)
-                .map(|stat| ServerCompletion::Stat { stat }),
-            ServerRequestKind::Wstat { fid, qid, stat } => self
-                .tree
-                .wstat(*fid, *qid, stat)
-                .map(|()| ServerCompletion::Wstat),
+        perform_file_tree_request(&mut self.tree, request)
+    }
+}
+
+pub(super) fn perform_file_tree_request<T: FileTree>(
+    tree: &mut T,
+    request: &ServerRequest,
+) -> Result<ServerCompletion> {
+    match &request.kind {
+        ServerRequestKind::Auth { afid, uname, aname } => tree
+            .auth(*afid, uname, aname)
+            .map(|qid| ServerCompletion::Auth { qid }),
+        ServerRequestKind::Attach {
+            fid,
+            afid,
+            uname,
+            aname,
+        } => {
+            let qid = if *afid == NOFID {
+                tree.attach(*fid, uname, aname)?
+            } else {
+                tree.attach_with_auth(*fid, *afid, uname, aname)?
+            };
+            Ok(ServerCompletion::Attach { qid })
         }
+        ServerRequestKind::Walk {
+            fid,
+            newfid,
+            wnames,
+            start,
+        } => tree
+            .walk(*fid, *newfid, *start, wnames)
+            .map(|qids| ServerCompletion::Walk { qids }),
+        ServerRequestKind::Open { fid, qid, mode } => {
+            tree.open(*fid, *qid, *mode).map(ServerCompletion::Open)
+        }
+        ServerRequestKind::Create {
+            fid,
+            qid,
+            name,
+            perm,
+            mode,
+        } => tree
+            .create(*fid, *qid, name, *perm, *mode)
+            .map(ServerCompletion::Create),
+        ServerRequestKind::Read {
+            fid,
+            qid,
+            offset,
+            count,
+        } => tree
+            .read(*fid, *qid, *offset, *count)
+            .map(ServerCompletion::Read),
+        ServerRequestKind::Write {
+            fid,
+            qid,
+            offset,
+            data,
+        } => tree
+            .write(*fid, *qid, *offset, data)
+            .map(|count| ServerCompletion::Write { count }),
+        ServerRequestKind::Clunk { fid, qid } => {
+            tree.clunk(*fid, *qid).map(|()| ServerCompletion::Clunk)
+        }
+        ServerRequestKind::Remove { fid, qid } => {
+            tree.remove(*fid, *qid).map(|()| ServerCompletion::Remove)
+        }
+        ServerRequestKind::Stat { qid, .. } => {
+            tree.stat(*qid).map(|stat| ServerCompletion::Stat { stat })
+        }
+        ServerRequestKind::Wstat { fid, qid, stat } => tree
+            .wstat(*fid, *qid, stat)
+            .map(|()| ServerCompletion::Wstat),
+    }
+}
+
+fn validate_open(state: FidState, open_mode: u8) -> Result<()> {
+    if state.open_mode().is_some() {
+        return Err(Error::from_static(EFIDOPEN));
+    }
+    if !mode::is_valid(open_mode) {
+        return Err(Error::from_static(EBADMODE));
+    }
+    if state.qid.is_dir() && !mode::is_directory_mode(open_mode) {
+        return Err(Error::from_static(EBADMODE));
+    }
+    Ok(())
+}
+
+fn validate_create(state: FidState, perm: u32, open_mode: u8) -> Result<()> {
+    if state.open_mode().is_some() {
+        return Err(Error::from_static(EFIDOPEN));
+    }
+    if !state.qid.is_dir() {
+        return Err(Error::from_static(ENOTDIR));
+    }
+    if !mode::is_valid(open_mode) {
+        return Err(Error::from_static(EBADMODE));
+    }
+    if perm & DMDIR != 0 && !mode::is_directory_mode(open_mode) {
+        return Err(Error::from_static(EBADMODE));
+    }
+    Ok(())
+}
+
+fn validate_read(state: FidState, offset: u64) -> Result<()> {
+    if state.qid.is_auth() {
+        return Ok(());
+    }
+    let open_mode = state
+        .open_mode()
+        .ok_or_else(|| Error::from_static(EFIDNOTOPEN))?;
+    if !mode::permits_read(open_mode) {
+        return Err(Error::from_static(EFIDNOTOPEN));
+    }
+    if state.qid.is_dir() && offset != 0 && offset != state.directory_offset() {
+        return Err(Error::from_static(EBADDIROFFSET));
+    }
+    Ok(())
+}
+
+fn validate_write(state: FidState) -> Result<()> {
+    if state.qid.is_auth() {
+        return Ok(());
+    }
+    let open_mode = state
+        .open_mode()
+        .ok_or_else(|| Error::from_static(EFIDNOTOPEN))?;
+    if state.qid.is_dir() || !mode::permits_write(open_mode) {
+        return Err(Error::from_static(EFIDNOTOPEN));
+    }
+    Ok(())
+}
+
+fn clamp_iounit(msize: u32, iounit: u32) -> u32 {
+    if iounit == 0 {
+        0
+    } else {
+        iounit.min(max_iounit(msize))
     }
 }

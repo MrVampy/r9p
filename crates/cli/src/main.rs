@@ -240,8 +240,10 @@ pub(crate) fn usage() -> ! {
     eprintln!("  session read --socket path namespace-path");
     eprintln!("  mount [--aname aname] [--uname uname] endpoint mountpoint");
     eprintln!("  mount ensure|status|stop --mountpoint path [--unit name]");
-    eprintln!("  serve [--bind address] root");
-    eprintln!("  export [--bind address] [--descriptor machine] root");
+    eprintln!("  serve [--bind address] [--max-fids count] [--writable] root");
+    eprintln!(
+        "  export [--bind address] [--max-fids count] [--writable] [--descriptor machine] root"
+    );
     eprintln!("  create name...");
     eprintln!("  mkdir name...");
     eprintln!("  con [-r] name");

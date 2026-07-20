@@ -1,10 +1,10 @@
 use r9p::{
-    blocking::{OTRUNC, OWRITE},
-    error::{Error, Result, ENOTDIR, EPERM},
+    error::{Error, Result, ENOENT, ENOTDIR, EPERM},
     fid::Fid,
     qid::{Qid, DMDIR},
     server::{FileTree, OpenFile, ReadData},
     stat::Stat,
+    OTRUNC, OWRITE,
 };
 use std::{
     collections::BTreeMap,
@@ -18,7 +18,7 @@ mod unix_io;
 use unix_io::{
     create_file_fd, duplicate_fd, fstat, is_read_only_mode, is_symlink, mkdir_child, node_from_fd,
     open_child, open_file_fd, open_read_fd, open_root, pread_file, pwrite_file, read_dir,
-    read_link, remove_path, rename_path, stat_from_libc, truncate_fd, Node, ENOENT_PROTOCOL,
+    read_link, remove_path, rename_path, stat_from_libc, truncate_fd, Node,
 };
 
 #[derive(Clone)]
@@ -74,6 +74,14 @@ impl LocalTree {
 }
 
 impl FileTree for LocalTree {
+    fn reset(&mut self) -> Result<()> {
+        let mut inner = self.lock()?;
+        inner.fids.clear();
+        inner.open_files.clear();
+        inner.stats.clear();
+        Ok(())
+    }
+
     fn attach(&mut self, fid: Fid, _uname: &[u8], _aname: &[u8]) -> Result<Qid> {
         let root = self.lock()?.root.clone();
         let root_fd = open_root(&root)?;
@@ -102,7 +110,7 @@ impl FileTree for LocalTree {
                     inner.remember(&child.stat);
                     current = child;
                 }
-                Err(error) if error.message() == ENOENT_PROTOCOL.as_bytes() => break,
+                Err(error) if error.message() == ENOENT.as_bytes() => break,
                 Err(error) => return Err(error),
             }
         }
@@ -187,7 +195,7 @@ impl FileTree for LocalTree {
             .stats
             .get(&qid.path)
             .cloned()
-            .ok_or_else(|| Error::from_static(ENOENT_PROTOCOL))
+            .ok_or_else(|| Error::from_static(ENOENT))
     }
 
     fn clunk(&mut self, fid: Fid, _qid: Qid) -> Result<()> {

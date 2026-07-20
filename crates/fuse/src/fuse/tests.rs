@@ -1,4 +1,5 @@
 use super::config::DEFAULT_CHANGE_FEED_POLL_INTERVAL;
+use super::dispatch::supported_init_flags;
 use super::ops::encode_dirents;
 use super::util::{
     dirent_size, flags_to_9p_mode, fuse_name_offset, fuse_open_flags, is_namespace_shape_error,
@@ -174,6 +175,20 @@ fn closed_9p_reader_errors_are_reconnect_candidates() {
 fn default_congestion_threshold_matches_kernel_ratio() {
     assert_eq!(default_congestion_threshold(12), 9);
     assert_eq!(default_congestion_threshold(1), 1);
+}
+
+#[test]
+fn init_does_not_claim_exportfs_stale_handle_support() {
+    const FUSE_EXPORT_SUPPORT_BIT: u32 = 1 << 4;
+
+    assert_eq!(supported_init_flags() & FUSE_EXPORT_SUPPORT_BIT, 0);
+}
+
+#[test]
+fn init_leaves_caller_umask_application_to_linux() {
+    const FUSE_DONT_MASK_BIT: u32 = 1 << 6;
+
+    assert_eq!(supported_init_flags() & FUSE_DONT_MASK_BIT, 0);
 }
 
 #[test]

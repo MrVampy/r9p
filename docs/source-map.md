@@ -11,11 +11,14 @@ This map defines the local sources agents should inspect before making source-sp
   - T-message and R-message shape.
   - Tags, `NOTAG`, and protocol variants.
 - `crates/core/src/fid.rs`
-  - Fid state and `NOFID`.
+  - Fid lifecycle state, open mode, directory offset, and `NOFID`.
+- `crates/core/src/mode.rs`
+  - Canonical 9P open-mode constants and access predicates.
 - `crates/core/src/flush.rs`
   - Live-tag table, duplicate-tag rejection, flush and stale-completion behavior.
 - `crates/core/src/server/`
-  - Generic file-tree trait, session state, open/read/write/stat/walk handling.
+  - Generic file-tree trait, connection adapters, session state, fid
+    reservations, and open/read/write/stat/walk handling.
 - `crates/core/src/client.rs`
   - Runtime-neutral client operation builder and response admission.
 - `crates/core/src/blocking.rs`
@@ -31,6 +34,9 @@ This map defines the local sources agents should inspect before making source-sp
   - 9P stat record shape and mode helpers.
 - `crates/core/tests/memory_tree.rs`
   - Minimal end-to-end server/client fixture.
+- `crates/core/tests/server_protocol.rs`
+  - Source-backed version, fid lifecycle, walk, directory-offset, and response
+    bound regressions.
 - `crates/cli/src/`
   - The `r9p` binary and one-shot client command dispatch.
 - `crates/cli/tests/cli_machine.rs`
@@ -39,8 +45,8 @@ This map defines the local sources agents should inspect before making source-sp
   - Canonical Linux FUSE bridge over the `r9p` client primitives, exposed as
     `r9p mount`.
 - `crates/fs/src/`
-  - Read-only local filesystem-backed 9P server adapter used by `r9p serve`
-    and `r9p export`.
+  - Local filesystem-backed 9P server adapter used by `r9p serve` and
+    `r9p export`; read-only by default with an explicit writable mode.
 
 Use these when the question is "what does `r9p` do now?"
 

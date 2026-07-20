@@ -3,7 +3,8 @@ use std::{borrow::Cow, fmt};
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub const EPERM: &str = "permission denied";
-pub const EEXIST: &str = "file does not exist";
+pub const ENOENT: &str = "file does not exist";
+pub const EEXIST: &str = "file exists";
 pub const ENOTDIR: &str = "not a directory";
 pub const EDEL: &str = "deleted window";
 pub const EBADCTL: &str = "ill-formed control message";
@@ -14,10 +15,14 @@ pub const EDUPTAG: &str = "duplicate tag";
 pub const EBADFID: &str = "unknown fid";
 pub const EFIDINUSE: &str = "fid already in use";
 pub const EFIDLIMIT: &str = "fid limit exceeded";
+pub const EFIDBUSY: &str = "fid busy";
+pub const EFIDOPEN: &str = "fid already open";
+pub const EFIDNOTOPEN: &str = "fid not open for requested operation";
 pub const EBADWNAME: &str = "bad walk name";
+pub const EBADMODE: &str = "invalid open mode";
+pub const EBADDIROFFSET: &str = "invalid directory offset";
 pub const EBADMSIZE: &str = "version: message size too small";
-pub const EBADVERSION: &str = "unrecognized 9P version";
-pub const ENOAUTH: &str = "acme: authentication not required";
+pub const ENOAUTH: &str = "authentication not required";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {

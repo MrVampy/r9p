@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, VecDeque},
     io,
-    io::{Read, Write},
+    io::Write,
     net::{TcpListener, TcpStream},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -14,7 +14,6 @@ use std::{
 use r9p::{
     codec,
     fid::Fid,
-    message::TMessage,
     qid::{Qid, DMDIR, QTFILE},
     server::{FileTree, OpenFile, ReadData, Server},
     stat::Stat,
@@ -420,7 +419,9 @@ fn serve_connections(
 
 fn serve_connection(mut stream: TcpStream, state: SharedNamespace) -> io::Result<()> {
     let mut server = Server::new(NamespaceTree::new(state));
-    while let Some(message) = read_tmessage(&mut stream)? {
+    while let Some(message) = codec::read_tmessage_checked(&mut stream, server.session().msize())
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?
+    {
         let reply = server.handle(message);
         let frame = codec::encode_rmessage_checked(&reply, server.session().msize())
             .map_err(|error| io::Error::other(format!("encode reply: {error}")))?;
@@ -435,35 +436,4 @@ fn serve_connection(mut stream: TcpStream, state: SharedNamespace) -> io::Result
         }
     }
     Ok(())
-}
-
-fn read_tmessage(stream: &mut TcpStream) -> io::Result<Option<TMessage>> {
-    let mut prefix = [0_u8; 4];
-    match stream.read_exact(&mut prefix) {
-        Ok(()) => {}
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset
-            ) =>
-        {
-            return Ok(None);
-        }
-        Err(error) => return Err(error),
-    }
-    let size = u32::from_le_bytes(prefix);
-    if size < codec::FRAME_HEADER_SIZE {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("short frame: {size}"),
-        ));
-    }
-    let frame_len = usize::try_from(size)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "frame too large"))?;
-    let mut frame = vec![0_u8; frame_len];
-    frame[..4].copy_from_slice(&prefix);
-    stream.read_exact(&mut frame[4..])?;
-    codec::decode_tmessage(&frame)
-        .map(Some)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
 }

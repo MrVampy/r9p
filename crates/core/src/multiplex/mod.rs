@@ -52,7 +52,6 @@ mod tests {
         qid::Qid,
         stat::Stat,
     };
-    use std::io::Read;
     use std::net::{TcpListener, TcpStream};
     use std::sync::{mpsc, Arc, Barrier, Mutex};
     use std::thread;
@@ -472,20 +471,8 @@ mod tests {
     }
 
     fn read_tmessage(stream: &mut TcpStream) -> Result<TMessage> {
-        let mut prefix = [0_u8; 4];
-        stream
-            .read_exact(&mut prefix)
-            .map_err(|error| io_error("read T-message size", error))?;
-        let size = u32::from_le_bytes(prefix);
-        let rest_len = usize::try_from(size - 4).map_err(|_| Error::from("oversized 9P frame"))?;
-        let mut frame = Vec::with_capacity(usize::try_from(size).unwrap_or(rest_len + 4));
-        frame.extend(prefix);
-        frame.resize(rest_len + 4, 0);
-        stream
-            .read_exact(&mut frame[4..])
-            .map_err(|error| io_error("read T-message body", error))?;
-        codec::decode_tmessage(&frame)
-            .map_err(|error| Error::from(format!("decode 9P T-message: {error}")))
+        codec::read_tmessage_checked(stream, codec::MAX_MSIZE)?
+            .ok_or_else(|| Error::from("9P client closed before request"))
     }
 
     #[test]

@@ -29,9 +29,9 @@ impl Stat {
             mtime: 0,
             length: 0,
             name: name.into(),
-            uid: b"racme".to_vec(),
-            gid: b"racme".to_vec(),
-            muid: b"racme".to_vec(),
+            uid: b"none".to_vec(),
+            gid: b"none".to_vec(),
+            muid: b"none".to_vec(),
         }
     }
 
@@ -231,6 +231,15 @@ impl<'a> Cursor<'a> {
 mod tests {
     use super::{decode_dir_entries, Stat};
     use crate::{error::Result, qid::Qid};
+
+    #[test]
+    fn stat_defaults_to_the_plan9_anonymous_identity() {
+        let stat = Stat::new("entry", Qid::file(1), 0o444);
+
+        assert_eq!(stat.uid, b"none");
+        assert_eq!(stat.gid, b"none");
+        assert_eq!(stat.muid, b"none");
+    }
 
     #[test]
     fn directory_entry_stream_decodes_concatenated_stats() -> Result<()> {

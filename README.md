@@ -11,7 +11,8 @@ Current surfaces and consumers:
   stats, listings, creates, removes, console-style interaction, and stable
   tab/hex machine-readable output.
 - `r9p mount`, the Linux FUSE-to-9P bridge.
-- `r9p serve`, a read-only local filesystem-backed 9P server.
+- `r9p serve`, a local filesystem-backed 9P server that is read-only by
+  default and explicitly writable with `--writable`.
 - `r9p export`, `serve` plus a machine-readable `r9p-export.v1` descriptor.
 - Racme serves an Acme-compatible 9P namespace through `r9p`.
 - Vault consumes `r9p` for its runtime listener, one-shot client operations,
@@ -46,6 +47,10 @@ connection teardown signal cancellation; worker capacity is released only
 when the handler actually exits. The application still owns listeners, socket
 creation and permissions, peer admission, TLS, and process lifecycle.
 
+Synchronous backends can use `serve_file_tree_connection`, which adapts a
+`FileTree` to the same checked framing, version reset, and connection state
+machine without duplicating a request loop.
+
 Blocking consumers that require finite transport calls can use
 `r9p::blocking::connect_endpoint_with_timeouts` with `ConnectionTimeouts` for
 TCP, `unix!`, or `unix:` endpoints. Distinct read and write timeouts are
@@ -74,8 +79,8 @@ r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] mkdir path...
 r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] con [-r] path
 r9p mount [--uname uname] [--aname aname] [--attr-timeout seconds] [--entry-timeout seconds] [--request-timeout seconds] [--lookup-timeout seconds] [--read-timeout seconds] [--write-timeout seconds] [--mutation-timeout seconds] [--control-timeout seconds] [--interrupt-timeout seconds] [--max-workers count] [--max-background count] [--congestion-threshold count] [--diagnostics-file path] [--diagnostics-capacity count] endpoint mountpoint
 r9p mount ensure|status|stop --mountpoint path [--unit name] [--status-file path] [--expect-endpoint endpoint] [--expect-change-feed path] [--expect-status-file path] [--attempts count] [-- mount args...]
-r9p serve [--bind address] root
-r9p export [--bind address] [--descriptor machine] [--descriptor-file path] [--auth boundary] [--descriptor-field key=value] root
+r9p serve [--bind address] [--max-fids count] [--writable] root
+r9p export [--bind address] [--max-fids count] [--writable] [--descriptor machine] [--descriptor-file path] [--auth boundary] [--descriptor-field key=value] root
 ```
 
 `-a` accepts `host:port`, `tcp!host!port`, bare hosts defaulting to port 564,

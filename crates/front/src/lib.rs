@@ -14,7 +14,11 @@ pub use model::{
 pub use tree::FrontTree;
 
 #[cfg(test)]
-pub(crate) use model::{ENOENT, ORCLOSE, ORDWR, OREAD, OTRUNC, OWRITE, ROOT_ID};
+pub(crate) use model::ROOT_ID;
+#[cfg(test)]
+pub(crate) use r9p::error::ENOENT;
+#[cfg(test)]
+pub(crate) use r9p::{ORCLOSE, ORDWR, OREAD, OTRUNC, OWRITE};
 
 #[cfg(test)]
 mod tests;

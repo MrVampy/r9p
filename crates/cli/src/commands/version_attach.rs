@@ -39,9 +39,9 @@ pub(crate) fn machine_version_cmd(config: Config, args: Vec<String>) -> CliResul
     let mut stream = dial_target(&target)?;
     let mut protocol = ProtocolClient::new();
     let request = protocol.version_request(target.config.msize);
-    let frame = codec::encode_tmessage(&request)?;
+    let frame = codec::encode_tmessage_checked(&request, target.config.msize)?;
     stream.write_all(&frame)?;
-    let response = read_response(&mut stream)?;
+    let response = read_response(&mut stream, target.config.msize)?;
 
     match protocol.receive(response)? {
         ClientResponse::Completion {

@@ -1,7 +1,10 @@
 use crate::{
     blocking::{connect_tcp_stream, path_names},
     client::{Client as ProtocolClient, ClientResponse, Completion, Op},
-    client_support::{io_error, op_fid, protocol_error, unexpected, write_in_chunks},
+    client_support::{
+        checked_advance_offset, checked_read_data, checked_write_count, io_error, op_fid,
+        protocol_error, unexpected, write_in_chunks,
+    },
     codec,
     error::{Error, Result},
     fid::Fid,
@@ -200,8 +203,14 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
             return Err(Error::from("multiplexed calls require a real tag"));
         }
 
-        let frame = codec::encode_tmessage(&message)
-            .map_err(|error| Error::from(format!("encode 9P frame: {error}")))?;
+        let max_frame_size = lock(&self.inner.protocol, "lock 9P protocol client")?.msize();
+        let frame = match codec::encode_tmessage_checked(&message, max_frame_size) {
+            Ok(frame) => frame,
+            Err(error) => {
+                lock(&self.inner.protocol, "lock 9P protocol client")?.abandon(tag);
+                return Err(Error::from(format!("encode 9P frame: {error}")));
+            }
+        };
         let (sender, receiver) = mpsc::channel();
         {
             let mut waiters = lock(&self.inner.waiters, "lock 9P waiter table")?;
@@ -216,6 +225,8 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
         if let Err(error) = write_result {
             let _ = lock(&self.inner.waiters, "lock 9P waiter table")
                 .map(|mut waiters| waiters.remove(&tag));
+            let _ = lock(&self.inner.protocol, "lock 9P protocol client")
+                .map(|mut protocol| protocol.abandon(tag));
             return Err(error);
         }
 
@@ -390,7 +401,7 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
             protocol.read(fid, offset, count).map_err(protocol_error)?
         };
         match self.call_op(op)? {
-            Completion::Read { data } => Ok(data),
+            Completion::Read { data } => checked_read_data(data, count),
             other => Err(unexpected("Rread", other)),
         }
     }
@@ -408,7 +419,7 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
             protocol.read(fid, offset, count).map_err(protocol_error)?
         };
         match self.call_op_timeout(op, timeout)? {
-            Completion::Read { data } => Ok(data),
+            Completion::Read { data } => checked_read_data(data, count),
             other => Err(unexpected("Rread", other)),
         }
     }
@@ -423,7 +434,7 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
             }
             let n = u32::try_from(data.len()).map_err(|_| Error::from("read count overflow"))?;
             out.extend(data);
-            offset = offset.saturating_add(u64::from(n));
+            offset = checked_advance_offset(offset, u64::from(n))?;
             remaining = remaining.saturating_sub(n);
         }
         Ok(out)
@@ -445,7 +456,7 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
             }
             let n = u32::try_from(data.len()).map_err(|_| Error::from("read count overflow"))?;
             out.extend(data);
-            offset = offset.saturating_add(u64::from(n));
+            offset = checked_advance_offset(offset, u64::from(n))?;
             remaining = remaining.saturating_sub(n);
         }
         Ok(out)
@@ -477,7 +488,7 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
                 .map_err(protocol_error)?
         };
         match self.call_op(op)? {
-            Completion::Write { count } => Ok(count),
+            Completion::Write { count } => checked_write_count(count, data.len()),
             other => Err(unexpected("Rwrite", other)),
         }
     }
@@ -496,7 +507,7 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
                 .map_err(protocol_error)?
         };
         match self.call_op_timeout(op, timeout)? {
-            Completion::Write { count } => Ok(count),
+            Completion::Write { count } => checked_write_count(count, data.len()),
             other => Err(unexpected("Rwrite", other)),
         }
     }

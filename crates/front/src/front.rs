@@ -2,11 +2,10 @@ use crate::model::{
     canonical_root_path, normalise_request_prefix, Body, CreateRelayReply, CreateRelayRequest,
     Intake, IntakeRequest, LogBody, PrincipalRoot, ProtocolConfig, PushedDirectoryMetadata,
     PushedFileMetadata, RemoveRelayReply, RequestReply, State, WriteRelayReply, WstatRelayReply,
-    ENOENT, ENOTDIR, EPERM,
 };
 use crate::tree::FrontTree;
 use r9p::codec::{MAX_MSIZE, MIN_MSIZE};
-use r9p::error::{Error, Result};
+use r9p::error::{Error, Result, ENOENT, ENOTDIR, EPERM};
 use r9p::server::ReadData;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

@@ -2,6 +2,7 @@
 
 use super::wire::{FOPEN_CACHE_DIR, FOPEN_DIRECT_IO, FOPEN_KEEP_CACHE};
 use crate::error::Error;
+use r9p::mode;
 use session::{ORDWR, OREAD, OTRUNC, OWRITE};
 use std::{mem::size_of, time::Duration};
 
@@ -45,15 +46,11 @@ pub(super) fn flags_to_9p_mode(flags: u32) -> u8 {
 pub(super) fn fuse_open_flags(is_dir_open: bool, mode: u8) -> u32 {
     if is_dir_open {
         FOPEN_KEEP_CACHE | FOPEN_CACHE_DIR
-    } else if open_mode_reads(mode) {
+    } else if mode::permits_read(mode) {
         FOPEN_DIRECT_IO
     } else {
         0
     }
-}
-
-fn open_mode_reads(mode: u8) -> bool {
-    matches!(mode & 0x03, OREAD | ORDWR)
 }
 
 pub(super) fn is_transport_error(error: &impl ErrorView) -> bool {

@@ -1,6 +1,6 @@
 use std::{
     fs as std_fs,
-    io::{Read, Write},
+    io::Write,
     net::TcpListener,
     os::unix::fs::FileTypeExt,
     os::unix::net::UnixListener,
@@ -10,10 +10,10 @@ use std::{
 
 use fs::{LocalTree, LocalTreeConfig};
 use r9p::{
-    codec,
     export_descriptor::{ExportDescriptor, ExportMode, Protocol, TransportClass},
-    message::TMessage,
-    server::{Server, ServerConfig},
+    server::{
+        serve_file_tree_connection as serve_protocol_file_tree, ConnectionStream, ServerConfig,
+    },
 };
 
 use crate::errors::{cli_error, CliResult};
@@ -111,7 +111,7 @@ impl BoundListener {
 
 fn spawn_connection<S>(stream: S, config: ServeConfig)
 where
-    S: Read + Write + Send + 'static,
+    S: ConnectionStream,
 {
     thread::spawn(move || {
         if let Err(error) = serve_connection(stream, config) {
@@ -184,9 +184,9 @@ fn remove_stale_socket(path: &Path) -> CliResult<()> {
         .map_err(|error| cli_error(format!("remove stale socket {}: {error}", path.display())))
 }
 
-fn serve_connection<S>(mut stream: S, config: ServeConfig) -> CliResult<()>
+fn serve_connection<S>(stream: S, config: ServeConfig) -> CliResult<()>
 where
-    S: Read + Write,
+    S: ConnectionStream,
 {
     let tree = LocalTree::open_with_config(
         &config.root,
@@ -195,62 +195,17 @@ where
         },
     )
     .map_err(|error| cli_error(format!("open export root: {error}")))?;
-    let mut server = Server::with_config(
-        tree,
+    serve_protocol_file_tree(
+        stream,
         ServerConfig {
             default_msize: config.msize,
             max_msize: config.msize,
             max_fids: config.max_fids,
             ..ServerConfig::default()
         },
-    );
-
-    loop {
-        let message = match read_tmessage(&mut stream) {
-            Ok(message) => message,
-            Err(error) if is_eof_error(error.as_ref()) => return Ok(()),
-            Err(error) => return Err(error),
-        };
-        let reply = server.handle(message);
-        let frame = codec::encode_rmessage_checked(&reply, server.session().msize())
-            .map_err(|error| cli_error(format!("encode 9P reply: {error}")))?;
-        stream
-            .write_all(&frame)
-            .map_err(|error| cli_error(format!("write 9P reply: {error}")))?;
-        stream
-            .flush()
-            .map_err(|error| cli_error(format!("flush 9P reply: {error}")))?;
-    }
-}
-
-fn read_tmessage(stream: &mut impl Read) -> CliResult<TMessage> {
-    let mut prefix = [0_u8; 4];
-    stream.read_exact(&mut prefix).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::UnexpectedEof {
-            Box::new(error) as Box<dyn std::error::Error>
-        } else {
-            cli_error(format!("read 9P frame size: {error}"))
-        }
-    })?;
-    let size = u32::from_le_bytes(prefix);
-    if size < codec::FRAME_HEADER_SIZE {
-        return Err(cli_error(format!("short 9P frame {size}")));
-    }
-    let rest_len = usize::try_from(size - 4)?;
-    let mut frame = Vec::with_capacity(rest_len + 4);
-    frame.extend(prefix);
-    frame.resize(rest_len + 4, 0);
-    stream
-        .read_exact(&mut frame[4..])
-        .map_err(|error| cli_error(format!("read 9P frame body: {error}")))?;
-    Ok(codec::decode_tmessage(&frame)?)
-}
-
-fn is_eof_error(error: &(dyn std::error::Error + 'static)) -> bool {
-    let Some(io_error) = error.downcast_ref::<std::io::Error>() else {
-        return false;
-    };
-    io_error.kind() == std::io::ErrorKind::UnexpectedEof
+        tree,
+    )
+    .map_err(|error| cli_error(format!("serve 9P connection: {error}")))
 }
 
 fn export_descriptor(config: &ExportConfig, bound: &BoundListener) -> CliResult<ExportDescriptor> {

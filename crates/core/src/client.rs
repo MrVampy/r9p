@@ -35,6 +35,7 @@ pub enum ClientResponse {
 pub struct Client {
     msize: u32,
     version: Vec<u8>,
+    requested_msize: Option<u32>,
     next_tag: Tag,
     next_fid: Fid,
     pending: RequestTable,
@@ -52,6 +53,7 @@ impl Client {
         Self {
             msize: crate::codec::DEFAULT_MSIZE,
             version: b"9P2000".to_vec(),
+            requested_msize: None,
             next_tag: 0,
             next_fid: 1,
             pending: RequestTable::new(),
@@ -70,6 +72,8 @@ impl Client {
     pub fn version_request(&mut self, msize: u32) -> TMessage {
         self.pending.reset();
         self.flush_targets.clear();
+        self.version = b"unknown".to_vec();
+        self.requested_msize = Some(msize);
         TMessage::Version {
             tag: NOTAG,
             msize,
@@ -215,6 +219,15 @@ impl Client {
         })
     }
 
+    pub(crate) fn abandon(&mut self, tag: Tag) {
+        if tag == NOTAG {
+            self.requested_msize = None;
+        } else {
+            let _ = self.pending.flush(tag);
+            self.flush_targets.remove(&tag);
+        }
+    }
+
     pub fn receive(&mut self, response: RMessage) -> Result<ClientResponse> {
         match response {
             RMessage::Version {
@@ -222,6 +235,18 @@ impl Client {
                 msize,
                 version,
             } => {
+                if tag != NOTAG {
+                    return Err(Error::from("Rversion did not use NOTAG"));
+                }
+                let requested_msize = self
+                    .requested_msize
+                    .take()
+                    .ok_or_else(|| Error::from("unsolicited Rversion"))?;
+                if msize < crate::codec::MIN_MSIZE || msize > requested_msize {
+                    return Err(Error::from(format!(
+                        "invalid negotiated msize {msize} for request {requested_msize}"
+                    )));
+                }
                 self.msize = msize;
                 self.version = version.clone();
                 self.pending.reset();
@@ -232,7 +257,13 @@ impl Client {
                 })
             }
             RMessage::Error { tag, ename } => {
-                let _ = self.pending.flush(tag);
+                if tag == NOTAG {
+                    self.requested_msize
+                        .take()
+                        .ok_or_else(|| Error::from("unknown response tag"))?;
+                } else {
+                    self.finish(tag)?;
+                }
                 self.flush_targets.remove(&tag);
                 Ok(ClientResponse::Error { tag, ename })
             }
@@ -269,6 +300,7 @@ impl Client {
             }
             RMessage::Open { tag, qid, iounit } => {
                 self.finish(tag)?;
+                validate_iounit(self.msize, iounit)?;
                 Ok(ClientResponse::Completion {
                     tag,
                     completion: Completion::Open { qid, iounit },
@@ -276,6 +308,7 @@ impl Client {
             }
             RMessage::Create { tag, qid, iounit } => {
                 self.finish(tag)?;
+                validate_iounit(self.msize, iounit)?;
                 Ok(ClientResponse::Completion {
                     tag,
                     completion: Completion::Create { qid, iounit },
@@ -359,6 +392,16 @@ impl Client {
     }
 }
 
+fn validate_iounit(msize: u32, iounit: u32) -> Result<()> {
+    if iounit != 0 && iounit > crate::codec::max_iounit(msize) {
+        Err(Error::from(format!(
+            "iounit {iounit} exceeds negotiated msize {msize}"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Op {
     pub tag: Tag,
@@ -369,7 +412,92 @@ pub struct Op {
 #[cfg(test)]
 mod tests {
     use super::{Client, Op};
-    use crate::{message::TMessage, qid::Qid, stat::Stat};
+    use crate::{message::TMessage, qid::Qid, stat::Stat, RMessage, NOTAG};
+
+    #[test]
+    fn version_reply_must_match_an_outstanding_notag_negotiation() {
+        let mut client = Client::new();
+        assert!(client
+            .receive(RMessage::Version {
+                tag: NOTAG,
+                msize: 8192,
+                version: b"9P2000".to_vec(),
+            })
+            .is_err());
+
+        let _request = client.version_request(8192);
+        assert!(client
+            .receive(RMessage::Version {
+                tag: 1,
+                msize: 8192,
+                version: b"9P2000".to_vec(),
+            })
+            .is_err());
+    }
+
+    #[test]
+    fn version_reply_cannot_expand_or_shrink_below_the_protocol_minimum() {
+        let mut client = Client::new();
+        let _request = client.version_request(8192);
+        assert!(client
+            .receive(RMessage::Version {
+                tag: NOTAG,
+                msize: 8193,
+                version: b"9P2000".to_vec(),
+            })
+            .is_err());
+
+        let _request = client.version_request(8192);
+        assert!(client
+            .receive(RMessage::Version {
+                tag: NOTAG,
+                msize: crate::codec::MIN_MSIZE - 1,
+                version: b"9P2000".to_vec(),
+            })
+            .is_err());
+    }
+
+    #[test]
+    fn error_reply_requires_a_live_request_tag() {
+        let mut client = Client::new();
+
+        assert!(client
+            .receive(RMessage::Error {
+                tag: 7,
+                ename: b"late".to_vec(),
+            })
+            .is_err());
+    }
+
+    #[test]
+    fn locally_abandoned_request_does_not_leave_a_live_tag() {
+        let mut client = Client::new();
+        let request = client.stat(1).expect("stat request");
+        client.abandon(request.tag);
+
+        assert!(client
+            .receive(RMessage::Stat {
+                tag: request.tag,
+                stat: Stat::new("late", Qid::file(1), 0o444),
+            })
+            .is_err());
+    }
+
+    #[test]
+    fn open_reply_iounit_cannot_exceed_the_negotiated_payload() {
+        let mut client = Client::new();
+        let request = client.open(1, crate::OREAD).expect("open request");
+        let tag = request.tag;
+
+        assert!(client
+            .receive(RMessage::Open {
+                tag,
+                qid: Qid::file(1),
+                iounit: crate::codec::max_iounit(client.msize()) + 1,
+            })
+            .is_err());
+        assert!(!client.pending.is_live(tag));
+    }
 
     #[test]
     fn builds_create_remove_and_wstat_ops() {

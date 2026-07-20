@@ -5,10 +5,10 @@ use r9p::{
     error::{Error, Result},
     fid::{Fid, NOFID},
     message::{RMessage, TMessage, NOTAG},
-    qid::{Qid, DMDIR},
+    qid::Qid,
     server::{
-        serve_connection, ConnectionHandler, ServerCompletion, ServerConfig, ServerRequest,
-        ServerRequestKind,
+        serve_connection, ConnectionHandler, OpenFile, ServerCompletion, ServerConfig,
+        ServerRequest, ServerRequestKind,
     },
     stat::Stat,
 };
@@ -122,9 +122,13 @@ impl ConnectionHandler for TestHandler {
             ServerRequestKind::Attach { .. } => {
                 let path = self.next_attach.fetch_add(1, Ordering::SeqCst) + 1;
                 Ok(ServerCompletion::Attach {
-                    qid: Qid::dir(path),
+                    qid: Qid::file(path),
                 })
             }
+            ServerRequestKind::Open { qid, .. } => Ok(ServerCompletion::Open(OpenFile {
+                qid: *qid,
+                iounit: 0,
+            })),
             ServerRequestKind::Read { qid, .. } => {
                 let mut reads = self
                     .reads
@@ -163,7 +167,7 @@ impl ConnectionHandler for TestHandler {
             }
             ServerRequestKind::Clunk { .. } => Ok(ServerCompletion::Clunk),
             ServerRequestKind::Stat { qid, .. } => Ok(ServerCompletion::Stat {
-                stat: Stat::new(".", *qid, DMDIR | 0o500),
+                stat: Stat::new("value", *qid, 0o400),
             }),
             _ => Err(Error::from_static("unsupported test request")),
         }
@@ -222,12 +226,13 @@ fn start_server_with_config(
 }
 
 fn send(stream: &mut UnixStream, message: TMessage) -> TestResult<()> {
-    codec::write_tmessage(stream, &message)?;
+    codec::write_tmessage_checked(stream, codec::MAX_MSIZE, &message)?;
     Ok(())
 }
 
 fn receive(stream: &mut UnixStream) -> TestResult<RMessage> {
-    codec::read_rmessage(stream)?.ok_or_else(|| "server closed without a reply".into())
+    codec::read_rmessage_checked(stream, codec::MAX_MSIZE)?
+        .ok_or_else(|| "server closed without a reply".into())
 }
 
 fn negotiate(stream: &mut UnixStream) -> TestResult<()> {
@@ -261,12 +266,25 @@ fn attach(stream: &mut UnixStream, tag: u16, fid: Fid) -> TestResult<Qid> {
             aname: Vec::new(),
         },
     )?;
-    match receive(stream)? {
+    let qid = match receive(stream)? {
         RMessage::Attach {
             tag: reply_tag,
             qid,
-        } if reply_tag == tag => Ok(qid),
-        reply => Err(format!("unexpected attach reply: {reply:?}").into()),
+        } if reply_tag == tag => qid,
+        reply => return Err(format!("unexpected attach reply: {reply:?}").into()),
+    };
+    let open_tag = tag.saturating_add(1000);
+    send(
+        stream,
+        TMessage::Open {
+            tag: open_tag,
+            fid,
+            mode: r9p::OREAD,
+        },
+    )?;
+    match receive(stream)? {
+        RMessage::Open { tag, .. } if tag == open_tag => Ok(qid),
+        reply => Err(format!("unexpected open reply: {reply:?}").into()),
     }
 }
 

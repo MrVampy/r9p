@@ -1,8 +1,9 @@
 use r9p::{
-    blocking::{OEXEC, ORDWR, OREAD, OTRUNC, OWRITE},
-    error::{Error, Result, EEXIST, EPERM},
+    error::{Error, Result, ENOENT, EPERM},
+    mode,
     qid::{Qid, DMDIR, DMSYMLINK, QTFILE, QTSYMLINK},
     stat::Stat,
+    OEXEC, ORCLOSE, ORDWR, OREAD, OTRUNC, OWRITE,
 };
 use std::{
     ffi::{CStr, CString, OsStr},
@@ -15,7 +16,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(super) const ENOENT_PROTOCOL: &str = EEXIST;
 const EMFILE_PROTOCOL: &str = "too many open files";
 
 pub(super) struct Node {
@@ -32,30 +32,35 @@ impl Node {
     }
 }
 
-pub(super) fn is_read_only_mode(mode: u8) -> bool {
-    let access = mode & 0x03;
-    let flags = mode & !0x03;
-    matches!(access, OREAD | OEXEC) && flags == 0
+pub(super) fn is_read_only_mode(open_mode: u8) -> bool {
+    mode::is_valid(open_mode)
+        && matches!(open_mode & mode::ACCESS_MASK, OREAD | OEXEC)
+        && open_mode & (OTRUNC | ORCLOSE) == 0
 }
 
-fn validate_mutable_mode(mode: u8) -> Result<()> {
-    let flags = mode & !(0x03 | OTRUNC);
-    if flags == 0 {
+fn validate_local_open_mode(open_mode: u8) -> Result<()> {
+    if mode::is_valid(open_mode) && open_mode & ORCLOSE == 0 {
         Ok(())
     } else {
         Err(Error::from_static(EPERM))
     }
 }
 
-fn libc_open_flags(mode: u8) -> Result<libc::c_int> {
-    validate_mutable_mode(mode)?;
-    let access = match mode & 0x03 {
+fn libc_open_flags(open_mode: u8) -> Result<libc::c_int> {
+    validate_local_open_mode(open_mode)?;
+    let access = match open_mode & mode::ACCESS_MASK {
         OREAD | OEXEC => libc::O_RDONLY,
         OWRITE => libc::O_WRONLY,
         ORDWR => libc::O_RDWR,
         _ => return Err(Error::from_static(EPERM)),
     };
-    Ok(access | libc::O_CLOEXEC | if mode & OTRUNC != 0 { libc::O_TRUNC } else { 0 })
+    Ok(access
+        | libc::O_CLOEXEC
+        | if open_mode & OTRUNC != 0 {
+            libc::O_TRUNC
+        } else {
+            0
+        })
 }
 
 pub(super) fn open_root(root: &Path) -> Result<OwnedFd> {
@@ -72,9 +77,9 @@ pub(super) fn open_root(root: &Path) -> Result<OwnedFd> {
 
 pub(super) fn open_child(parent: RawFd, name: &[u8]) -> Result<Node> {
     if name == b"." || name == b".." {
-        return Err(Error::from_static(ENOENT_PROTOCOL));
+        return Err(Error::from_static(ENOENT));
     }
-    let c_name = CString::new(name).map_err(|_| Error::from_static(ENOENT_PROTOCOL))?;
+    let c_name = CString::new(name).map_err(|_| Error::from_static(ENOENT))?;
     let raw = unsafe {
         libc::openat(
             parent,
@@ -112,16 +117,16 @@ pub(super) fn create_file_fd(parent: RawFd, name: &[u8], perm: u32, mode: u8) ->
 
 fn child_name(name: &[u8]) -> Result<CString> {
     if name.is_empty() || name == b"." || name == b".." || name.contains(&b'/') {
-        return Err(Error::from_static(ENOENT_PROTOCOL));
+        return Err(Error::from_static(ENOENT));
     }
-    CString::new(name).map_err(|_| Error::from_static(ENOENT_PROTOCOL))
+    CString::new(name).map_err(|_| Error::from_static(ENOENT))
 }
 
 pub(super) fn node_from_fd(fd: OwnedFd, name: Vec<u8>) -> Result<Node> {
     let st = fstat(fd.as_raw_fd())?;
     let kind = st.st_mode & libc::S_IFMT;
     if kind != libc::S_IFREG && kind != libc::S_IFDIR && kind != libc::S_IFLNK {
-        return Err(Error::from_static(ENOENT_PROTOCOL));
+        return Err(Error::from_static(ENOENT));
     }
     let stat = stat_from_libc(&st, name);
     Ok(Node { fd, stat })
@@ -295,12 +300,10 @@ pub(super) fn remove_path(path_fd: RawFd, is_dir: bool) -> Result<()> {
 
 pub(super) fn rename_path(path_fd: RawFd, new_name: &[u8]) -> Result<()> {
     if new_name.is_empty() || new_name == b"." || new_name == b".." || new_name.contains(&b'/') {
-        return Err(Error::from_static(ENOENT_PROTOCOL));
+        return Err(Error::from_static(ENOENT));
     }
     let source = proc_fd_path(path_fd)?;
-    let parent = source
-        .parent()
-        .ok_or_else(|| Error::from_static(ENOENT_PROTOCOL))?;
+    let parent = source.parent().ok_or_else(|| Error::from_static(ENOENT))?;
     let target = parent.join(OsStr::from_bytes(new_name));
     fs::rename(&source, &target).map_err(|error| map_io("rename path", error))
 }
@@ -334,7 +337,7 @@ fn owned_fd(raw: RawFd) -> std::io::Result<OwnedFd> {
 
 fn map_io(context: &'static str, error: std::io::Error) -> Error {
     match error.raw_os_error() {
-        Some(libc::ENOENT | libc::ENOTDIR | libc::ELOOP) => Error::from_static(ENOENT_PROTOCOL),
+        Some(libc::ENOENT | libc::ENOTDIR | libc::ELOOP) => Error::from_static(ENOENT),
         Some(libc::EACCES | libc::EPERM) => Error::from_static(EPERM),
         Some(libc::EMFILE | libc::ENFILE) => Error::from_static(EMFILE_PROTOCOL),
         _ => Error::from(format!("{context}: {error}")),

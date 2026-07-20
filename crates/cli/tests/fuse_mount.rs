@@ -17,7 +17,6 @@ use r9p::{
     blocking::ORDWR,
     codec,
     fid::Fid,
-    message::TMessage,
     qid::{Qid, DMDIR},
     server::{FileTree, OpenFile, ReadData, Server},
     stat::Stat,
@@ -878,7 +877,9 @@ impl FileTree for SlowTree {
 
 fn serve_file_tree_connection<T: FileTree>(mut stream: TcpStream, tree: T) -> io::Result<()> {
     let mut server = Server::new(tree);
-    while let Some(message) = read_tmessage(&mut stream)? {
+    while let Some(message) = codec::read_tmessage_checked(&mut stream, server.session().msize())
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?
+    {
         let reply = server.handle(message);
         let frame = codec::encode_rmessage_checked(&reply, server.session().msize())
             .map_err(|error| io::Error::other(format!("encode reply: {error}")))?;
@@ -903,38 +904,6 @@ fn slice_bytes(data: &[u8], offset: u64, count: u32) -> R9pResult<ReadData> {
         .saturating_add(usize::try_from(count).unwrap_or(usize::MAX))
         .min(data.len());
     Ok(ReadData::Bytes(data[start..end].to_vec()))
-}
-
-fn read_tmessage(stream: &mut TcpStream) -> io::Result<Option<TMessage>> {
-    let mut prefix = [0_u8; 4];
-    match stream.read_exact(&mut prefix) {
-        Ok(()) => {}
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset
-            ) =>
-        {
-            return Ok(None);
-        }
-        Err(error) => return Err(error),
-    }
-    let size = u32::from_le_bytes(prefix);
-    if size < codec::FRAME_HEADER_SIZE {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("short frame: {size}"),
-        ));
-    }
-    let rest_len = usize::try_from(size - 4)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "frame too large"))?;
-    let mut frame = Vec::with_capacity(rest_len + 4);
-    frame.extend(prefix);
-    frame.resize(rest_len + 4, 0);
-    stream.read_exact(&mut frame[4..])?;
-    codec::decode_tmessage(&frame)
-        .map(Some)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
 }
 
 impl Drop for ChildGuard {

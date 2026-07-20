@@ -61,7 +61,7 @@ fn bounded_tcp_client_times_out_when_version_reply_stalls() {
     });
 
     let (mut stalled_stream, _) = listener.accept().expect("server should accept client");
-    let request = codec::read_tmessage(&mut stalled_stream)
+    let request = codec::read_tmessage_checked(&mut stalled_stream, codec::MAX_MSIZE)
         .expect("version request should decode")
         .expect("client should send a version request");
     assert!(matches!(request, TMessage::Version { .. }));
@@ -95,7 +95,7 @@ fn bounded_tcp_client_times_out_when_attach_reply_stalls() {
 
     let (mut stalled_stream, _) = listener.accept().expect("server should accept client");
     reply_to_version(&mut stalled_stream);
-    let request = codec::read_tmessage(&mut stalled_stream)
+    let request = codec::read_tmessage_checked(&mut stalled_stream, codec::MAX_MSIZE)
         .expect("attach request should decode")
         .expect("client should send an attach request");
     assert!(matches!(request, TMessage::Attach { .. }));
@@ -118,7 +118,7 @@ fn bounded_tcp_client_applies_distinct_transport_timeouts() {
     let server = thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("server should accept client");
         reply_to_version(&mut stream);
-        let request = codec::read_tmessage(&mut stream)
+        let request = codec::read_tmessage_checked(&mut stream, codec::MAX_MSIZE)
             .expect("attach request should decode")
             .expect("client should send an attach request");
         let tag = match request {
@@ -200,7 +200,7 @@ fn bounded_endpoint_client_connects_over_unix_socket() {
     let server = thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("server should accept client");
         reply_to_version(&mut stream);
-        let request = codec::read_tmessage(&mut stream)
+        let request = codec::read_tmessage_checked(&mut stream, codec::MAX_MSIZE)
             .expect("attach request should decode")
             .expect("client should send an attach request");
         let tag = match request {
@@ -247,7 +247,7 @@ fn short_test_timeouts() -> ConnectionTimeouts {
 }
 
 fn reply_to_version(stream: &mut (impl Read + Write)) {
-    let request = codec::read_tmessage(stream)
+    let request = codec::read_tmessage_checked(stream, codec::MAX_MSIZE)
         .expect("version request should decode")
         .expect("client should send a version request");
     let (tag, msize) = match request {

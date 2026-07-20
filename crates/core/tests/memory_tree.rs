@@ -11,11 +11,7 @@ use r9p::{
 };
 
 #[cfg(unix)]
-use std::{
-    io::{Read, Write},
-    os::unix::net::UnixStream,
-    thread,
-};
+use std::{os::unix::net::UnixStream, thread};
 
 #[cfg(unix)]
 type TestResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -200,6 +196,12 @@ fn memory_tree_walk_open_read_with_in_tree_client() -> Result<()> {
 #[test]
 fn memory_tree_is_not_acme_or_racme_core() -> Result<()> {
     let mut server = Server::new(MemoryTree::new());
+    let version = server.handle(TMessage::Version {
+        tag: r9p::NOTAG,
+        msize: 8192,
+        version: b"9P2000".to_vec(),
+    });
+    assert!(matches!(version, RMessage::Version { .. }));
     let reply = server.handle(TMessage::Attach {
         tag: 1,
         fid: 1,
@@ -278,34 +280,9 @@ fn serve_blocking_connection(stream: UnixStream) -> TestResult<()> {
 #[cfg(unix)]
 fn serve_blocking_connection_with_tree(mut stream: UnixStream, tree: MemoryTree) -> TestResult<()> {
     let mut server = Server::new(tree);
-    while let Some(message) = read_tmessage(&mut stream)? {
+    while let Some(message) = codec::read_tmessage_checked(&mut stream, server.session().msize())? {
         let reply = server.handle(message);
-        let frame = codec::encode_rmessage_checked(&reply, server.session().msize())?;
-        stream.write_all(&frame)?;
+        codec::write_rmessage_checked(&mut stream, server.session().msize(), &reply)?;
     }
     Ok(())
-}
-
-#[cfg(unix)]
-fn read_tmessage(stream: &mut UnixStream) -> TestResult<Option<TMessage>> {
-    let mut prefix = [0_u8; 4];
-    match stream.read_exact(&mut prefix) {
-        Ok(()) => {}
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset
-            ) =>
-        {
-            return Ok(None);
-        }
-        Err(error) => return Err(Box::new(error)),
-    }
-    let size = u32::from_le_bytes(prefix);
-    let rest_len = usize::try_from(size - 4)?;
-    let mut frame = Vec::with_capacity(rest_len + 4);
-    frame.extend(prefix);
-    frame.resize(rest_len + 4, 0);
-    stream.read_exact(&mut frame[4..])?;
-    Ok(Some(codec::decode_tmessage(&frame)?))
 }

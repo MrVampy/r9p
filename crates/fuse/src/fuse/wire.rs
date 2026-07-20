@@ -3,8 +3,8 @@
 //! The struct shapes here mirror Linux kernel `fuse_kernel.h` at protocol
 //! version 7.31 (Linux 5.4). That version is widely available, predates the
 //! `FUSE_INIT_EXT`/`flags2` extension envelope, and unlocks the capabilities
-//! r9p mount cares about: `ATOMIC_O_TRUNC`, `EXPORT_SUPPORT`, `DONT_MASK`,
-//! `AUTO_INVAL_DATA`, and `PARALLEL_DIROPS`.
+//! r9p mount cares about: `ATOMIC_O_TRUNC`, `AUTO_INVAL_DATA`, and
+//! `PARALLEL_DIROPS`.
 
 pub(super) const FUSE_LOOKUP: u32 = 1;
 pub(super) const FUSE_FORGET: u32 = 2;
@@ -55,9 +55,7 @@ pub(super) const FATTR_FH: u32 = 1 << 6;
 
 pub(super) const FUSE_ASYNC_READ: u32 = 1 << 0;
 pub(super) const FUSE_ATOMIC_O_TRUNC: u32 = 1 << 3;
-pub(super) const FUSE_EXPORT_SUPPORT: u32 = 1 << 4;
 pub(super) const FUSE_BIG_WRITES: u32 = 1 << 5;
-pub(super) const FUSE_DONT_MASK: u32 = 1 << 6;
 pub(super) const FUSE_AUTO_INVAL_DATA: u32 = 1 << 12;
 pub(super) const FUSE_DO_READDIRPLUS: u32 = 1 << 13;
 pub(super) const FUSE_READDIRPLUS_AUTO: u32 = 1 << 14;

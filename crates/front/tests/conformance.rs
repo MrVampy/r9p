@@ -17,7 +17,6 @@ use r9p::qid::DMDIR;
 use r9p::stat::decode_dir_entries;
 use r9p::{codec, Error};
 use std::ffi::c_char;
-use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -1145,28 +1144,10 @@ fn clunk_interrupts_blocked_log_read() {
 }
 
 fn write_tmessage(stream: &mut TcpStream, message: &TMessage) -> Result<(), Error> {
-    let frame = codec::encode_tmessage(message)?;
-    stream
-        .write_all(&frame)
-        .map_err(|error| Error::new(format!("write 9P frame: {error}")))?;
-    stream
-        .flush()
-        .map_err(|error| Error::new(format!("flush 9P frame: {error}")))
+    codec::write_tmessage_checked(stream, codec::MAX_MSIZE, message)
 }
 
 fn read_rmessage(stream: &mut TcpStream) -> Result<RMessage, Error> {
-    let mut prefix = [0_u8; 4];
-    stream
-        .read_exact(&mut prefix)
-        .map_err(|error| Error::new(format!("read 9P frame size: {error}")))?;
-    let size = u32::from_le_bytes(prefix);
-    let rest_len = usize::try_from(size.saturating_sub(4))
-        .map_err(|_| Error::from_static("oversized 9P frame"))?;
-    let mut frame = Vec::with_capacity(rest_len + 4);
-    frame.extend(prefix);
-    frame.resize(rest_len + 4, 0);
-    stream
-        .read_exact(&mut frame[4..])
-        .map_err(|error| Error::new(format!("read 9P frame body: {error}")))?;
-    codec::decode_rmessage(&frame)
+    codec::read_rmessage_checked(stream, codec::MAX_MSIZE)?
+        .ok_or_else(|| Error::from_static("9P server closed before response"))
 }

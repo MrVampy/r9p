@@ -212,8 +212,8 @@ fn version_probe_output(bind: &str, msize: u32) -> R9pResult<String> {
     let mut stream = connect_stream(bind)?;
     let mut protocol = ProtocolClient::new();
     let request = protocol.version_request(msize);
-    codec::write_tmessage(&mut stream, &request)?;
-    let response = codec::read_rmessage(&mut stream)?
+    codec::write_tmessage_checked(&mut stream, msize, &request)?;
+    let response = codec::read_rmessage_checked(&mut stream, msize)?
         .ok_or_else(|| Error::from("9P transport closed before version response"))?;
 
     match protocol.receive(response)? {

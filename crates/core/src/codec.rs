@@ -12,6 +12,7 @@ use std::io::{Read, Write};
 pub const FRAME_HEADER_SIZE: u32 = 7;
 pub const RREAD_HEADER_SIZE: u32 = 11;
 pub const TWRITE_HEADER_SIZE: u32 = 23;
+pub const IOUNIT_HEADER_SIZE: u32 = 24;
 pub const DEFAULT_MSIZE: u32 = 8192;
 pub const MIN_MSIZE: u32 = 256;
 pub const MAX_MSIZE: u32 = 64 * 1024;
@@ -30,7 +31,12 @@ impl Variant {
     }
 
     pub fn accept(self, requested: &[u8]) -> Option<Variant> {
-        if requested.starts_with(self.wire_name()) {
+        let wire_name = self.wire_name();
+        if requested == wire_name
+            || requested
+                .strip_prefix(wire_name)
+                .is_some_and(|suffix| suffix.starts_with(b"."))
+        {
             Some(self)
         } else {
             None
@@ -42,12 +48,6 @@ pub fn clamp_read_count(msize: u32, requested: u32) -> u32 {
     requested.min(msize.saturating_sub(RREAD_HEADER_SIZE))
 }
 
-pub fn read_tmessage<R: Read>(reader: &mut R) -> Result<Option<TMessage>> {
-    read_frame(reader)?
-        .map(|frame| decode_tmessage(&frame))
-        .transpose()
-}
-
 pub fn read_tmessage_checked<R: Read>(
     reader: &mut R,
     max_frame_size: u32,
@@ -57,14 +57,21 @@ pub fn read_tmessage_checked<R: Read>(
         .transpose()
 }
 
-pub fn read_rmessage<R: Read>(reader: &mut R) -> Result<Option<RMessage>> {
-    read_frame(reader)?
+pub fn read_rmessage_checked<R: Read>(
+    reader: &mut R,
+    max_frame_size: u32,
+) -> Result<Option<RMessage>> {
+    read_frame_checked(reader, max_frame_size)?
         .map(|frame| decode_rmessage(&frame))
         .transpose()
 }
 
-pub fn write_tmessage<W: Write>(writer: &mut W, message: &TMessage) -> Result<()> {
-    let frame = encode_tmessage(message)?;
+pub fn write_tmessage_checked<W: Write>(
+    writer: &mut W,
+    msize: u32,
+    message: &TMessage,
+) -> Result<()> {
+    let frame = encode_tmessage_checked(message, msize)?;
     writer
         .write_all(&frame)
         .and_then(|_| writer.flush())
@@ -83,25 +90,26 @@ pub fn write_rmessage_checked<W: Write>(
         .map_err(|error| Error::from(format!("write 9P response frame: {error}")))
 }
 
-fn read_frame<R: Read>(reader: &mut R) -> Result<Option<Vec<u8>>> {
-    read_frame_checked(reader, u32::MAX)
-}
-
 fn read_frame_checked<R: Read>(reader: &mut R, max_frame_size: u32) -> Result<Option<Vec<u8>>> {
     let mut prefix = [0_u8; 4];
-    match reader.read_exact(&mut prefix) {
-        Ok(()) => {}
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::UnexpectedEof
-                    | std::io::ErrorKind::ConnectionReset
-                    | std::io::ErrorKind::BrokenPipe
-            ) =>
-        {
-            return Ok(None);
+    let mut prefix_len = 0;
+    while prefix_len < prefix.len() {
+        match reader.read(&mut prefix[prefix_len..]) {
+            Ok(0) if prefix_len == 0 => return Ok(None),
+            Ok(0) => return Err(Error::from("truncated 9P frame size")),
+            Ok(read) => prefix_len += read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error)
+                if prefix_len == 0
+                    && matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+                    ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(Error::from(format!("read 9P frame size: {error}"))),
         }
-        Err(error) => return Err(Error::from(format!("read 9P frame size: {error}"))),
     }
 
     let size = u32::from_le_bytes(prefix);
@@ -126,6 +134,10 @@ fn read_frame_checked<R: Read>(reader: &mut R, max_frame_size: u32) -> Result<Op
 
 pub fn max_write_payload(msize: u32) -> u32 {
     msize.saturating_sub(TWRITE_HEADER_SIZE)
+}
+
+pub fn max_iounit(msize: u32) -> u32 {
+    msize.saturating_sub(IOUNIT_HEADER_SIZE)
 }
 
 pub fn validate_frame_size(frame: &[u8]) -> Result<()> {
@@ -408,6 +420,15 @@ pub fn encode_tmessage(message: &TMessage) -> Result<Vec<u8>> {
     finish_frame(frame)
 }
 
+pub fn encode_tmessage_checked(message: &TMessage, msize: u32) -> Result<Vec<u8>> {
+    let frame = encode_tmessage(message)?;
+    let len = u32::try_from(frame.len()).map_err(|_| Error::from("frame too large"))?;
+    if len > msize {
+        return Err(Error::from("frame exceeds msize"));
+    }
+    Ok(frame)
+}
+
 pub fn encode_rmessage(message: &RMessage) -> Result<Vec<u8>> {
     let mut frame = frame_prefix(message.message_type(), message.tag());
     match message {
@@ -570,8 +591,47 @@ mod tests {
     }
 
     #[test]
+    fn checked_response_reader_rejects_a_frame_larger_than_the_negotiated_msize() -> Result<()> {
+        let frame = encode_rmessage(&RMessage::Read {
+            tag: 1,
+            data: vec![0; 32],
+        })?;
+        let max_frame_size = u32::try_from(frame.len().saturating_sub(1))
+            .map_err(|_| Error::from("bad test frame size"))?;
+        let error = read_rmessage_checked(&mut frame.as_slice(), max_frame_size)
+            .err()
+            .ok_or("oversized response frame accepted")?;
+        assert!(error.display_lossy().contains("exceeds msize"));
+        Ok(())
+    }
+
+    #[test]
+    fn checked_reader_distinguishes_clean_eof_from_a_partial_size_prefix() -> Result<()> {
+        assert_eq!(read_tmessage_checked(&mut [].as_slice(), 8192)?, None);
+        assert!(read_tmessage_checked(&mut [7_u8, 0].as_slice(), 8192).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn checked_request_encoder_rejects_a_frame_larger_than_the_negotiated_msize() -> Result<()> {
+        let message = TMessage::Write {
+            tag: 1,
+            fid: 1,
+            offset: 0,
+            data: vec![0; 32],
+        };
+        let frame = encode_tmessage(&message)?;
+        let max_frame_size = u32::try_from(frame.len().saturating_sub(1))
+            .map_err(|_| Error::from("bad test frame size"))?;
+
+        assert!(encode_tmessage_checked(&message, max_frame_size).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn read_and_write_counts_obey_msize_helpers() {
         assert_eq!(clamp_read_count(8192, u32::MAX), 8192 - RREAD_HEADER_SIZE);
         assert_eq!(max_write_payload(8192), 8192 - TWRITE_HEADER_SIZE);
+        assert_eq!(max_iounit(8192), 8192 - IOUNIT_HEADER_SIZE);
     }
 }

@@ -1,18 +1,13 @@
 use crate::{
     error::client_error, request::RequestTracker, transport::connect_stream, Error, Result,
 };
-use r9p::{blocking, fid::Fid, multiplex::MultiplexedClient, qid::Qid, stat::Stat};
+use r9p::{fid::Fid, multiplex::MultiplexedClient, qid::Qid, stat::Stat};
 use std::{
     thread,
     time::{Duration, Instant},
 };
 
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(200);
-
-pub const OREAD: u8 = blocking::OREAD;
-pub const OWRITE: u8 = blocking::OWRITE;
-pub const ORDWR: u8 = blocking::ORDWR;
-pub const OTRUNC: u8 = blocking::OTRUNC;
 
 #[derive(Clone)]
 pub struct Client {

@@ -11,7 +11,7 @@ pub fn validate_walk_names(wnames: &[Vec<u8>]) -> Result<()> {
         if name.is_empty()
             || name.contains(&b'/')
             || name.contains(&0)
-            || name.len() > u8::MAX as usize
+            || name.len() > u16::MAX as usize
         {
             return Err(Error::from_static(EBADWNAME));
         }

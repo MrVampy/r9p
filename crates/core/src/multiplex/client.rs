@@ -153,7 +153,7 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
         })
     }
 
-    pub const fn variant(&self) -> codec::Variant {
+    pub fn variant(&self) -> codec::Variant {
         self.inner.variant
     }
 

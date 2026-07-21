@@ -21,27 +21,42 @@ pub const MAX_MSIZE: u32 = 64 * 1024;
 pub enum Variant {
     #[default]
     Plain,
+    R9pSymlink,
 }
 
 impl Variant {
     pub const fn wire_name(self) -> &'static [u8] {
         match self {
             Variant::Plain => b"9P2000",
+            Variant::R9pSymlink => b"9P2000.r9p-symlink",
         }
     }
 
     pub fn accept(self, requested: &[u8]) -> Option<Variant> {
-        let wire_name = self.wire_name();
-        if requested == wire_name
-            || requested
-                .strip_prefix(wire_name)
-                .is_some_and(|suffix| suffix.starts_with(b"."))
-        {
-            Some(self)
-        } else {
-            None
+        if self == Self::R9pSymlink && requested == Self::R9pSymlink.wire_name() {
+            return Some(Self::R9pSymlink);
         }
+        plain_request(requested).then_some(Self::Plain)
     }
+
+    pub const fn supports_symlinks(self) -> bool {
+        matches!(self, Self::R9pSymlink)
+    }
+
+    pub fn accept_response(self, response: &[u8]) -> Option<Variant> {
+        if self == Self::R9pSymlink && response == Self::R9pSymlink.wire_name() {
+            return Some(Self::R9pSymlink);
+        }
+        (response == Self::Plain.wire_name()).then_some(Self::Plain)
+    }
+}
+
+fn plain_request(requested: &[u8]) -> bool {
+    let plain = Variant::Plain.wire_name();
+    requested == plain
+        || requested
+            .strip_prefix(plain)
+            .is_some_and(|suffix| suffix.starts_with(b"."))
 }
 
 pub fn clamp_read_count(msize: u32, requested: u32) -> u32 {

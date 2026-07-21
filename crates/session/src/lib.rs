@@ -9,8 +9,8 @@ mod slot;
 mod transport;
 
 pub use cache::{
-    decode_dir_entries, is_dir, is_symlink, null_wstat, read_open_directory_entries, same_qid,
-    DirCache, DirEntry, Freshness, NamespaceCache, NamespaceCacheStats, StaleReason,
+    decode_dir_entries, is_dir, is_symlink, read_open_directory_entries, same_qid, DirCache,
+    DirEntry, Freshness, NamespaceCache, NamespaceCacheStats, StaleReason,
 };
 pub use client::Client;
 pub use epoch::SessionEpoch;

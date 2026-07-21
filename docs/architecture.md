@@ -46,6 +46,20 @@ Backends still own namespace meaning, permissions, content, and application
 effects. A `FileTree` reset clears backend session-local state when `Tversion`
 starts a new session.
 
+The core owns `Twstat` fields whose mutability is fixed by 9P2000. Immutable
+fields and file-type changes are rejected before backend dispatch. The backend
+then validates its complete mutable-field policy before changing storage and
+must provide all-or-none completion. A backend that cannot make a requested
+combination atomic rejects it; it must not apply a prefix of the request.
+
+Variant negotiation is capability negotiation, not a label. Plain `9P2000`
+never exposes symlink qids or stat bits. `9P2000.r9p-symlink` is the one narrow
+r9p extension: it admits `QTSYMLINK` and `DMSYMLINK` and the existing
+read-target representation used by the filesystem exporter and FUSE bridge.
+It deliberately does not claim 9P2000.u. Servers configured for the extension
+can downgrade a plain requester, while extension-aware clients reject symlink
+metadata after a downgrade.
+
 `r9p` provides generic client create, write, remove, read, and RPC operations,
 plus language bindings that encode the transport-neutral `r9p-export.v1`
 descriptor. An application that registers with a runtime owns the lifecycle

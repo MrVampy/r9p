@@ -1,10 +1,17 @@
 use r9p::{
     codec::{self, Variant},
-    error::{Error, Result, EBADDIROFFSET, EBADMODE, EFIDBUSY, EFIDINUSE, EFIDNOTOPEN, EFIDOPEN},
+    error::{
+        Error, Result, EBADDIROFFSET, EBADMODE, EFIDBUSY, EFIDINUSE, EFIDNOTOPEN, EFIDOPEN,
+        EWSTATATIME, EWSTATDEV, EWSTATDIRLENGTH, EWSTATDMDIR, EWSTATMUID, EWSTATQID, EWSTATTYPE,
+        EWSTATUID,
+    },
     fid::{Fid, NOFID},
     message::{RMessage, TMessage, NOTAG},
     qid::{Qid, DMDIR},
-    server::{FileTree, OpenFile, ReadData, Server, ServerCompletion, ServerEvent, ServerRequest},
+    server::{
+        FileTree, OpenFile, ReadData, Server, ServerCompletion, ServerConfig, ServerEvent,
+        ServerRequest,
+    },
     stat::Stat,
     ORCLOSE, ORDWR, OREAD, OWRITE,
 };
@@ -14,6 +21,7 @@ struct ProtocolTree {
     root: Qid,
     file: Qid,
     write_count: Option<u32>,
+    wstat_count: usize,
     iounit: u32,
 }
 
@@ -23,6 +31,7 @@ impl ProtocolTree {
             root: Qid::dir(1),
             file: Qid::file(2),
             write_count: None,
+            wstat_count: 0,
             iounit: 0,
         }
     }
@@ -73,6 +82,11 @@ impl FileTree for ProtocolTree {
             qid,
             if qid.is_dir() { DMDIR | 0o555 } else { 0o444 },
         ))
+    }
+
+    fn wstat(&mut self, _fid: Fid, _qid: Qid, _stat: &Stat) -> Result<()> {
+        self.wstat_count += 1;
+        Ok(())
     }
 }
 
@@ -177,6 +191,114 @@ fn plain_version_accepts_period_extensions_not_prefix_collisions() {
         Some(Variant::Plain)
     );
     assert_eq!(Variant::Plain.accept(b"9P2000garbage"), None);
+}
+
+#[test]
+fn symlink_extension_is_negotiated_explicitly_and_can_downgrade() {
+    assert_eq!(
+        Variant::R9pSymlink.accept(b"9P2000.r9p-symlink"),
+        Some(Variant::R9pSymlink)
+    );
+    assert_eq!(Variant::R9pSymlink.accept(b"9P2000"), Some(Variant::Plain));
+    assert_eq!(
+        Variant::R9pSymlink.accept_response(b"9P2000"),
+        Some(Variant::Plain)
+    );
+    assert_eq!(Variant::Plain.accept_response(b"9P2000.r9p-symlink"), None);
+
+    let mut server = Server::with_config(
+        ProtocolTree::new(),
+        ServerConfig {
+            variant: Variant::R9pSymlink,
+            ..ServerConfig::default()
+        },
+    );
+    assert_eq!(
+        server.handle(TMessage::Version {
+            tag: NOTAG,
+            msize: 8192,
+            version: b"9P2000.r9p-symlink".to_vec(),
+        }),
+        RMessage::Version {
+            tag: NOTAG,
+            msize: 8192,
+            version: b"9P2000.r9p-symlink".to_vec(),
+        }
+    );
+    assert_eq!(server.session().variant(), Some(Variant::R9pSymlink));
+}
+
+#[test]
+fn immutable_wstat_fields_are_rejected_before_backend_dispatch() {
+    let mut server = Server::new(ProtocolTree::new());
+    negotiate(&mut server);
+    attach(&mut server, 1);
+    walk_file(&mut server, 1, 2);
+
+    let mut cases: Vec<(Stat, &str)> = Vec::new();
+    let mut stat = Stat::null_wstat();
+    stat.type_ = 0;
+    cases.push((stat, EWSTATTYPE));
+    let mut stat = Stat::null_wstat();
+    stat.dev = 0;
+    cases.push((stat, EWSTATDEV));
+    let mut stat = Stat::null_wstat();
+    stat.qid = Qid::file(2);
+    cases.push((stat, EWSTATQID));
+    let mut stat = Stat::null_wstat();
+    stat.atime = 0;
+    cases.push((stat, EWSTATATIME));
+    let mut stat = Stat::null_wstat();
+    stat.uid = b"glenda".to_vec();
+    cases.push((stat, EWSTATUID));
+    let mut stat = Stat::null_wstat();
+    stat.muid = b"glenda".to_vec();
+    cases.push((stat, EWSTATMUID));
+    let mut stat = Stat::null_wstat();
+    stat.mode = DMDIR | 0o755;
+    cases.push((stat, EWSTATDMDIR));
+
+    for (index, (stat, expected)) in cases.into_iter().enumerate() {
+        assert_error(
+            server.handle(TMessage::Wstat {
+                tag: 10 + u16::try_from(index).unwrap_or(0),
+                fid: 2,
+                stat,
+            }),
+            expected,
+        );
+    }
+    assert_eq!(server.tree_mut().wstat_count, 0);
+
+    let mut stat = Stat::null_wstat();
+    stat.name = b"renamed".to_vec();
+    assert!(matches!(
+        server.handle(TMessage::Wstat {
+            tag: 20,
+            fid: 2,
+            stat,
+        }),
+        RMessage::Wstat { tag: 20 }
+    ));
+    assert_eq!(server.tree_mut().wstat_count, 1);
+}
+
+#[test]
+fn nonzero_directory_length_is_rejected_before_backend_dispatch() {
+    let mut server = Server::new(ProtocolTree::new());
+    negotiate(&mut server);
+    attach(&mut server, 1);
+    let mut stat = Stat::null_wstat();
+    stat.length = 1;
+    assert_error(
+        server.handle(TMessage::Wstat {
+            tag: 2,
+            fid: 1,
+            stat,
+        }),
+        EWSTATDIRLENGTH,
+    );
+    assert_eq!(server.tree_mut().wstat_count, 0);
 }
 
 #[test]

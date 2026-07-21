@@ -18,7 +18,8 @@ mod unix_io;
 use unix_io::{
     create_file_fd, duplicate_fd, fstat, is_read_only_mode, is_symlink, mkdir_child, node_from_fd,
     open_child, open_file_fd, open_read_fd, open_root, pread_file, pwrite_file, read_dir,
-    read_link, remove_path, rename_path, stat_from_libc, truncate_fd, Node,
+    read_link, remove_path, rename_path, stat_from_libc, truncate_fd, validate_rename_name,
+    validate_truncate_length, Node,
 };
 
 #[derive(Clone)]
@@ -292,7 +293,7 @@ impl FileTree for LocalTree {
         if !inner.writable {
             return Err(Error::from_static(EPERM));
         }
-        let (fd, old_name, is_dir, is_link) = {
+        let (fd, old_name, old_length, is_dir, is_link) = {
             let node = inner
                 .fids
                 .get(&fid)
@@ -303,17 +304,39 @@ impl FileTree for LocalTree {
             (
                 node.fd.as_raw_fd(),
                 node.stat.name.clone(),
+                node.stat.length,
                 qid.is_dir(),
                 is_symlink(&node.stat),
             )
         };
 
+        if stat.mode != u32::MAX || stat.mtime != u32::MAX || !stat.gid.is_empty() {
+            return Err(Error::from_static(EPERM));
+        }
+
+        let rename_requested = !stat.name.is_empty() && stat.name != old_name;
+        let truncate_requested = stat.length != u64::MAX && stat.length != old_length;
+        if rename_requested {
+            validate_rename_name(&stat.name)?;
+        }
+        if truncate_requested {
+            if is_dir || is_link {
+                return Err(Error::from_static(EPERM));
+            }
+            validate_truncate_length(stat.length)?;
+        }
+        if rename_requested && truncate_requested {
+            return Err(Error::from(
+                "wstat -- local backend cannot atomically rename and truncate",
+            ));
+        }
+
         let mut name = old_name;
-        if !stat.name.is_empty() && stat.name != name {
+        if rename_requested {
             rename_path(fd, &stat.name)?;
             name = stat.name.clone();
         }
-        if stat.length != u64::MAX && !is_dir && !is_link {
+        if truncate_requested {
             truncate_fd(fd, stat.length)?;
         }
 

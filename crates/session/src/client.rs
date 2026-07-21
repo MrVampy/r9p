@@ -1,7 +1,7 @@
 use crate::{
     error::client_error, request::RequestTracker, transport::connect_stream, Error, Result,
 };
-use r9p::{fid::Fid, multiplex::MultiplexedClient, qid::Qid, stat::Stat};
+use r9p::{codec::Variant, fid::Fid, multiplex::MultiplexedClient, qid::Qid, stat::Stat};
 use std::{
     thread,
     time::{Duration, Instant},
@@ -71,8 +71,14 @@ impl Client {
         tracker: RequestTracker,
     ) -> Result<Self> {
         let stream = connect_stream(address)?;
-        let inner =
-            MultiplexedClient::connect(stream, uname, aname, msize).map_err(client_error)?;
+        let inner = MultiplexedClient::connect_with_variant(
+            stream,
+            uname,
+            aname,
+            msize,
+            Variant::R9pSymlink,
+        )
+        .map_err(client_error)?;
         let tracked_inner = inner.clone();
         let tracked_requests = tracker.clone();
         let inner = inner.with_call_observer(move |tag| -> Box<dyn Send> {
@@ -91,6 +97,10 @@ impl Client {
 
     pub fn root_fid(&self) -> Fid {
         self.inner.root_fid()
+    }
+
+    pub fn variant(&self) -> Variant {
+        self.inner.variant()
     }
 
     pub fn msize(&self) -> u32 {
@@ -185,13 +195,29 @@ impl Client {
     }
 
     pub fn stat_timeout(&self, fid: Fid, timeout: Duration) -> Result<Stat> {
-        self.inner.stat_timeout(fid, timeout).map_err(client_error)
+        let stat = self
+            .inner
+            .stat_timeout(fid, timeout)
+            .map_err(client_error)?;
+        self.validate_stat(stat)
     }
 
     pub fn wstat_timeout(&self, fid: Fid, stat: Stat, timeout: Duration) -> Result<()> {
         self.inner
             .wstat_timeout(fid, stat, timeout)
             .map_err(client_error)
+    }
+
+    pub(crate) fn validate_stat(&self, stat: Stat) -> Result<Stat> {
+        if !self.variant().supports_symlinks()
+            && (stat.qid.is_symlink() || stat.mode & r9p::qid::DMSYMLINK != 0)
+        {
+            return Err(Error::new(
+                libc::EPROTO,
+                "server exposed symlink metadata without negotiating 9P2000.r9p-symlink",
+            ));
+        }
+        Ok(stat)
     }
 }
 

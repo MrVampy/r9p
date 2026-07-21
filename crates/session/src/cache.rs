@@ -267,7 +267,16 @@ pub fn read_open_directory_entries(
         offset = offset.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
         all.extend(chunk);
     }
-    decode_dir_entries(&all)
+    decode_dir_entries(&all)?
+        .into_iter()
+        .map(|entry| {
+            client.validate_stat(entry.stat).map(|stat| DirEntry {
+                name: stat.name.clone(),
+                qid: stat.qid,
+                stat,
+            })
+        })
+        .collect()
 }
 
 pub fn decode_dir_entries(data: &[u8]) -> Result<Vec<DirEntry>> {
@@ -293,22 +302,6 @@ pub fn is_symlink(stat: &Stat) -> bool {
 
 pub fn same_qid(a: Qid, b: Qid) -> bool {
     a.path == b.path && a.version == b.version && a.qtype == b.qtype
-}
-
-pub fn null_wstat() -> Stat {
-    Stat {
-        type_: u16::MAX,
-        dev: u32::MAX,
-        qid: Qid::new(u8::MAX, u32::MAX, u64::MAX),
-        mode: u32::MAX,
-        atime: u32::MAX,
-        mtime: u32::MAX,
-        length: u64::MAX,
-        name: Vec::new(),
-        uid: Vec::new(),
-        gid: Vec::new(),
-        muid: Vec::new(),
-    }
 }
 
 fn parent_path(path: &[Vec<u8>]) -> Option<&[Vec<u8>]> {

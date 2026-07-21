@@ -12,7 +12,7 @@ use crate::{
         },
         R9pFuse,
     },
-    node::{has_close_commit_mode, null_wstat},
+    node::has_close_commit_mode,
 };
 use r9p::fid::Fid;
 use session::{Client, OTRUNC, OWRITE};
@@ -97,7 +97,7 @@ impl R9pFuse {
         };
 
         if input.valid & FATTR_SIZE != 0 && !ignore_zero_truncate {
-            let mut stat = null_wstat();
+            let mut stat = r9p::stat::Stat::null_wstat();
             stat.length = input.size;
             if let Err(error) = client.wstat_timeout(fid, stat, self.mutation_timeout()) {
                 if input.size == 0 {

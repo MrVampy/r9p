@@ -70,6 +70,10 @@ impl Client {
     }
 
     pub fn version_request(&mut self, msize: u32) -> TMessage {
+        self.version_request_for(msize, crate::codec::Variant::Plain)
+    }
+
+    pub fn version_request_for(&mut self, msize: u32, variant: crate::codec::Variant) -> TMessage {
         self.pending.reset();
         self.flush_targets.clear();
         self.version = b"unknown".to_vec();
@@ -77,7 +81,7 @@ impl Client {
         TMessage::Version {
             tag: NOTAG,
             msize,
-            version: b"9P2000".to_vec(),
+            version: variant.wire_name().to_vec(),
         }
     }
 
@@ -532,7 +536,8 @@ mod tests {
             other => panic!("expected Tremove, got {other:?}"),
         }
 
-        let stat = Stat::new(b"renamed".to_vec(), Qid::file(9), 0o600);
+        let mut stat = Stat::null_wstat();
+        stat.name = b"renamed".to_vec();
         let wstat = must_op(client.wstat(5, stat.clone()));
         assert_eq!(wstat.fid, Some(5));
         match wstat.message {

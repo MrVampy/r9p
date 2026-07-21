@@ -1,6 +1,12 @@
 use crate::{
-    error::{Error, Result, EBADTAG, EBADWNAME},
+    codec::Variant,
+    error::{
+        Error, Result, EBADTAG, EBADWNAME, EWSTATATIME, EWSTATDEV, EWSTATDIRLENGTH, EWSTATDMDIR,
+        EWSTATDMSYMLINK, EWSTATMUID, EWSTATQID, EWSTATTYPE, EWSTATUID,
+    },
     message::{RMessage, Tag, MAXWELEM},
+    qid::{Qid, DMDIR, DMSYMLINK},
+    stat::Stat,
 };
 
 pub fn validate_walk_names(wnames: &[Vec<u8>]) -> Result<()> {
@@ -15,6 +21,42 @@ pub fn validate_walk_names(wnames: &[Vec<u8>]) -> Result<()> {
         {
             return Err(Error::from_static(EBADWNAME));
         }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_wstat(qid: Qid, stat: &Stat, variant: Variant) -> Result<()> {
+    if stat.type_ != u16::MAX {
+        return Err(Error::from_static(EWSTATTYPE));
+    }
+    if stat.dev != u32::MAX {
+        return Err(Error::from_static(EWSTATDEV));
+    }
+    if stat.qid != Qid::new(u8::MAX, u32::MAX, u64::MAX) {
+        return Err(Error::from_static(EWSTATQID));
+    }
+    if stat.atime != u32::MAX {
+        return Err(Error::from_static(EWSTATATIME));
+    }
+    if !stat.uid.is_empty() {
+        return Err(Error::from_static(EWSTATUID));
+    }
+    if !stat.muid.is_empty() {
+        return Err(Error::from_static(EWSTATMUID));
+    }
+    if stat.mode != u32::MAX && ((stat.mode & DMDIR != 0) != qid.is_dir()) {
+        return Err(Error::from_static(EWSTATDMDIR));
+    }
+    if stat.mode != u32::MAX {
+        let requested_symlink = stat.mode & DMSYMLINK != 0;
+        if requested_symlink != qid.is_symlink()
+            || (requested_symlink && !variant.supports_symlinks())
+        {
+            return Err(Error::from_static(EWSTATDMSYMLINK));
+        }
+    }
+    if qid.is_dir() && stat.length != u64::MAX && stat.length != 0 {
+        return Err(Error::from_static(EWSTATDIRLENGTH));
     }
     Ok(())
 }

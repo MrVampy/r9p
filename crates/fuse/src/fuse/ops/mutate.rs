@@ -11,7 +11,7 @@ use crate::{
         wire::{FuseInHeader, FuseRenameIn},
         R9pFuse,
     },
-    node::{is_dir, null_wstat},
+    node::is_dir,
 };
 use r9p::{fid::Fid, qid::Qid, stat::Stat};
 use session::Client;
@@ -252,7 +252,7 @@ impl R9pFuse {
     }
 
     fn rename_fid(&mut self, client: &Client, fid: Fid, new_name: &[u8]) -> Result<()> {
-        let mut stat = null_wstat();
+        let mut stat = r9p::stat::Stat::null_wstat();
         stat.name = new_name.to_vec();
         Ok(client.wstat_timeout(fid, stat, self.mutation_timeout())?)
     }

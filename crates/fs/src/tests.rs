@@ -1,9 +1,10 @@
 use super::*;
 use r9p::{
     blocking::{OREAD, OTRUNC, OWRITE},
+    codec::Variant,
     message::{RMessage, TMessage},
-    server::Server,
-    stat::decode_dir_entries,
+    server::{Server, ServerConfig},
+    stat::{decode_dir_entries, Stat},
 };
 use std::{
     env, fs,
@@ -88,6 +89,29 @@ fn rejects_parent_walk_escape() -> Result<()> {
 }
 
 #[test]
+fn plain_dialect_does_not_expose_symlink_metadata() -> Result<()> {
+    let root = fixture_root("plain-symlink")?;
+    symlink("target", root.join("link")).map_err(|error| Error::from(error.to_string()))?;
+    let mut server = Server::new(LocalTree::open(&root)?);
+    attach(&mut server);
+    let reply = server.handle(TMessage::Walk {
+        tag: 2,
+        fid: 1,
+        newfid: 2,
+        wnames: vec![b"link".to_vec()],
+    });
+    assert_eq!(
+        reply,
+        RMessage::Error {
+            tag: 2,
+            ename: r9p::error::ESYMLINKDIALECT.as_bytes().to_vec(),
+        }
+    );
+    remove_fixture(root);
+    Ok(())
+}
+
+#[test]
 fn serves_symlink_target_without_following_outside_export() -> Result<()> {
     let root = fixture_root("symlink")?;
     let outside = fixture_root("outside")?;
@@ -95,8 +119,14 @@ fn serves_symlink_target_without_following_outside_export() -> Result<()> {
     symlink(outside.join("secret"), root.join("secret-link"))
         .map_err(|error| Error::from(error.to_string()))?;
 
-    let mut server = Server::new(LocalTree::open(&root)?);
-    attach(&mut server);
+    let mut server = Server::with_config(
+        LocalTree::open(&root)?,
+        ServerConfig {
+            variant: Variant::R9pSymlink,
+            ..ServerConfig::default()
+        },
+    );
+    attach_with_variant(&mut server, Variant::R9pSymlink);
     let reply = server.handle(TMessage::Walk {
         tag: 2,
         fid: 1,
@@ -208,11 +238,124 @@ fn writable_export_creates_truncates_and_writes() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn writable_wstat_rejects_non_atomic_rename_and_truncate_without_mutation() -> Result<()> {
+    let root = fixture_root("wstat-atomic")?;
+    fs::write(root.join("body"), b"abcdef").map_err(|error| Error::from(error.to_string()))?;
+    let mut server = Server::new(LocalTree::open_with_config(
+        &root,
+        LocalTreeConfig { writable: true },
+    )?);
+    attach(&mut server);
+    walk(&mut server, 1, 2, b"body");
+
+    let mut stat = Stat::null_wstat();
+    stat.name = b"renamed".to_vec();
+    stat.length = 2;
+    let reply = server.handle(TMessage::Wstat {
+        tag: 3,
+        fid: 2,
+        stat,
+    });
+    assert!(matches!(reply, RMessage::Error { .. }));
+    assert_eq!(
+        fs::read(root.join("body")).map_err(|error| Error::from(error.to_string()))?,
+        b"abcdef"
+    );
+    assert!(!root.join("renamed").exists());
+
+    remove_fixture(root);
+    Ok(())
+}
+
+#[test]
+fn writable_wstat_rename_never_replaces_an_existing_name() -> Result<()> {
+    let root = fixture_root("wstat-no-replace")?;
+    fs::write(root.join("body"), b"source").map_err(|error| Error::from(error.to_string()))?;
+    fs::write(root.join("target"), b"target").map_err(|error| Error::from(error.to_string()))?;
+    let mut server = Server::new(LocalTree::open_with_config(
+        &root,
+        LocalTreeConfig { writable: true },
+    )?);
+    attach(&mut server);
+    walk(&mut server, 1, 2, b"body");
+
+    let mut stat = Stat::null_wstat();
+    stat.name = b"target".to_vec();
+    let reply = server.handle(TMessage::Wstat {
+        tag: 3,
+        fid: 2,
+        stat,
+    });
+    assert!(matches!(reply, RMessage::Error { .. }));
+    assert_eq!(
+        fs::read(root.join("body")).map_err(|error| Error::from(error.to_string()))?,
+        b"source"
+    );
+    assert_eq!(
+        fs::read(root.join("target")).map_err(|error| Error::from(error.to_string()))?,
+        b"target"
+    );
+
+    remove_fixture(root);
+    Ok(())
+}
+
+#[test]
+fn writable_wstat_applies_supported_single_mutations() -> Result<()> {
+    let root = fixture_root("wstat-single")?;
+    fs::write(root.join("body"), b"abcdef").map_err(|error| Error::from(error.to_string()))?;
+    let mut server = Server::new(LocalTree::open_with_config(
+        &root,
+        LocalTreeConfig { writable: true },
+    )?);
+    attach(&mut server);
+    walk(&mut server, 1, 2, b"body");
+
+    let mut stat = Stat::null_wstat();
+    stat.length = 3;
+    assert_eq!(
+        server.handle(TMessage::Wstat {
+            tag: 3,
+            fid: 2,
+            stat,
+        }),
+        RMessage::Wstat { tag: 3 }
+    );
+    assert_eq!(
+        fs::read(root.join("body")).map_err(|error| Error::from(error.to_string()))?,
+        b"abc"
+    );
+
+    let mut stat = Stat::null_wstat();
+    stat.name = b"renamed".to_vec();
+    assert_eq!(
+        server.handle(TMessage::Wstat {
+            tag: 4,
+            fid: 2,
+            stat,
+        }),
+        RMessage::Wstat { tag: 4 }
+    );
+    assert!(!root.join("body").exists());
+    assert_eq!(
+        fs::read(root.join("renamed")).map_err(|error| Error::from(error.to_string()))?,
+        b"abc"
+    );
+
+    remove_fixture(root);
+    Ok(())
+}
+
 fn attach(server: &mut Server<LocalTree>) {
+    attach_with_variant(server, Variant::Plain);
+}
+
+fn attach_with_variant(server: &mut Server<LocalTree>, variant: Variant) {
     let version = server.handle(TMessage::Version {
         tag: r9p::NOTAG,
         msize: 8192,
-        version: b"9P2000".to_vec(),
+        version: variant.wire_name().to_vec(),
     });
     assert!(matches!(version, RMessage::Version { .. }));
     let reply = server.handle(TMessage::Attach {

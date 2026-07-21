@@ -66,6 +66,7 @@ impl ConnectionTimeouts {
 pub struct Client<S> {
     stream: S,
     protocol: ProtocolClient,
+    variant: codec::Variant,
     root_fid: Fid,
     root_qid: Qid,
 }
@@ -121,29 +122,39 @@ impl Client<UnixStream> {
 
 impl<S: Read + Write> Client<S> {
     pub fn connect(stream: S, uname: &str, aname: &str, msize: u32) -> Result<Self> {
+        Self::connect_with_variant(stream, uname, aname, msize, codec::Variant::Plain)
+    }
+
+    pub fn connect_with_variant(
+        stream: S,
+        uname: &str,
+        aname: &str,
+        msize: u32,
+        requested_variant: codec::Variant,
+    ) -> Result<Self> {
         let mut client = Self {
             stream,
             protocol: ProtocolClient::new(),
+            variant: codec::Variant::Plain,
             root_fid: NOFID,
             root_qid: Qid::file(0),
         };
-        let version_request = client.protocol.version_request(msize);
-        match client.call_message(version_request)? {
+        let version_request = client
+            .protocol
+            .version_request_for(msize, requested_variant);
+        let negotiated_variant = match client.call_message(version_request)? {
             ClientResponse::Completion {
                 completion: Completion::Version { version, .. },
                 ..
-            } if version == b"9P2000" => {}
-            ClientResponse::Completion {
-                completion: Completion::Version { version, .. },
-                ..
-            } => {
-                return Err(Error::from(format!(
+            } => requested_variant.accept_response(&version).ok_or_else(|| {
+                Error::from(format!(
                     "server negotiated unsupported version {}",
                     String::from_utf8_lossy(&version)
-                )));
-            }
+                ))
+            })?,
             other => return Err(unexpected("Rversion", other)),
-        }
+        };
+        client.variant = negotiated_variant;
 
         let attach = client
             .protocol
@@ -162,6 +173,10 @@ impl<S: Read + Write> Client<S> {
 
     pub fn version(&self) -> &[u8] {
         self.protocol.version()
+    }
+
+    pub const fn variant(&self) -> codec::Variant {
+        self.variant
     }
 
     pub fn root_fid(&self) -> Fid {

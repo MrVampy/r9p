@@ -51,6 +51,29 @@ Synchronous backends can use `serve_file_tree_connection`, which adapts a
 `FileTree` to the same checked framing, version reset, and connection state
 machine without duplicating a request loop.
 
+The server core also owns the invariant part of `Twstat`. It rejects attempts
+to change `type`, `dev`, `qid`, `atime`, `uid`, `muid`, or a file's type bits
+before dispatching to a backend. Backends own permissions and storage-specific
+fields, but a successful backend `wstat` must apply every requested change or
+none. `Stat::null_wstat()` is the single constructor for the protocol's
+explicit "don't touch" values.
+
+## Protocol Variants
+
+Plain clients and servers negotiate `9P2000`. The filesystem exporter and
+FUSE session can additionally negotiate `9P2000.r9p-symlink`, a deliberately
+narrow r9p extension. It adds only these semantics:
+
+- `QTSYMLINK` and `DMSYMLINK` identify symbolic links.
+- Opening and reading a symbolic link returns its target bytes.
+- A peer that negotiates plain `9P2000` must not receive symlink qids or stat
+  bits.
+
+This is not 9P2000.u. r9p does not claim the 9P2000.u stat extension, numeric
+identity fields, or error semantics. An extension-capable client accepts a
+server downgrade to plain `9P2000`; symlink metadata after such a downgrade is
+a protocol error. `r9p export` advertises the exact extension in its descriptor.
+
 Blocking consumers that require finite transport calls can use
 `r9p::blocking::connect_endpoint_with_timeouts` with `ConnectionTimeouts` for
 TCP, `unix!`, or `unix:` endpoints. Distinct read and write timeouts are

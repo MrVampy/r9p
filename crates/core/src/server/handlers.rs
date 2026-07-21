@@ -2,19 +2,20 @@ use crate::{
     codec::{clamp_read_count, max_iounit, max_write_payload},
     error::{
         Error, Result, EBADDIROFFSET, EBADMODE, EFIDNOTOPEN, EFIDOPEN, ENOAUTH, ENOENT, ENOTDIR,
+        ESYMLINKDIALECT,
     },
     fid::{FidState, NOFID},
     flush::{FlushOutcome, RequestKey},
     message::{RMessage, TMessage, Tag},
     mode,
-    qid::DMDIR,
-    stat::dirread_chunk,
+    qid::{Qid, DMDIR, DMSYMLINK},
+    stat::{dirread_chunk, Stat},
 };
 
 use super::{
     session::VersionNegotiation,
     types::{ReadData, ServerCompletion, ServerEvent, ServerRequest, ServerRequestKind},
-    validation::{error_reply, take_count, validate_walk_names},
+    validation::{error_reply, take_count, validate_walk_names, validate_wstat},
     FileTree, Server,
 };
 
@@ -282,6 +283,11 @@ impl<T> Server<T> {
             }
             TMessage::Wstat { fid, stat, .. } => {
                 let state = self.session.fid(fid)?;
+                let variant = self
+                    .session
+                    .variant()
+                    .ok_or_else(|| Error::from_static("version not negotiated"))?;
+                validate_wstat(state.qid, &stat, variant)?;
                 self.session.reserve_existing_fid(key, fid)?;
                 Ok(ServerEvent::Dispatch(ServerRequest {
                     key,
@@ -307,16 +313,22 @@ impl<T> Server<T> {
         request: &ServerRequestKind,
         completion: ServerCompletion,
     ) -> Result<RMessage> {
+        let variant = self
+            .session
+            .variant()
+            .ok_or_else(|| Error::from_static("version not negotiated"))?;
         match (request, completion) {
             (ServerRequestKind::Auth { afid, .. }, ServerCompletion::Auth { qid }) => {
                 if !qid.is_auth() {
                     return Err(Error::from_static(ENOAUTH));
                 }
+                validate_qid_variant(variant, qid)?;
                 self.session
                     .insert_new_fid(*afid, FidState::opened(qid, mode::ORDWR))?;
                 Ok(RMessage::Auth { tag, aqid: qid })
             }
             (ServerRequestKind::Attach { fid, .. }, ServerCompletion::Attach { qid }) => {
+                validate_qid_variant(variant, qid)?;
                 self.session.insert_new_fid(*fid, FidState::new(qid))?;
                 Ok(RMessage::Attach { tag, qid })
             }
@@ -331,6 +343,9 @@ impl<T> Server<T> {
             ) => {
                 if qids.len() > wnames.len() {
                     return Err(Error::from("walk returned too many qids"));
+                }
+                for qid in &qids {
+                    validate_qid_variant(variant, *qid)?;
                 }
                 if wnames.is_empty() {
                     if newfid != fid {
@@ -356,6 +371,7 @@ impl<T> Server<T> {
                 Ok(RMessage::Walk { tag, qids })
             }
             (ServerRequestKind::Open { fid, mode, .. }, ServerCompletion::Open(opened)) => {
+                validate_qid_variant(variant, opened.qid)?;
                 self.session
                     .bind_fid(*fid, FidState::opened(opened.qid, *mode))?;
                 Ok(RMessage::Open {
@@ -365,6 +381,7 @@ impl<T> Server<T> {
                 })
             }
             (ServerRequestKind::Create { fid, mode, .. }, ServerCompletion::Create(opened)) => {
+                validate_qid_variant(variant, opened.qid)?;
                 self.session
                     .bind_fid(*fid, FidState::opened(opened.qid, *mode))?;
                 Ok(RMessage::Create {
@@ -384,7 +401,12 @@ impl<T> Server<T> {
             ) => {
                 let data = match data {
                     ReadData::Bytes(bytes) => take_count(bytes, *count)?,
-                    ReadData::Directory(stats) => dirread_chunk(&stats, *offset, *count)?,
+                    ReadData::Directory(stats) => {
+                        for stat in &stats {
+                            validate_stat_variant(variant, stat)?;
+                        }
+                        dirread_chunk(&stats, *offset, *count)?
+                    }
                 };
                 if qid.is_dir() {
                     let state = self.session.fid(*fid)?;
@@ -411,6 +433,7 @@ impl<T> Server<T> {
                 Ok(RMessage::Remove { tag })
             }
             (ServerRequestKind::Stat { .. }, ServerCompletion::Stat { stat }) => {
+                validate_stat_variant(variant, &stat)?;
                 Ok(RMessage::Stat { tag, stat })
             }
             (ServerRequestKind::Wstat { .. }, ServerCompletion::Wstat) => {
@@ -425,6 +448,23 @@ impl<T> Server<T> {
         T: FileTree,
     {
         perform_file_tree_request(&mut self.tree, request)
+    }
+}
+
+fn validate_qid_variant(variant: crate::codec::Variant, qid: Qid) -> Result<()> {
+    if qid.is_symlink() && !variant.supports_symlinks() {
+        Err(Error::from_static(ESYMLINKDIALECT))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_stat_variant(variant: crate::codec::Variant, stat: &Stat) -> Result<()> {
+    validate_qid_variant(variant, stat.qid)?;
+    if stat.mode & DMSYMLINK != 0 && !variant.supports_symlinks() {
+        Err(Error::from_static(ESYMLINKDIALECT))
+    } else {
+        Ok(())
     }
 }
 

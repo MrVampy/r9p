@@ -1,5 +1,5 @@
 use r9p::{
-    error::{Error, Result, ENOENT, EPERM},
+    error::{Error, Result, EEXIST, ENOENT, EPERM},
     mode,
     qid::{Qid, DMDIR, DMSYMLINK, QTFILE, QTSYMLINK},
     stat::Stat,
@@ -279,6 +279,7 @@ pub(super) fn pwrite_file(fd: RawFd, offset: u64, data: &[u8]) -> Result<u32> {
 }
 
 pub(super) fn truncate_fd(path_fd: RawFd, length: u64) -> Result<()> {
+    validate_truncate_length(length)?;
     let file = open_file_fd(path_fd, OWRITE)?;
     let status = unsafe { libc::ftruncate(file.as_raw_fd(), length as libc::off_t) };
     if status == 0 {
@@ -299,13 +300,68 @@ pub(super) fn remove_path(path_fd: RawFd, is_dir: bool) -> Result<()> {
 }
 
 pub(super) fn rename_path(path_fd: RawFd, new_name: &[u8]) -> Result<()> {
-    if new_name.is_empty() || new_name == b"." || new_name == b".." || new_name.contains(&b'/') {
-        return Err(Error::from_static(ENOENT));
-    }
+    validate_rename_name(new_name)?;
     let source = proc_fd_path(path_fd)?;
     let parent = source.parent().ok_or_else(|| Error::from_static(ENOENT))?;
     let target = parent.join(OsStr::from_bytes(new_name));
-    fs::rename(&source, &target).map_err(|error| map_io("rename path", error))
+    rename_no_replace(&source, &target)
+}
+
+pub(super) fn validate_rename_name(new_name: &[u8]) -> Result<()> {
+    if new_name.is_empty()
+        || new_name == b"."
+        || new_name == b".."
+        || new_name.contains(&b'/')
+        || new_name.contains(&0)
+    {
+        Err(Error::from_static(ENOENT))
+    } else {
+        Ok(())
+    }
+}
+
+pub(super) fn validate_truncate_length(length: u64) -> Result<()> {
+    if length > libc::off_t::MAX as u64 {
+        Err(Error::from("file length exceeds host off_t"))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn rename_no_replace(source: &Path, target: &Path) -> Result<()> {
+    let source =
+        CString::new(source.as_os_str().as_bytes()).map_err(|_| Error::from_static(ENOENT))?;
+    let target =
+        CString::new(target.as_os_str().as_bytes()).map_err(|_| Error::from_static(ENOENT))?;
+    let status = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            target.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if status == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::EEXIST) {
+        Err(Error::from_static(EEXIST))
+    } else {
+        Err(map_io("rename path", error))
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn rename_no_replace(source: &Path, target: &Path) -> Result<()> {
+    match fs::symlink_metadata(target) {
+        Ok(_) => return Err(Error::from_static(EEXIST)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(map_io("inspect rename target", error)),
+    }
+    fs::rename(source, target).map_err(|error| map_io("rename path", error))
 }
 
 fn proc_fd_path(path_fd: RawFd) -> Result<PathBuf> {

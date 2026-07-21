@@ -37,6 +37,7 @@ pub enum ExportMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
     NineP2000,
+    NineP2000R9pSymlink,
     NineP2000L,
 }
 
@@ -225,6 +226,7 @@ impl Protocol {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::NineP2000 => "9P2000",
+            Self::NineP2000R9pSymlink => "9P2000.r9p-symlink",
             Self::NineP2000L => "9P2000.L",
         }
     }
@@ -232,6 +234,7 @@ impl Protocol {
     pub fn parse(value: &str) -> Result<Self> {
         match value {
             "9P2000" => Ok(Self::NineP2000),
+            "9P2000.r9p-symlink" => Ok(Self::NineP2000R9pSymlink),
             "9P2000.L" => Ok(Self::NineP2000L),
             _ => Err(Error::from(format!("unknown protocol {value}"))),
         }

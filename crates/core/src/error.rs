@@ -23,6 +23,16 @@ pub const EBADMODE: &str = "invalid open mode";
 pub const EBADDIROFFSET: &str = "invalid directory offset";
 pub const EBADMSIZE: &str = "version: message size too small";
 pub const ENOAUTH: &str = "authentication not required";
+pub const EWSTATTYPE: &str = "wstat -- attempt to change type";
+pub const EWSTATDEV: &str = "wstat -- attempt to change dev";
+pub const EWSTATQID: &str = "wstat -- attempt to change qid";
+pub const EWSTATATIME: &str = "wstat -- attempt to change atime";
+pub const EWSTATUID: &str = "wstat -- attempt to change uid";
+pub const EWSTATMUID: &str = "wstat -- attempt to change muid";
+pub const EWSTATDMDIR: &str = "wstat -- attempt to change DMDIR bit";
+pub const EWSTATDMSYMLINK: &str = "wstat -- attempt to change DMSYMLINK bit";
+pub const EWSTATDIRLENGTH: &str = "wstat -- attempt to set non-zero directory length";
+pub const ESYMLINKDIALECT: &str = "symlink metadata requires negotiated 9P2000.r9p-symlink";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {

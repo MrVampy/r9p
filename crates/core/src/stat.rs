@@ -35,6 +35,24 @@ impl Stat {
         }
     }
 
+    /// Constructs the 9P2000 "don't touch" record used as the base of a
+    /// `Twstat` request.
+    pub fn null_wstat() -> Self {
+        Self {
+            type_: u16::MAX,
+            dev: u32::MAX,
+            qid: Qid::new(u8::MAX, u32::MAX, u64::MAX),
+            mode: u32::MAX,
+            atime: u32::MAX,
+            mtime: u32::MAX,
+            length: u64::MAX,
+            name: Vec::new(),
+            uid: Vec::new(),
+            gid: Vec::new(),
+            muid: Vec::new(),
+        }
+    }
+
     pub fn encode(&self) -> Result<Vec<u8>> {
         let mut body = Vec::new();
         push_u16(&mut body, self.type_);

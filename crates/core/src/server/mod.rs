@@ -72,6 +72,10 @@ pub trait FileTree {
         Err(Error::from_static(EPERM))
     }
 
+    /// Applies every requested mutable field atomically. Implementations must
+    /// validate the complete request before the first mutation and return an
+    /// error without changing the file when they cannot provide all-or-none
+    /// behavior. The server core has already rejected immutable 9P fields.
     fn wstat(&mut self, _fid: Fid, _qid: Qid, _stat: &Stat) -> Result<()> {
         Err(Error::from_static(EPERM))
     }

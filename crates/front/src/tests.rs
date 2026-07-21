@@ -1051,19 +1051,8 @@ fn wstat_relay_passes_encoded_stat_to_owner() -> Result<()> {
         let mut tree = wstat_front.tree();
         tree.attach(1, b"alice", b"/")?;
         let qids = walk_to(&mut tree, 1, 2, &["docs", "report"]);
-        let stat = Stat {
-            type_: 0,
-            dev: 0,
-            qid: qids[1],
-            mode: 0,
-            atime: 0,
-            mtime: 0,
-            length: 0,
-            name: b"renamed".to_vec(),
-            uid: Vec::new(),
-            gid: Vec::new(),
-            muid: Vec::new(),
-        };
+        let mut stat = Stat::null_wstat();
+        stat.name = b"renamed".to_vec();
         let result = tree.wstat(2, qids[1], &stat);
         done_tx.send(result).expect("send wstat result");
         Ok::<(), Error>(())

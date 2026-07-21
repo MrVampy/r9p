@@ -51,6 +51,7 @@ impl<S: MultiplexTransport> Clone for MultiplexedClient<S> {
 
 struct MultiplexedInner<S: MultiplexTransport> {
     protocol: Arc<Mutex<ProtocolClient>>,
+    variant: codec::Variant,
     waiters: Arc<Mutex<Waiters>>,
     writer: Mutex<S>,
     reader: Mutex<Option<JoinHandle<()>>>,
@@ -92,29 +93,36 @@ impl MultiplexedClient<UnixStream> {
 }
 
 impl<S: MultiplexTransport> MultiplexedClient<S> {
-    pub fn connect(mut stream: S, uname: &str, aname: &str, msize: u32) -> Result<Self> {
+    pub fn connect(stream: S, uname: &str, aname: &str, msize: u32) -> Result<Self> {
+        Self::connect_with_variant(stream, uname, aname, msize, codec::Variant::Plain)
+    }
+
+    pub fn connect_with_variant(
+        mut stream: S,
+        uname: &str,
+        aname: &str,
+        msize: u32,
+        requested_variant: codec::Variant,
+    ) -> Result<Self> {
         let mut reader = stream
             .try_clone_transport()
             .map_err(|error| io_error("clone 9P stream", error))?;
         let mut protocol = ProtocolClient::new();
 
-        let version_request = protocol.version_request(msize);
-        match call_message_sync(&mut stream, &mut reader, &mut protocol, version_request)? {
-            ClientResponse::Completion {
-                completion: Completion::Version { version, .. },
-                ..
-            } if version == b"9P2000" => {}
-            ClientResponse::Completion {
-                completion: Completion::Version { version, .. },
-                ..
-            } => {
-                return Err(Error::from(format!(
-                    "server negotiated unsupported version {}",
-                    String::from_utf8_lossy(&version)
-                )));
-            }
-            other => return Err(unexpected("Rversion", other)),
-        }
+        let version_request = protocol.version_request_for(msize, requested_variant);
+        let negotiated_variant =
+            match call_message_sync(&mut stream, &mut reader, &mut protocol, version_request)? {
+                ClientResponse::Completion {
+                    completion: Completion::Version { version, .. },
+                    ..
+                } => requested_variant.accept_response(&version).ok_or_else(|| {
+                    Error::from(format!(
+                        "server negotiated unsupported version {}",
+                        String::from_utf8_lossy(&version)
+                    ))
+                })?,
+                other => return Err(unexpected("Rversion", other)),
+            };
 
         let attach = protocol
             .attach(uname.as_bytes().to_vec(), aname.as_bytes().to_vec())
@@ -134,6 +142,7 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
         Ok(Self {
             inner: Arc::new(MultiplexedInner {
                 protocol,
+                variant: negotiated_variant,
                 waiters,
                 writer: Mutex::new(stream),
                 reader: Mutex::new(Some(handle)),
@@ -142,6 +151,10 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
             }),
             call_observer: None,
         })
+    }
+
+    pub const fn variant(&self) -> codec::Variant {
+        self.inner.variant
     }
 
     pub fn with_call_observer<F>(&self, observer: F) -> Self

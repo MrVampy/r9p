@@ -10,6 +10,7 @@ use std::{
 
 use fs::{LocalTree, LocalTreeConfig};
 use r9p::{
+    codec::Variant,
     export_descriptor::{ExportDescriptor, ExportMode, Protocol, TransportClass},
     server::{
         serve_file_tree_connection as serve_protocol_file_tree, ConnectionStream, ServerConfig,
@@ -201,6 +202,7 @@ where
             default_msize: config.msize,
             max_msize: config.msize,
             max_fids: config.max_fids,
+            variant: Variant::R9pSymlink,
             ..ServerConfig::default()
         },
         tree,
@@ -227,7 +229,7 @@ fn export_descriptor(config: &ExportConfig, bound: &BoundListener) -> CliResult<
         },
         auth: config.auth.clone(),
         pid: std::process::id(),
-        protocol: Protocol::NineP2000,
+        protocol: Protocol::NineP2000R9pSymlink,
         msize: config.serve.msize,
         expires_at: None,
         local_root_label: Some(config.serve.root.display().to_string()),

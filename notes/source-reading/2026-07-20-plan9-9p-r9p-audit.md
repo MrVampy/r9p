@@ -158,15 +158,15 @@ applying the caller's umask. Capability regressions cover both decisions.
 ### 9P2000.u and 9P2000.L
 
 Linux documents all three dialects, but adding a dialect name without its
-stat, error, and operation semantics would create a false contract. r9p keeps
-one explicit plain variant and clean downgrade behavior. Direct Linux v9fs
-serving or a named external 9P2000.L consumer would justify a complete dialect
-slice.
+stat, error, and operation semantics would create a false contract. Direct
+Linux v9fs serving or a named external 9P2000.L consumer would justify a
+complete dialect slice.
 
-r9p currently uses the 9P2000.u symlink type and mode bits internally for its
-filesystem/FUSE bridge while negotiating plain 9P2000. That limited extension
-is useful but should be formalized as a dialect decision before claiming
-portable external symlink interoperability.
+The internal symlink behavior is now the explicitly negotiated
+`9P2000.r9p-symlink` extension. It carries only `QTSYMLINK`, `DMSYMLINK`, and
+read-target semantics. It is not described as 9P2000.u, and plain sessions are
+prevented from receiving the extension bits. The FUSE session requests the
+extension and accepts an honest downgrade when a server has no symlinks.
 
 ### LisaFS-style local descriptors
 
@@ -188,13 +188,6 @@ transport boundary; it must not be implied by 9P negotiation.
 
 ## Remaining follow-ups
 
-- Decide whether to formalize the internal symlink bits as 9P2000.u or as a
-  documented r9p-local plain extension before exposing them to an external
-  kernel client.
-- Add a focused source-backed slice for immutable `Twstat` fields and atomic
-  backend mutation if an untrusted writable server surface needs stronger
-  generic enforcement. The core currently owns lifecycle while backends still
-  own detailed wstat policy.
 - Add transport authentication/encryption only alongside a named non-loopback
   threat model and deployment consumer.
 - Revisit descriptor donation, batching beyond multi-walk, or 9P2000.L only

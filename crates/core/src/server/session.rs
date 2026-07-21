@@ -1,5 +1,5 @@
 use crate::{
-    codec::MIN_MSIZE,
+    codec::{Variant, MIN_MSIZE},
     error::{Error, Result, EBADFID, EBADMSIZE, EFIDBUSY, EFIDINUSE, EFIDLIMIT},
     fid::{Fid, FidState},
     flush::{RequestKey, RequestTable},
@@ -13,6 +13,7 @@ pub struct Session {
     pub(super) config: ServerConfig,
     msize: u32,
     version: Vec<u8>,
+    variant: Option<Variant>,
     negotiated: bool,
     fids: BTreeMap<Fid, FidState>,
     reservations: BTreeMap<Fid, FidReservations>,
@@ -48,6 +49,7 @@ impl Session {
         Self {
             msize: config.default_msize,
             version: b"unknown".to_vec(),
+            variant: None,
             negotiated: false,
             fids: BTreeMap::new(),
             reservations: BTreeMap::new(),
@@ -62,6 +64,10 @@ impl Session {
 
     pub fn version(&self) -> &[u8] {
         &self.version
+    }
+
+    pub fn variant(&self) -> Option<Variant> {
+        self.variant
     }
 
     pub fn is_negotiated(&self) -> bool {
@@ -103,6 +109,7 @@ impl Session {
             Some(accepted) => {
                 self.msize = requested_msize.min(self.config.max_msize);
                 self.version = accepted.wire_name().to_vec();
+                self.variant = Some(accepted);
                 self.negotiated = true;
                 Ok(VersionNegotiation::Accepted)
             }
@@ -116,6 +123,7 @@ impl Session {
         self.requests.reset();
         self.msize = MIN_MSIZE;
         self.version = b"unknown".to_vec();
+        self.variant = None;
         self.negotiated = false;
     }
 

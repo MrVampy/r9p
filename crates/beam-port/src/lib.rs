@@ -12,6 +12,8 @@ use r9p::{
 use std::{
     collections::HashMap,
     io::{self, BufRead, Write},
+    path::PathBuf,
+    time::Duration,
 };
 
 #[cfg(unix)]
@@ -23,7 +25,10 @@ struct TargetKey {
     uname: String,
     aname: String,
     msize: u32,
+    auth_config: Option<PathBuf>,
 }
+
+const AUTH_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
 struct PeerClientServer {
@@ -55,32 +60,32 @@ impl PeerClientServer {
             .trim_end_matches(['\r', '\n'])
             .split('\t')
             .collect::<Vec<_>>();
-        match fields.as_slice() {
-            ["version", bind, uname, aname, msize] => {
-                let key = target_key(bind, uname, aname, msize)?;
-                version_probe_output(&key.bind, key.msize).map_err(|error| error.to_string())
-            }
-            ["attach", bind, uname, aname, msize] => {
-                let key = target_key(bind, uname, aname, msize)?;
-                self.with_client_retry(&key, attach_output)
-            }
-            ["stat", bind, uname, aname, msize, path] => {
-                let key = target_key(bind, uname, aname, msize)?;
+        if fields
+            .first()
+            .is_some_and(|operation| operation.starts_with("front-"))
+        {
+            return self.fronts.handle(&fields);
+        }
+        let Some((operation, fields)) = fields.split_first() else {
+            return Err("invalid_r9p_beam_port_request".to_string());
+        };
+        let (key, args) = target_and_args(fields)?;
+        match (*operation, args) {
+            ("version", []) => version_probe_output(&key).map_err(|error| error.to_string()),
+            ("attach", []) => self.with_client_retry(&key, attach_output),
+            ("stat", [path]) => {
                 let path = hex::decode_text(path)?;
                 self.with_client_retry(&key, |client| stat_output(client, &path))
             }
-            ["list", bind, uname, aname, msize, path] => {
-                let key = target_key(bind, uname, aname, msize)?;
+            ("list", [path]) => {
                 let path = hex::decode_text(path)?;
                 self.with_client_retry(&key, |client| list_output(client, &path))
             }
-            ["read", bind, uname, aname, msize, path] => {
-                let key = target_key(bind, uname, aname, msize)?;
+            ("read", [path]) => {
                 let path = hex::decode_text(path)?;
                 self.with_client_retry(&key, |client| read_output(client, &path))
             }
-            ["read-range", bind, uname, aname, msize, path, offset, count] => {
-                let key = target_key(bind, uname, aname, msize)?;
+            ("read-range", [path, offset, count]) => {
                 let path = hex::decode_text(path)?;
                 let offset = parse_u64("offset", offset)?;
                 let count = parse_u32("count", count)?;
@@ -88,34 +93,29 @@ impl PeerClientServer {
                     read_range_output(client, &path, offset, count)
                 })
             }
-            ["write", bind, uname, aname, msize, path, offset, data] => {
-                let key = target_key(bind, uname, aname, msize)?;
+            ("write", [path, offset, data]) => {
                 let path = hex::decode_text(path)?;
                 let offset = parse_u64("offset", offset)?;
                 let data = hex::decode(data)?;
                 self.with_client(&key, |client| write_output(client, &path, offset, &data))
             }
-            ["write-file", bind, uname, aname, msize, path, data] => {
-                let key = target_key(bind, uname, aname, msize)?;
+            ("write-file", [path, data]) => {
                 let path = hex::decode_text(path)?;
                 let data = hex::decode(data)?;
                 self.with_client(&key, |client| write_file_output(client, &path, &data))
             }
-            ["rpc", bind, uname, aname, msize, path, data] => {
-                let key = target_key(bind, uname, aname, msize)?;
+            ("rpc", [path, data]) => {
                 let path = hex::decode_text(path)?;
                 let data = hex::decode(data)?;
                 self.with_client(&key, |client| rpc_output(client, &path, &data))
             }
-            ["create", bind, uname, aname, msize, path, perm, mode] => {
-                let key = target_key(bind, uname, aname, msize)?;
+            ("create", [path, perm, mode]) => {
                 let path = hex::decode_text(path)?;
                 let perm = parse_u32("perm", perm)?;
                 let mode = parse_u8("mode", mode)?;
                 self.with_client(&key, |client| create_output(client, &path, perm, mode))
             }
-            ["create-at", bind, uname, aname, msize, parent, name, perm, mode] => {
-                let key = target_key(bind, uname, aname, msize)?;
+            ("create-at", [parent, name, perm, mode]) => {
                 let parent = hex::decode_text(parent)?;
                 let name = hex::decode_text(name)?;
                 let perm = parse_u32("perm", perm)?;
@@ -124,9 +124,7 @@ impl PeerClientServer {
                     create_at_output(client, &parent, &name, perm, mode)
                 })
             }
-            ["create-write-at", bind, uname, aname, msize, parent, name, perm, mode, offset, data] =>
-            {
-                let key = target_key(bind, uname, aname, msize)?;
+            ("create-write-at", [parent, name, perm, mode, offset, data]) => {
                 let parent = hex::decode_text(parent)?;
                 let name = hex::decode_text(name)?;
                 let perm = parse_u32("perm", perm)?;
@@ -137,12 +135,10 @@ impl PeerClientServer {
                     create_write_at_output(client, &parent, &name, perm, mode, offset, &data)
                 })
             }
-            ["remove", bind, uname, aname, msize, path] => {
-                let key = target_key(bind, uname, aname, msize)?;
+            ("remove", [path]) => {
                 let path = hex::decode_text(path)?;
                 self.with_client(&key, |client| remove_output(client, &path))
             }
-            [operation, ..] if operation.starts_with("front-") => self.fronts.handle(&fields),
             _ => Err("invalid_r9p_beam_port_request".to_string()),
         }
     }
@@ -190,30 +186,44 @@ impl PeerClientServer {
 }
 
 fn connect_client(key: &TargetKey) -> R9pResult<BoxedClient> {
-    let stream: Box<dyn ReadWrite> = connect_stream(&key.bind)?;
+    let stream: Box<dyn ReadWrite> = connect_stream(key)?;
     blocking::Client::connect(stream, &key.uname, &key.aname, key.msize)
 }
 
-fn connect_stream(bind: &str) -> R9pResult<Box<dyn ReadWrite>> {
+fn connect_stream(key: &TargetKey) -> R9pResult<Box<dyn ReadWrite>> {
     #[cfg(unix)]
-    if let Some(path) = bind
+    if let Some(path) = key
+        .bind
         .strip_prefix("unix!")
-        .or_else(|| bind.strip_prefix("unix:"))
+        .or_else(|| key.bind.strip_prefix("unix:"))
     {
+        if key.auth_config.is_some() {
+            return Err(Error::from(
+                "session auth config is only valid for TCP endpoints",
+            ));
+        }
         let stream = UnixStream::connect(Path::new(path))
             .map_err(|error| Error::from(format!("connect {path}: {error}")))?;
         return Ok(Box::new(stream));
     }
 
-    blocking::connect_tcp_stream(bind).map(|stream| Box::new(stream) as Box<dyn ReadWrite>)
+    let stream = blocking::connect_tcp_stream(&key.bind)?;
+    match &key.auth_config {
+        Some(path) => {
+            let auth = r9p_auth::ClientConfig::read(path)?;
+            r9p_auth::authenticate_client(stream, &auth, &key.uname, AUTH_HANDSHAKE_TIMEOUT)
+                .map(|stream| Box::new(stream) as Box<dyn ReadWrite>)
+        }
+        None => Ok(Box::new(stream)),
+    }
 }
 
-fn version_probe_output(bind: &str, msize: u32) -> R9pResult<String> {
-    let mut stream = connect_stream(bind)?;
+fn version_probe_output(key: &TargetKey) -> R9pResult<String> {
+    let mut stream = connect_stream(key)?;
     let mut protocol = ProtocolClient::new();
-    let request = protocol.version_request(msize);
-    codec::write_tmessage_checked(&mut stream, msize, &request)?;
-    let response = codec::read_rmessage_checked(&mut stream, msize)?
+    let request = protocol.version_request(key.msize);
+    codec::write_tmessage_checked(&mut stream, key.msize, &request)?;
+    let response = codec::read_rmessage_checked(&mut stream, key.msize)?
         .ok_or_else(|| Error::from("9P transport closed before version response"))?;
 
     match protocol.receive(response)? {
@@ -329,12 +339,31 @@ fn remove_output(client: &mut BoxedClient, path: &str) -> R9pResult<String> {
     Ok("remove".to_string())
 }
 
-fn target_key(bind: &str, uname: &str, aname: &str, msize: &str) -> Result<TargetKey, String> {
+fn target_and_args<'a>(fields: &'a [&'a str]) -> Result<(TargetKey, &'a [&'a str]), String> {
+    let [bind, uname, aname, msize, auth_config, args @ ..] = fields else {
+        return Err("invalid_r9p_beam_port_target".to_string());
+    };
+    target_key(bind, uname, aname, msize, auth_config).map(|key| (key, args))
+}
+
+fn target_key(
+    bind: &str,
+    uname: &str,
+    aname: &str,
+    msize: &str,
+    auth_config: &str,
+) -> Result<TargetKey, String> {
+    let auth_config = hex::decode_text(auth_config)?;
     Ok(TargetKey {
         bind: hex::decode_text(bind)?,
         uname: hex::decode_text(uname)?,
         aname: hex::decode_text(aname)?,
         msize: parse_u32("msize", msize)?,
+        auth_config: if auth_config.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(auth_config))
+        },
     })
 }
 
@@ -441,6 +470,7 @@ mod tests {
             "636f646578",
             "2f",
             "65536",
+            "",
         );
         assert_eq!(
             parsed,
@@ -449,7 +479,49 @@ mod tests {
                 uname: "codex".to_string(),
                 aname: "/".to_string(),
                 msize: 65_536,
+                auth_config: None,
             }),
+        );
+    }
+
+    #[test]
+    fn target_key_keeps_session_auth_in_the_client_cache_identity() {
+        let parsed = target_key(
+            "746370213139322e302e322e312139353634",
+            "636f646578",
+            "2f",
+            "65536",
+            "2f6574632f7239702f636c69656e742e636f6e66",
+        );
+        assert_eq!(
+            parsed,
+            Ok(TargetKey {
+                bind: "tcp!192.0.2.1!9564".to_string(),
+                uname: "codex".to_string(),
+                aname: "/".to_string(),
+                msize: 65_536,
+                auth_config: Some(PathBuf::from("/etc/r9p/client.conf")),
+            }),
+        );
+    }
+
+    #[test]
+    fn unix_targets_reject_session_auth_before_connecting() {
+        let key = TargetKey {
+            bind: "unix:/tmp/r9p-unused.sock".to_string(),
+            uname: "codex".to_string(),
+            aname: "/".to_string(),
+            msize: 65_536,
+            auth_config: Some(PathBuf::from("/etc/r9p/client.conf")),
+        };
+
+        let error = match connect_stream(&key) {
+            Ok(_) => panic!("unix auth config must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            "session auth config is only valid for TCP endpoints"
         );
     }
 
@@ -481,8 +553,14 @@ mod tests {
             assert!(accepted.is_ok());
         });
 
-        let bind = format!("unix:{}", socket_path.display());
-        let stream = connect_stream(&bind);
+        let key = TargetKey {
+            bind: format!("unix:{}", socket_path.display()),
+            uname: "codex".to_string(),
+            aname: "/".to_string(),
+            msize: 65_536,
+            auth_config: None,
+        };
+        let stream = connect_stream(&key);
         assert!(stream.is_ok());
         let joined = handle.join();
         assert!(joined.is_ok());
@@ -773,7 +851,7 @@ mod tests {
 
     fn target_fields(bind: &str) -> String {
         format!(
-            "{}\t{}\t{}\t65536",
+            "{}\t{}\t{}\t65536\t",
             hex_text(bind),
             hex_text("codex"),
             hex_text("/")

@@ -1,4 +1,5 @@
 import gleam/bit_array
+import gleam/option.{None, Some}
 import gleeunit
 import gleeunit/should
 import r9p
@@ -14,6 +15,17 @@ pub fn target_defaults_to_standard_msize_test() {
 
   target.msize
   |> should.equal(65_536)
+  target.auth_config
+  |> should.equal(None)
+}
+
+pub fn target_can_select_session_auth_test() {
+  let target =
+    r9p.target("tcp!192.0.2.1!9564", "codex", "/")
+    |> r9p.with_auth_config("/etc/r9p/client.conf")
+
+  target.auth_config
+  |> should.equal(Some("/etc/r9p/client.conf"))
 }
 
 pub fn hex_codec_roundtrips_bits_test() {

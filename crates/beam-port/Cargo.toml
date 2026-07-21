@@ -16,3 +16,4 @@ path = "src/main.rs"
 [dependencies]
 front.workspace = true
 r9p.workspace = true
+r9p-auth.workspace = true

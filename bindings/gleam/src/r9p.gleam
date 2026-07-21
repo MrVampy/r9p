@@ -1,6 +1,7 @@
 import gleam/bit_array
 import gleam/int
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 import r9p/codec
@@ -17,7 +18,13 @@ pub type Adapter {
 }
 
 pub type Target {
-  Target(bind: String, uname: String, aname: String, msize: Int)
+  Target(
+    bind: String,
+    uname: String,
+    aname: String,
+    msize: Int,
+    auth_config: Option(String),
+  )
 }
 
 pub type VersionInfo {
@@ -41,7 +48,7 @@ pub fn with_timeout(adapter: Adapter, timeout_ms: Int) -> Adapter {
 }
 
 pub fn target(bind: String, uname: String, aname: String) -> Target {
-  Target(bind:, uname:, aname:, msize: default_msize)
+  Target(bind:, uname:, aname:, msize: default_msize, auth_config: None)
 }
 
 pub fn target_with_msize(
@@ -50,7 +57,11 @@ pub fn target_with_msize(
   aname: String,
   msize: Int,
 ) -> Target {
-  Target(bind:, uname:, aname:, msize:)
+  Target(bind:, uname:, aname:, msize:, auth_config: None)
+}
+
+pub fn with_auth_config(target: Target, path: String) -> Target {
+  Target(..target, auth_config: Some(path))
 }
 
 pub fn version(
@@ -293,6 +304,7 @@ fn run(
           text(target.uname),
           text(target.aname),
           int.to_string(target.msize),
+          optional_text(target.auth_config),
         ],
         fields,
       ),
@@ -300,6 +312,13 @@ fn run(
     ),
     adapter.timeout_ms,
   )
+}
+
+fn optional_text(value: Option(String)) -> String {
+  case value {
+    Some(value) -> text(value)
+    None -> ""
+  }
 }
 
 fn parse_read_line(line: String) -> Result(BitArray, String) {

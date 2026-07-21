@@ -48,7 +48,7 @@
             ];
             postFixup = ''
               wrapProgram "$out/bin/r9p" \
-                --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.fuse3 ]}
+                --suffix PATH : ${pkgs.lib.makeBinPath [ pkgs.fuse3 ]}
             '';
           };
           front = pkgs.rustPlatform.buildRustPackage {
@@ -143,6 +143,7 @@
           checks = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
             fuse-runtime-helper = pkgs.runCommandLocal "r9p-fuse-runtime-helper-check" { } ''
               grep -F ${pkgs.lib.escapeShellArg "${pkgs.fuse3}/bin"} ${r9p}/bin/r9p
+              grep -F 'PATH=$PATH' ${r9p}/bin/r9p
               touch "$out"
             '';
             session-auth-module =

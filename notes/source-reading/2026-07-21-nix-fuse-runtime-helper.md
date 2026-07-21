@@ -24,15 +24,17 @@ from a declarative system service without relying on an ambient user PATH?
   generated system service had a deliberately narrow PATH. The client reached
   and authenticated the 9P server, then failed locally because the helper
   process could not return a FUSE file descriptor.
-- Adding the helper only to one host unit would preserve an undeclared package
-  dependency and force every future caller to rediscover it.
+- NixOS supplies the privileged unprivileged-mount helper through
+  `/run/wrappers/bin/fusermount3`. The raw Nix-store helper cannot replace that
+  host security boundary, and must not shadow it when it is already on PATH.
 
 ## Effect
 
-The default r9p Nix package wraps `r9p` with the `fuse3` binary directory in
-its PATH. A flake check asserts that the installed executable retains this
-runtime edge. Host services can therefore invoke the package directly without
-mount-specific PATH composition.
+The default r9p Nix package appends the `fuse3` binary directory to its PATH as
+a non-shadowing fallback. A flake check asserts that the installed executable
+retains this runtime edge. NixOS services that mount as an unprivileged user
+must explicitly expose `config.security.wrapperDir`; r9p then prefers the host
+security wrapper and retains the raw helper only as a fallback.
 
 ## Open questions
 

@@ -1,8 +1,7 @@
-{
-  config,
-  defaultPackage,
-  lib,
-  ...
+{ config
+, defaultPackage
+, lib
+, ...
 }:
 
 let

@@ -12,4 +12,5 @@ workspace = true
 [dependencies]
 libc.workspace = true
 r9p.workspace = true
+r9p-auth.workspace = true
 serde_json.workspace = true

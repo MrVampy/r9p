@@ -8,6 +8,7 @@ mod target;
 mod transport;
 
 use commands::{
+    auth_keygen::auth_keygen_cmd,
     con::con_cmd,
     ls::ls_cmd,
     machine::{machine_list_cmd, machine_remove_cmd, machine_rpc_hex_cmd},
@@ -51,6 +52,7 @@ fn run() -> CliResult<()> {
     }
     let command = args.remove(0);
     match command.as_str() {
+        "auth-keygen" => auth_keygen_cmd(config, args),
         "version" => version_cmd(config, args),
         "attach" => attach_cmd(config, args),
         "read" | "cat" => read_cmd(config, args, ReadMode::Read),
@@ -87,6 +89,7 @@ fn run() -> CliResult<()> {
 pub(crate) fn parse_global_options(args: &mut Vec<String>) -> CliResult<Config> {
     let mut config = Config {
         address: None,
+        auth_config: None,
         aname: String::new(),
         uname: env::var("USER").unwrap_or_else(|_| "none".to_string()),
         msize: DEFAULT_MSIZE,
@@ -127,6 +130,7 @@ pub(crate) fn parse_global_options(args: &mut Vec<String>) -> CliResult<Config> 
             || arg == "-m"
             || arg == "--request-timeout"
             || arg == "--control-timeout"
+            || arg == "--auth-config"
         {
             let value = args
                 .get(i + 1)
@@ -170,6 +174,7 @@ pub(crate) fn parse_global_options(args: &mut Vec<String>) -> CliResult<Config> 
 fn set_global_option(config: &mut Config, option: &str, value: String) -> CliResult<()> {
     match option {
         "-a" | "--bind" => config.address = Some(value),
+        "--auth-config" => config.auth_config = Some(value.into()),
         "-A" => config.aname = value,
         "-u" => config.uname = value,
         "-m" => {
@@ -205,9 +210,10 @@ fn parse_request_timeout(value: &str) -> CliResult<Option<Duration>> {
 
 pub(crate) fn usage() -> ! {
     eprintln!(
-        "usage: r9p [-n] [--machine] [-a|--bind address] [-A aname] [-u uname] [-m msize] [--request-timeout seconds] [--control-timeout seconds] cmd args..."
+        "usage: r9p [-n] [--machine] [-a|--bind address] [-A aname] [-u uname] [-m msize] [--auth-config path] [--request-timeout seconds] [--control-timeout seconds] cmd args..."
     );
     eprintln!("possible cmds:");
+    eprintln!("  auth-keygen --private path --public path");
     eprintln!("  version [service]");
     eprintln!("  attach [service]");
     eprintln!("  read name");

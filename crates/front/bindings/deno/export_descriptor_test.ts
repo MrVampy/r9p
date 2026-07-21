@@ -10,7 +10,7 @@ Deno.test("renderExportDescriptor emits the canonical field order", () => {
       exportedRoot: "/sensor",
       transportClass: "tcp",
       mode: "ro",
-      auth: "wg:vault-runtime-lan",
+      auth: "p9any:noise-ik@vault",
       pid: 42,
       protocol: "9P2000",
       msize: 65_536,
@@ -28,7 +28,7 @@ Deno.test("renderExportDescriptor emits the canonical field order", () => {
       "exported_root\t/sensor\n" +
       "transport_class\ttcp\n" +
       "mode\tro\n" +
-      "auth\twg:vault-runtime-lan\n" +
+      "auth\tp9any:noise-ik@vault\n" +
       "pid\t42\n" +
       "protocol\t9P2000\n" +
       "msize\t65536\n" +

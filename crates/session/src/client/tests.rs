@@ -1,4 +1,5 @@
 use super::Client;
+use crate::ConnectionConfig;
 use r9p::{
     codec,
     error::{Error as P9Error, Result as P9Result},
@@ -21,15 +22,22 @@ use std::{
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 const ROOT_QID: Qid = Qid::dir(1);
 
+fn connection(address: String) -> ConnectionConfig {
+    ConnectionConfig {
+        address,
+        uname: "codex".to_string(),
+        aname: "/".to_string(),
+        msize: 8192,
+        auth_config: None,
+    }
+}
+
 #[test]
 fn connects_explicit_unix_socket() {
     let socket_path = unique_socket_path("explicit");
     let server = spawn_unix_root_server(&socket_path);
     let client = Client::connect_with_timeout(
-        &format!("unix!{}", socket_path.display()),
-        "codex",
-        "/",
-        8192,
+        &connection(format!("unix!{}", socket_path.display())),
         Duration::ZERO,
     )
     .expect("client should connect");
@@ -56,10 +64,7 @@ fn connect_waits_for_unix_socket_to_appear() {
     });
 
     let client = Client::connect_with_timeout(
-        &format!("unix!{}", socket_path.display()),
-        "codex",
-        "/",
-        8192,
+        &connection(format!("unix!{}", socket_path.display())),
         Duration::from_secs(2),
     )
     .expect("client should wait for socket and connect");
@@ -84,10 +89,7 @@ fn connects_namespace_socket() {
     let server = spawn_unix_root_server(&socket_path);
 
     let client = Client::connect_with_timeout(
-        "namespace!example-service",
-        "codex",
-        "/",
-        8192,
+        &connection("namespace!example-service".to_string()),
         Duration::ZERO,
     )
     .expect("client should connect");
@@ -112,10 +114,7 @@ fn client_slot_replacement_bumps_session_epoch() {
     let first_socket = unique_socket_path("slot-first");
     let first_server = spawn_unix_root_server(&first_socket);
     let first_client = Client::connect_with_timeout(
-        &format!("unix!{}", first_socket.display()),
-        "codex",
-        "/",
-        8192,
+        &connection(format!("unix!{}", first_socket.display())),
         Duration::ZERO,
     )
     .expect("first client should connect");
@@ -125,10 +124,7 @@ fn client_slot_replacement_bumps_session_epoch() {
     let second_socket = unique_socket_path("slot-second");
     let second_server = spawn_unix_root_server(&second_socket);
     let second_client = Client::connect_with_timeout(
-        &format!("unix!{}", second_socket.display()),
-        "codex",
-        "/",
-        8192,
+        &connection(format!("unix!{}", second_socket.display())),
         Duration::ZERO,
     )
     .expect("second client should connect");

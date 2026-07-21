@@ -1,5 +1,6 @@
-use crate::{error::client_error, Error, Result};
+use crate::{error::client_error, ConnectionConfig, Error, Result};
 use r9p::{blocking, multiplex::MultiplexTransport};
+use r9p_auth::{authenticate_client, ClientConfig as AuthConfig, SecureStream};
 use std::{
     env,
     io::{self, Read, Write},
@@ -9,12 +10,14 @@ use std::{
 };
 
 const TCP_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_AUTH_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 
 pub(crate) enum ClientStream {
     Tcp(TcpStream),
+    Secure(SecureStream),
     #[cfg(unix)]
     Unix(UnixStream),
 }
@@ -23,6 +26,7 @@ impl Read for ClientStream {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         match self {
             Self::Tcp(stream) => stream.read(buffer),
+            Self::Secure(stream) => stream.read(buffer),
             #[cfg(unix)]
             Self::Unix(stream) => stream.read(buffer),
         }
@@ -33,6 +37,7 @@ impl Write for ClientStream {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
         match self {
             Self::Tcp(stream) => stream.write(buffer),
+            Self::Secure(stream) => stream.write(buffer),
             #[cfg(unix)]
             Self::Unix(stream) => stream.write(buffer),
         }
@@ -41,6 +46,7 @@ impl Write for ClientStream {
     fn flush(&mut self) -> io::Result<()> {
         match self {
             Self::Tcp(stream) => stream.flush(),
+            Self::Secure(stream) => stream.flush(),
             #[cfg(unix)]
             Self::Unix(stream) => stream.flush(),
         }
@@ -51,6 +57,7 @@ impl MultiplexTransport for ClientStream {
     fn try_clone_transport(&self) -> io::Result<Self> {
         match self {
             Self::Tcp(stream) => stream.try_clone().map(Self::Tcp),
+            Self::Secure(stream) => stream.try_clone().map(Self::Secure),
             #[cfg(unix)]
             Self::Unix(stream) => stream.try_clone().map(Self::Unix),
         }
@@ -59,6 +66,7 @@ impl MultiplexTransport for ClientStream {
     fn shutdown_transport(&self) -> io::Result<()> {
         match self {
             Self::Tcp(stream) => stream.shutdown(Shutdown::Both),
+            Self::Secure(stream) => stream.shutdown(),
             #[cfg(unix)]
             Self::Unix(stream) => stream.shutdown(Shutdown::Both),
         }
@@ -71,16 +79,36 @@ pub(crate) enum ConnectTarget {
     Unix(PathBuf),
 }
 
-pub(crate) fn connect_stream(address: &str) -> Result<ClientStream> {
-    match parse_connection_target(address)? {
+pub(crate) fn connect_stream(
+    config: &ConnectionConfig,
+    connect_timeout: Duration,
+) -> Result<ClientStream> {
+    match parse_connection_target(&config.address)? {
         ConnectTarget::Tcp(socket) => {
             let stream = blocking::connect_tcp_stream(&socket).map_err(client_error)?;
             stream
                 .set_write_timeout(Some(TCP_WRITE_TIMEOUT))
                 .map_err(|error| Error::io("set TCP write timeout", error))?;
-            Ok(ClientStream::Tcp(stream))
+            match &config.auth_config {
+                Some(path) => {
+                    let auth = AuthConfig::read(path).map_err(client_error)?;
+                    let handshake_timeout = if connect_timeout.is_zero() {
+                        DEFAULT_AUTH_HANDSHAKE_TIMEOUT
+                    } else {
+                        connect_timeout
+                    };
+                    authenticate_client(stream, &auth, &config.uname, handshake_timeout)
+                        .map(ClientStream::Secure)
+                        .map_err(client_error)
+                }
+                None => Ok(ClientStream::Tcp(stream)),
+            }
         }
-        ConnectTarget::Unix(path) => connect_unix_stream(&path),
+        ConnectTarget::Unix(path) if config.auth_config.is_none() => connect_unix_stream(&path),
+        ConnectTarget::Unix(_) => Err(Error::new(
+            libc::EINVAL,
+            "session auth config is only valid for TCP endpoints",
+        )),
     }
 }
 

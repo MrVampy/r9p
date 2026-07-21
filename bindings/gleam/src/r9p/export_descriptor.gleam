@@ -127,7 +127,7 @@ fn auth_class(auth: String) -> Result(String, String) {
         Ok(#(class, details)) ->
           case
             details != ""
-            && list.contains(["wg", "tailscale", "uds-peercred"], class)
+            && list.contains(["p9any", "uds-peercred"], class)
           {
             True -> Ok(class)
             False -> Error("invalid auth boundary " <> auth)
@@ -150,8 +150,8 @@ fn validate_authority(
       }
     "tcp", "uds-peercred" ->
       Error("descriptor uds-peercred auth is not valid for TCP")
-    "unix", "wg" | "unix", "tailscale" ->
-      Error("descriptor network auth boundaries are not valid for unix sockets")
+    "unix", "p9any" ->
+      Error("descriptor p9any session auth is not valid for unix sockets")
     _, _ -> Ok(Nil)
   }
 }

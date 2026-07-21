@@ -246,13 +246,7 @@ impl R9pFuse {
             eprintln!("r9p mount: reconnecting to {}", self.config.address);
         }
         let tracker = self.client.snapshot()?.tracker();
-        let client = Client::connect_with_tracker(
-            &self.config.address,
-            &self.config.uname,
-            &self.config.aname,
-            self.config.msize,
-            tracker,
-        )?;
+        let client = Client::connect_with_tracker(&self.config.connection(), tracker)?;
         let root_fid = client.root_fid();
         let root_stat = client.stat_timeout(root_fid, self.config.lookup_timeout)?;
         let paths = {

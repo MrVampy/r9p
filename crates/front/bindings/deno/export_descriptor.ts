@@ -110,7 +110,7 @@ function validateOptions(options: ExportDescriptorOptions): void {
     ? ""
     : options.auth.slice(authClass.length + 1);
   if (
-    !["none", "wg", "tailscale", "uds-peercred"].includes(authClass) ||
+    !["none", "p9any", "uds-peercred"].includes(authClass) ||
     (authClass !== "none" && authDetails === "")
   ) {
     throw new Error(`invalid auth boundary ${options.auth}`);
@@ -126,10 +126,10 @@ function validateOptions(options: ExportDescriptorOptions): void {
   }
   if (
     options.transportClass === "unix" &&
-    (authClass === "wg" || authClass === "tailscale")
+    authClass === "p9any"
   ) {
     throw new Error(
-      "descriptor network auth boundaries are not valid for unix sockets",
+      "descriptor p9any session auth is not valid for unix sockets",
     );
   }
 }

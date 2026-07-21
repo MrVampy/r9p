@@ -50,8 +50,7 @@ pub struct AuthBoundary {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthClass {
     None,
-    WireGuard,
-    Tailscale,
+    P9any,
     UnixPeerCred,
 }
 
@@ -177,9 +176,9 @@ impl ExportDescriptor {
                     "descriptor uds-peercred auth is not valid for TCP",
                 ));
             }
-            (TransportClass::Unix, AuthClass::WireGuard | AuthClass::Tailscale) => {
+            (TransportClass::Unix, AuthClass::P9any) => {
                 return Err(Error::from(
-                    "descriptor network auth boundaries are not valid for unix sockets",
+                    "descriptor p9any session auth is not valid for unix sockets",
                 ));
             }
             _ => {}
@@ -278,8 +277,7 @@ impl AuthClass {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::None => "none",
-            Self::WireGuard => "wg",
-            Self::Tailscale => "tailscale",
+            Self::P9any => "p9any",
             Self::UnixPeerCred => "uds-peercred",
         }
     }
@@ -287,8 +285,7 @@ impl AuthClass {
     pub fn parse(value: &str) -> Result<Self> {
         match value {
             "none" => Ok(Self::None),
-            "wg" => Ok(Self::WireGuard),
-            "tailscale" => Ok(Self::Tailscale),
+            "p9any" => Ok(Self::P9any),
             "uds-peercred" => Ok(Self::UnixPeerCred),
             _ => Err(Error::from(format!("unknown auth class {value}"))),
         }
@@ -525,10 +522,10 @@ mod tests {
     fn descriptor_accepts_network_auth_for_non_loopback_tcp() {
         let mut descriptor = descriptor();
         descriptor.endpoint_bind = "192.0.2.1:564".to_string();
-        descriptor.auth = AuthBoundary::parse("wg:m7-dev-lan").expect("auth should parse");
+        descriptor.auth = AuthBoundary::parse("p9any:noise-ik@vault").expect("auth should parse");
         let rendered = descriptor.render().expect("descriptor should render");
         let parsed = ExportDescriptor::parse(&rendered).expect("descriptor should parse");
-        assert_eq!(parsed.auth.render(), "wg:m7-dev-lan");
+        assert_eq!(parsed.auth.render(), "p9any:noise-ik@vault");
     }
 
     #[test]
@@ -540,7 +537,7 @@ mod tests {
         let mut unix = descriptor();
         unix.transport_class = TransportClass::Unix;
         unix.endpoint_bind = "unix:/tmp/r9p.sock".to_string();
-        unix.auth = AuthBoundary::parse("wg:m7-dev-lan").expect("auth should parse");
+        unix.auth = AuthBoundary::parse("p9any:noise-ik@vault").expect("auth should parse");
         assert!(
             ExportDescriptor::parse(&unix.render().expect("descriptor should render")).is_err()
         );

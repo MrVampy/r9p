@@ -8,7 +8,7 @@ use crate::{
     errors::{cli_error, CliResult},
     target::Config,
 };
-use r9p::export_descriptor::{AuthBoundary, AuthClass, EXPORT_FORMAT_V1};
+use r9p::export_descriptor::{AuthBoundary, EXPORT_FORMAT_V1};
 
 const DEFAULT_MAX_FIDS: usize = 4096;
 
@@ -34,6 +34,7 @@ pub(super) struct ExportConfig {
     pub(super) serve: ServeConfig,
     pub(super) descriptor_file: Option<PathBuf>,
     pub(super) auth: AuthBoundary,
+    pub(super) auth_config: Option<PathBuf>,
     pub(super) extra_fields: BTreeMap<String, String>,
 }
 
@@ -41,6 +42,11 @@ pub(super) fn parse_serve_config(global: Config, args: Vec<String>) -> CliResult
     if global.address.is_some() {
         return Err(cli_error(
             "r9p serve uses --bind for its listen address; do not use global -a",
+        ));
+    }
+    if global.auth_config.is_some() {
+        return Err(cli_error(
+            "r9p serve is loopback/local only and does not accept --auth-config; use r9p export",
         ));
     }
 
@@ -108,7 +114,7 @@ pub(super) fn parse_export_config(global: Config, args: Vec<String>) -> CliResul
     let mut writable = false;
     let mut descriptor_file = None;
     let mut descriptor_format = "machine".to_string();
-    let mut auth = AuthBoundary::none();
+    let mut auth_config = global.auth_config;
     let mut extra_fields = BTreeMap::new();
     let mut positional = Vec::new();
     let mut index = 0_usize;
@@ -147,12 +153,15 @@ pub(super) fn parse_export_config(global: Config, args: Vec<String>) -> CliResul
                         .ok_or_else(|| cli_error("missing descriptor file"))?,
                 ));
             }
-            "--auth" => {
+            "--auth-config" => {
                 index += 1;
-                auth = AuthBoundary::parse(
+                if auth_config.is_some() {
+                    return Err(cli_error("auth config already specified"));
+                }
+                auth_config = Some(PathBuf::from(
                     args.get(index)
-                        .ok_or_else(|| cli_error("missing auth boundary"))?,
-                )?;
+                        .ok_or_else(|| cli_error("missing auth config path"))?,
+                ));
             }
             "--descriptor-field" => {
                 index += 1;
@@ -183,7 +192,19 @@ pub(super) fn parse_export_config(global: Config, args: Vec<String>) -> CliResul
     }
 
     let bind = bind.unwrap_or_else(default_unix_bind);
-    validate_export_bind(&bind, &auth)?;
+    validate_export_bind(&bind, auth_config.is_some())?;
+    let auth = match &auth_config {
+        Some(path) => {
+            let config = r9p_auth::ServerConfig::read(path)?;
+            AuthBoundary::parse(&format!(
+                "{}:{}@{}",
+                r9p_auth::AUTH_CLASS,
+                r9p_auth::AUTH_PROTOCOL,
+                config.domain()
+            ))?
+        }
+        None => AuthBoundary::none(),
+    };
 
     Ok(ExportConfig {
         serve: ServeConfig {
@@ -197,6 +218,7 @@ pub(super) fn parse_export_config(global: Config, args: Vec<String>) -> CliResul
         },
         descriptor_file,
         auth,
+        auth_config,
         extra_fields,
     })
 }
@@ -262,24 +284,17 @@ fn validate_serve_bind(bind: &BindTarget) -> CliResult<()> {
     Ok(())
 }
 
-fn validate_export_bind(bind: &BindTarget, auth: &AuthBoundary) -> CliResult<()> {
+fn validate_export_bind(bind: &BindTarget, authenticated: bool) -> CliResult<()> {
     match bind {
         BindTarget::Tcp(address) if address.ip().is_loopback() => Ok(()),
-        BindTarget::Tcp(_) => match auth.class {
-            AuthClass::WireGuard | AuthClass::Tailscale => Ok(()),
-            AuthClass::None => Err(cli_error(
-                "r9p export requires --auth for non-loopback TCP binds",
-            )),
-            AuthClass::UnixPeerCred => Err(cli_error(
-                "r9p export cannot use uds-peercred auth for TCP binds",
-            )),
-        },
-        BindTarget::Unix(_) => match auth.class {
-            AuthClass::None | AuthClass::UnixPeerCred => Ok(()),
-            AuthClass::WireGuard | AuthClass::Tailscale => Err(cli_error(
-                "r9p export cannot use network auth boundaries for unix socket binds",
-            )),
-        },
+        BindTarget::Tcp(_) if authenticated => Ok(()),
+        BindTarget::Tcp(_) => Err(cli_error(
+            "r9p export requires --auth-config for non-loopback TCP binds",
+        )),
+        BindTarget::Unix(_) if authenticated => Err(cli_error(
+            "r9p export cannot use p9any session auth for a unix socket",
+        )),
+        BindTarget::Unix(_) => Ok(()),
     }
 }
 
@@ -290,7 +305,7 @@ fn serve_usage(code: i32) -> ! {
 
 fn export_usage(code: i32) -> ! {
     eprintln!(
-        "usage: r9p export [--bind address] [--max-fids count] [--writable] [--descriptor machine] [--descriptor-file path] [--auth boundary] [--descriptor-field key=value] root"
+        "usage: r9p export [--bind address] [--max-fids count] [--writable] [--descriptor machine] [--descriptor-file path] [--auth-config path] [--descriptor-field key=value] root"
     );
     std::process::exit(code);
 }

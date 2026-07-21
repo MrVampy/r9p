@@ -56,13 +56,7 @@ impl R9pFuse {
     pub fn mount(mut config: Config) -> Result<()> {
         block_termination_signals();
         normalize_config(&mut config);
-        let client = Client::connect_with_timeout(
-            &config.address,
-            &config.uname,
-            &config.aname,
-            config.msize,
-            config.connect_timeout,
-        )?;
+        let client = Client::connect_with_timeout(&config.connection(), config.connect_timeout)?;
         Self::mount_prepared(config, ClientSlot::new(client), None)
     }
 

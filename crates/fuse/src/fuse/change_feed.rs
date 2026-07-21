@@ -346,13 +346,7 @@ fn change_feed_client(fs: &R9pFuse, slot: &mut Option<Client>) -> Result<Client>
     if let Some(client) = slot {
         return Ok(client.clone());
     }
-    let client = Client::connect_with_timeout(
-        &fs.config.address,
-        &fs.config.uname,
-        &fs.config.aname,
-        fs.config.msize,
-        fs.config.connect_timeout,
-    )?;
+    let client = Client::connect_with_timeout(&fs.config.connection(), fs.config.connect_timeout)?;
     *slot = Some(client.clone());
     Ok(client)
 }

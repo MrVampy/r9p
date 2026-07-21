@@ -13,14 +13,20 @@ use r9p::{
     codec,
     message::RMessage,
 };
+use r9p_auth::{authenticate_client, ClientConfig as AuthConfig};
 
 use crate::errors::{cli_error, CliResult};
 use crate::target::{namespace_socket, split_namespace_path, Target};
 
 pub(crate) fn dial_target(target: &Target) -> CliResult<Box<dyn ReadWrite>> {
     match &target.config.address {
-        Some(address) => dial_address(address, target.config.request_timeout),
+        Some(address) => dial_address(address, &target.config),
         None => {
+            if target.config.auth_config.is_some() {
+                return Err(cli_error(
+                    "--auth-config requires a TCP endpoint supplied with -a or --bind",
+                ));
+            }
             let (service, _) = split_namespace_path(&target.path)?;
             let socket = namespace_socket(&service)?;
             dial_unix_socket(&socket, target.config.request_timeout)
@@ -30,22 +36,40 @@ pub(crate) fn dial_target(target: &Target) -> CliResult<Box<dyn ReadWrite>> {
 
 pub(crate) fn dial_address(
     address: &str,
-    request_timeout: Option<Duration>,
+    config: &crate::target::Config,
 ) -> CliResult<Box<dyn ReadWrite>> {
     if let Some(path) = unix_address_path(address) {
-        return dial_unix_socket(Path::new(path), request_timeout);
+        if config.auth_config.is_some() {
+            return Err(cli_error("--auth-config is not valid for a Unix endpoint"));
+        }
+        return dial_unix_socket(Path::new(path), config.request_timeout);
     }
     if let Some(command) = command_address(address) {
+        if config.auth_config.is_some() {
+            return Err(cli_error(
+                "--auth-config is not valid for a command endpoint",
+            ));
+        }
         return dial_command(command);
     }
-    let stream = match request_timeout {
+    let stream = match config.request_timeout {
         Some(timeout) => blocking::connect_tcp_stream_with_timeouts(
             address,
             ConnectionTimeouts::new(timeout, timeout, timeout),
         )?,
         None => blocking::connect_tcp_stream(address)?,
     };
-    Ok(Box::new(stream))
+    match &config.auth_config {
+        Some(path) => {
+            let auth = AuthConfig::read(path)?;
+            let timeout = config
+                .request_timeout
+                .unwrap_or_else(|| Duration::from_secs(30));
+            let stream = authenticate_client(stream, &auth, &config.uname, timeout)?;
+            Ok(Box::new(stream))
+        }
+        None => Ok(Box::new(stream)),
+    }
 }
 
 fn unix_address_path(address: &str) -> Option<&str> {

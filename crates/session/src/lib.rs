@@ -1,5 +1,6 @@
 mod cache;
 mod client;
+mod connection_config;
 pub mod control;
 mod epoch;
 mod error;
@@ -13,6 +14,7 @@ pub use cache::{
     DirEntry, Freshness, NamespaceCache, NamespaceCacheStats, StaleReason,
 };
 pub use client::Client;
+pub use connection_config::ConnectionConfig;
 pub use epoch::SessionEpoch;
 pub use error::{errno_for_9p_error, p9_error, Error, Result};
 pub use r9p::{ORDWR, OREAD, OTRUNC, OWRITE};

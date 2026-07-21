@@ -16,6 +16,7 @@ pub fn default_congestion_threshold(max_background: u16) -> u16 {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub address: String,
+    pub auth_config: Option<PathBuf>,
     pub mountpoint: String,
     pub uname: String,
     pub aname: String,
@@ -43,6 +44,18 @@ pub struct Config {
     pub change_feed_poll_interval: Duration,
     pub change_feed_backpressure_limit: usize,
     pub debug: bool,
+}
+
+impl Config {
+    pub(super) fn connection(&self) -> session::ConnectionConfig {
+        session::ConnectionConfig {
+            address: self.address.clone(),
+            uname: self.uname.clone(),
+            aname: self.aname.clone(),
+            msize: self.msize,
+            auth_config: self.auth_config.clone(),
+        }
+    }
 }
 
 pub(super) fn normalize_config(config: &mut Config) {

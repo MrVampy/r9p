@@ -10,6 +10,7 @@ use crate::{target::Config, DEFAULT_MSIZE};
 fn global() -> Config {
     Config {
         address: None,
+        auth_config: None,
         aname: String::new(),
         uname: "codex".to_string(),
         msize: DEFAULT_MSIZE,

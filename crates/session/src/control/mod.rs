@@ -10,9 +10,14 @@ mod snapshot_report;
 mod tree;
 
 use crate::feed::{start_feed_worker, FeedEventBus, FeedState, FeedWorkerConfig, FeedWorkerHandle};
-use crate::{Client, ClientSlot, Error, NamespaceCache, Result, SessionEpoch};
+use crate::{Client, ClientSlot, ConnectionConfig, Error, NamespaceCache, Result, SessionEpoch};
 pub use request::{parse_request, ControlRequest};
-use std::{fs, path::Path, thread, time::Duration};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    thread,
+    time::Duration,
+};
 
 #[cfg(unix)]
 use std::os::unix::net::UnixListener;
@@ -23,6 +28,7 @@ pub struct ControlConfig {
     pub uname: String,
     pub aname: String,
     pub msize: u32,
+    pub auth_config: Option<PathBuf>,
     pub connect_timeout: Duration,
     pub request_timeout: Duration,
     pub change_feed_path: Option<String>,
@@ -44,10 +50,13 @@ pub struct ControlRuntime {
 impl ControlRuntime {
     pub fn start(config: &ControlConfig) -> Result<Self> {
         let client = Client::connect_with_timeout(
-            &config.address,
-            &config.uname,
-            &config.aname,
-            config.msize,
+            &ConnectionConfig {
+                address: config.address.clone(),
+                uname: config.uname.clone(),
+                aname: config.aname.clone(),
+                msize: config.msize,
+                auth_config: config.auth_config.clone(),
+            },
             config.connect_timeout,
         )?;
         let session_epoch = SessionEpoch::new();
@@ -223,7 +232,16 @@ pub fn request_control_socket(
 ) -> Result<String> {
     let request = parse_request(request).map_err(|error| Error::new(libc::EINVAL, error))?;
     let address = format!("unix!{}", socket_path.display());
-    let client = Client::connect_with_timeout(&address, "session", "", 65_536, timeout)?;
+    let client = Client::connect_with_timeout(
+        &ConnectionConfig {
+            address,
+            uname: "session".to_string(),
+            aname: String::new(),
+            msize: 65_536,
+            auth_config: None,
+        },
+        timeout,
+    )?;
     let path = control_path_for_request(&request);
     let segments = snapshot::parse_namespace_path(&path);
     let fid = if segments.is_empty() {

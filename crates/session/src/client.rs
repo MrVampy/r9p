@@ -1,5 +1,6 @@
 use crate::{
-    error::client_error, request::RequestTracker, transport::connect_stream, Error, Result,
+    error::client_error, request::RequestTracker, transport::connect_stream, ConnectionConfig,
+    Error, Result,
 };
 use r9p::{codec::Variant, fid::Fid, multiplex::MultiplexedClient, qid::Qid, stat::Stat};
 use std::{
@@ -16,44 +17,25 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn connect_with_timeout(
-        address: &str,
-        uname: &str,
-        aname: &str,
-        msize: u32,
-        timeout: Duration,
-    ) -> Result<Self> {
-        Self::connect_with_tracker_timeout(
-            address,
-            uname,
-            aname,
-            msize,
-            RequestTracker::default(),
-            timeout,
-        )
+    pub fn connect_with_timeout(config: &ConnectionConfig, timeout: Duration) -> Result<Self> {
+        Self::connect_with_tracker_timeout(config, RequestTracker::default(), timeout)
     }
 
     pub fn connect_with_tracker(
-        address: &str,
-        uname: &str,
-        aname: &str,
-        msize: u32,
+        config: &ConnectionConfig,
         tracker: RequestTracker,
     ) -> Result<Self> {
-        Self::connect_with_tracker_timeout(address, uname, aname, msize, tracker, Duration::ZERO)
+        Self::connect_with_tracker_timeout(config, tracker, Duration::ZERO)
     }
 
     pub fn connect_with_tracker_timeout(
-        address: &str,
-        uname: &str,
-        aname: &str,
-        msize: u32,
+        config: &ConnectionConfig,
         tracker: RequestTracker,
         timeout: Duration,
     ) -> Result<Self> {
         let started = Instant::now();
         loop {
-            match Self::connect_with_tracker_once(address, uname, aname, msize, tracker.clone()) {
+            match Self::connect_with_tracker_once(config, tracker.clone(), timeout) {
                 Ok(client) => return Ok(client),
                 Err(error) if connect_should_retry(&error, timeout, started) => {
                     thread::sleep(connect_retry_sleep(timeout, started));
@@ -64,18 +46,16 @@ impl Client {
     }
 
     fn connect_with_tracker_once(
-        address: &str,
-        uname: &str,
-        aname: &str,
-        msize: u32,
+        config: &ConnectionConfig,
         tracker: RequestTracker,
+        connect_timeout: Duration,
     ) -> Result<Self> {
-        let stream = connect_stream(address)?;
+        let stream = connect_stream(config, connect_timeout)?;
         let inner = MultiplexedClient::connect_with_variant(
             stream,
-            uname,
-            aname,
-            msize,
+            &config.uname,
+            &config.aname,
+            config.msize,
             Variant::R9pSymlink,
         )
         .map_err(client_error)?;

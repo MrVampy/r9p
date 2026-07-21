@@ -6,6 +6,7 @@ use std::{
     os::unix::net::UnixListener,
     path::{Path, PathBuf},
     thread,
+    time::Duration,
 };
 
 use fs::{LocalTree, LocalTreeConfig};
@@ -16,12 +17,14 @@ use r9p::{
         serve_file_tree_connection as serve_protocol_file_tree, ConnectionStream, ServerConfig,
     },
 };
+use r9p_auth::{authenticate_server, ServerConfig as AuthConfig};
 
 use crate::errors::{cli_error, CliResult};
 
 use super::config::{BindTarget, ExportConfig, ServeConfig};
 
 const FD_LIMIT_MARGIN: u64 = 256;
+const AUTH_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(super) fn serve(config: ServeConfig) -> CliResult<()> {
     ensure_fd_budget(config.max_fids)?;
@@ -31,7 +34,7 @@ pub(super) fn serve(config: ServeConfig) -> CliResult<()> {
         config.root.display(),
         bound.display_endpoint()
     );
-    bound.run(config)
+    bound.run(config, None)
 }
 
 pub(super) fn export(config: ExportConfig) -> CliResult<()> {
@@ -39,7 +42,7 @@ pub(super) fn export(config: ExportConfig) -> CliResult<()> {
     let bound = BoundListener::bind(&config.serve)?;
     let descriptor = export_descriptor(&config, &bound)?;
     write_descriptor(&config, &descriptor)?;
-    bound.run(config.serve)
+    bound.run(config.serve, config.auth_config)
 }
 
 enum BoundListener {
@@ -89,20 +92,35 @@ impl BoundListener {
         }
     }
 
-    fn run(self, config: ServeConfig) -> CliResult<()> {
+    fn run(self, config: ServeConfig, auth_config: Option<PathBuf>) -> CliResult<()> {
+        let auth = auth_config.as_deref().map(AuthConfig::read).transpose()?;
         match self {
             Self::Tcp(listener) => {
                 for stream in listener.incoming() {
                     let stream = stream
                         .map_err(|error| cli_error(format!("accept TCP connection: {error}")))?;
-                    spawn_connection(stream, config.clone());
+                    match &auth {
+                        Some(auth) => {
+                            match authenticate_server(stream, auth, AUTH_HANDSHAKE_TIMEOUT) {
+                                Ok(session) => spawn_connection(
+                                    session.stream,
+                                    config.clone(),
+                                    Some(session.peer.principal().as_bytes().to_vec()),
+                                ),
+                                Err(error) => {
+                                    eprintln!("r9p: reject unauthenticated connection: {error}")
+                                }
+                            }
+                        }
+                        None => spawn_connection(stream, config.clone(), None),
+                    }
                 }
             }
             Self::Unix { listener, .. } => {
                 for stream in listener.incoming() {
                     let stream = stream
                         .map_err(|error| cli_error(format!("accept unix connection: {error}")))?;
-                    spawn_connection(stream, config.clone());
+                    spawn_connection(stream, config.clone(), None);
                 }
             }
         }
@@ -110,12 +128,12 @@ impl BoundListener {
     }
 }
 
-fn spawn_connection<S>(stream: S, config: ServeConfig)
+fn spawn_connection<S>(stream: S, config: ServeConfig, session_uname: Option<Vec<u8>>)
 where
     S: ConnectionStream,
 {
     thread::spawn(move || {
-        if let Err(error) = serve_connection(stream, config) {
+        if let Err(error) = serve_connection(stream, config, session_uname) {
             eprintln!("r9p: serve connection: {error}");
         }
     });
@@ -185,7 +203,11 @@ fn remove_stale_socket(path: &Path) -> CliResult<()> {
         .map_err(|error| cli_error(format!("remove stale socket {}: {error}", path.display())))
 }
 
-fn serve_connection<S>(stream: S, config: ServeConfig) -> CliResult<()>
+fn serve_connection<S>(
+    stream: S,
+    config: ServeConfig,
+    session_uname: Option<Vec<u8>>,
+) -> CliResult<()>
 where
     S: ConnectionStream,
 {
@@ -203,6 +225,7 @@ where
             max_msize: config.msize,
             max_fids: config.max_fids,
             variant: Variant::R9pSymlink,
+            session_uname,
             ..ServerConfig::default()
         },
         tree,

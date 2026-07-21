@@ -6,6 +6,7 @@ use crate::usage;
 #[derive(Clone, Debug)]
 pub(crate) struct Config {
     pub(crate) address: Option<String>,
+    pub(crate) auth_config: Option<PathBuf>,
     pub(crate) aname: String,
     pub(crate) uname: String,
     pub(crate) msize: u32,

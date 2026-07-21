@@ -42,8 +42,7 @@ pub(crate) fn auth_keygen_cmd(config: Config, args: Vec<String>) -> CliResult<()
     }
     let private_path = private_path.ok_or_else(|| cli_error("missing --private path"))?;
     let public_path = public_path.ok_or_else(|| cli_error("missing --public path"))?;
-    let pair = r9p_auth::generate_key_pair()?;
-    r9p_auth::write_key_pair(&private_path, &public_path, &pair)?;
+    let pair = r9p_auth::provision_key_pair(&private_path, &public_path)?;
     println!("public_key\t{}", pair.public);
     Ok(())
 }

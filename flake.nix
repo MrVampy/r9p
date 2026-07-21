@@ -7,11 +7,33 @@
   };
 
   outputs = { self, nixpkgs, flake-utils }:
-    flake-utils.lib.eachDefaultSystem
+    {
+      nixosModules.session-auth =
+        { pkgs, ... }@moduleArgs:
+        import ./nix/session-auth.nix (moduleArgs // {
+          defaultPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+        });
+    }
+    // flake-utils.lib.eachDefaultSystem
       (system:
         let
           pkgs = import nixpkgs {
             inherit system;
+          };
+          sessionAuthModuleEval = nixpkgs.lib.nixosSystem {
+            inherit system;
+            modules = [
+              self.nixosModules.session-auth
+              {
+                services.r9p-session-auth.keys.proof = {
+                  privateKeyFile = "/var/lib/r9p-session-auth/proof.key";
+                  publicKeyFile = "/var/lib/r9p-session-auth/proof.key.pub";
+                  user = "r9p-proof";
+                  group = "r9p-proof";
+                };
+                system.stateVersion = "25.11";
+              }
+            ];
           };
           r9p = pkgs.rustPlatform.buildRustPackage {
             pname = "r9p";
@@ -112,6 +134,33 @@
           packages.front = front;
           packages.front-tests = frontTests;
           packages.r9p = r9p;
+
+          checks = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+            session-auth-module =
+              let
+                service = sessionAuthModuleEval.config.systemd.services.r9p-session-key-proof;
+              in
+              pkgs.runCommandLocal "r9p-session-auth-module-check"
+                {
+                  directoryRules = builtins.concatStringsSep "\n"
+                    sessionAuthModuleEval.config.systemd.tmpfiles.rules;
+                  executable = service.serviceConfig.ExecStart;
+                  packageName = sessionAuthModuleEval.config.services.r9p-session-auth.package.pname;
+                  serviceGroup = service.serviceConfig.Group;
+                  serviceUser = service.serviceConfig.User;
+                } ''
+                test "$packageName" = "r9p"
+                test "$serviceUser" = "r9p-proof"
+                test "$serviceGroup" = "r9p-proof"
+                test "$directoryRules" = \
+                  "d /var/lib/r9p-session-auth 0700 r9p-proof r9p-proof -"
+                case "$executable" in
+                  */bin/r9p\ auth-keygen\ --private\ /var/lib/r9p-session-auth/proof.key\ --public\ /var/lib/r9p-session-auth/proof.key.pub) ;;
+                  *) exit 1 ;;
+                esac
+                touch "$out"
+              '';
+          };
 
           devShells.default = pkgs.mkShell {
             packages = with pkgs; [

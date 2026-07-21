@@ -6,7 +6,9 @@ mod stream;
 
 pub use config::{ClientConfig, ServerConfig};
 pub use handshake::{authenticate_client, authenticate_server, AuthenticatedSession, PeerIdentity};
-pub use key::{generate_key_pair, write_key_pair, KeyPair, PrivateKey, PublicKey};
+pub use key::{
+    generate_key_pair, provision_key_pair, write_key_pair, KeyPair, PrivateKey, PublicKey,
+};
 pub use stream::SecureStream;
 
 pub const AUTH_PROTOCOL: &str = r9p::export_descriptor::P9ANY_NOISE_IK;

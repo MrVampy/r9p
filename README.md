@@ -131,9 +131,25 @@ r9p auth-keygen \
   --public /var/lib/r9p/auth/public
 ```
 
-The command creates a mode `0600` private key and a mode `0644` public key and
-refuses to overwrite either path. A server config maps public keys to the exact
-9P usernames they may claim:
+The command creates a mode `0600` private key and a mode `0644` public key. On
+later runs it verifies that the pair still matches. If a completed private-key
+write is missing only its public key, the command reconstructs the public key;
+a public-only or mismatched pair fails without overwriting either file.
+
+The flake exports `nixosModules.session-auth` for boot-time provisioning and
+verification without host-specific scripts. After importing the module, declare
+each key pair and its owner:
+
+```nix
+services.r9p-session-auth.keys.vault = {
+  privateKeyFile = "/var/lib/r9p-session-auth/vault.key";
+  publicKeyFile = "/var/lib/r9p-session-auth/vault.key.pub";
+  user = "vault-runtime";
+  group = "vault-runtime";
+};
+```
+
+A server config maps public keys to the exact 9P usernames they may claim:
 
 ```text
 format r9p-session-auth.v1

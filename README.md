@@ -14,6 +14,7 @@ Current surfaces and consumers:
 - `r9p serve`, a local filesystem-backed 9P server that is read-only by
   default and explicitly writable with `--writable`.
 - `r9p export`, `serve` plus a machine-readable `r9p-export.v1` descriptor.
+- `r9p auth-keygen`, key creation for authenticated remote 9P sessions.
 - Racme serves an Acme-compatible 9P namespace through `r9p`.
 - Vault consumes `r9p` for its runtime listener, one-shot client operations,
   local FUSE mounts, and peer export descriptors.
@@ -23,8 +24,9 @@ The architectural boundary is deliberately small:
 - `r9p` speaks 9P.
 - Backends decide what paths mean.
 - Clients decide what they consume.
-- Runtime adapters own sockets, threads, async tasks, BEAM ports, TLS, and
-  FUSE.
+- `r9p-auth` owns p9any negotiation, peer authentication, and encrypted stream
+  records above the protocol core.
+- Runtime adapters own sockets, threads, async tasks, BEAM ports, and FUSE.
 
 ## Scope
 
@@ -103,17 +105,67 @@ r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] con [-r] path
 r9p mount [--uname uname] [--aname aname] [--attr-timeout seconds] [--entry-timeout seconds] [--request-timeout seconds] [--lookup-timeout seconds] [--read-timeout seconds] [--write-timeout seconds] [--mutation-timeout seconds] [--control-timeout seconds] [--interrupt-timeout seconds] [--max-workers count] [--max-background count] [--congestion-threshold count] [--diagnostics-file path] [--diagnostics-capacity count] endpoint mountpoint
 r9p mount ensure|status|stop --mountpoint path [--unit name] [--status-file path] [--expect-endpoint endpoint] [--expect-change-feed path] [--expect-status-file path] [--attempts count] [-- mount args...]
 r9p serve [--bind address] [--max-fids count] [--writable] root
-r9p export [--bind address] [--max-fids count] [--writable] [--descriptor machine] [--descriptor-file path] [--auth boundary] [--descriptor-field key=value] root
+r9p export [--bind address] [--max-fids count] [--writable] [--descriptor machine] [--descriptor-file path] [--auth-config path] [--descriptor-field key=value] root
+r9p auth-keygen --private path --public path
 ```
 
 `-a` accepts `host:port`, `tcp!host!port`, bare hosts defaulting to port 564,
 and `unix!/path/to/socket`. Without `-a`, paths use the plan9port namespace
 shape: `service/subpath` connects to `$NAMESPACE/service` and walks `subpath`.
 `-n` and `-D` are accepted for plan9port command-line compatibility; `r9p`
-always uses the noauth attach path today.
+uses `NOFID` attach because remote authentication is completed before the 9P
+version and attach exchange.
 
 The CLI is a blocking client facade over the reusable library. It is not the
 boundary of the library itself.
+
+### Authenticated TCP sessions
+
+Non-loopback `r9p export` endpoints require a server authentication config.
+Clients opt into the same boundary with the global `--auth-config` option.
+The suite generates each host key pair without external crypto tooling:
+
+```bash
+r9p auth-keygen \
+  --private /var/lib/r9p/auth/private \
+  --public /var/lib/r9p/auth/public
+```
+
+The command creates a mode `0600` private key and a mode `0644` public key and
+refuses to overwrite either path. A server config maps public keys to the exact
+9P usernames they may claim:
+
+```text
+format r9p-session-auth.v1
+role server
+domain vault
+private-key /var/lib/r9p/auth/private
+peer 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef codex
+```
+
+A client config pins the server public key:
+
+```text
+format r9p-session-auth.v1
+role client
+domain vault
+private-key /var/lib/r9p/auth/private
+server-key fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+```
+
+Relative private-key paths resolve from the config file directory. A protected
+client call and export then use:
+
+```bash
+r9p --auth-config client.conf -a 192.168.0.30:9564 -u codex ls /
+r9p export --bind 192.168.0.30:9564 --auth-config server.conf /srv/export
+```
+
+The peers negotiate `noise-ik@<domain>` with p9any, authenticate their pinned
+X25519 static keys, and carry 9P over ChaCha20-Poly1305 records with BLAKE2s.
+Each session creates its own ephemeral handshake state; there is no per-session
+operator setup. The provider follows p9any's extensible negotiation shape but
+does not claim dp9ik or unmodified factotum interoperability.
 
 `r9p mount` runs a bounded worker pool rather than spawning one OS thread per
 FUSE request. The defaults follow the conservative libfuse/Linux shape:

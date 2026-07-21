@@ -27,6 +27,7 @@ authentication protocol negotiation, and stream protection?
 - `crates/session/src/transport.rs`
 - Snow source at upstream revision `8ac60f51cfe3e010c84f0a454cc575ad9204fa12`,
   especially `src/handshakestate.rs` and `src/stateless_transportstate.rs`
+- The normalized `Cargo.toml` shipped in the Snow `0.10.0` crate
 
 ## Findings
 
@@ -50,6 +51,10 @@ authentication protocol negotiation, and stream protection?
   Snow's stateless transport mode permits independent ordered read and write
   record counters, which fits r9p's cloned blocking stream model without
   serializing reads behind writes.
+- Snow `0.10.0`'s published `std` feature also activates crypto providers not
+  used by the selected suite. The dependency therefore disables default and
+  `std` features and enables only X25519, ChaCha20-Poly1305, BLAKE2, and secure
+  randomness; r9p-auth itself remains a standard-library crate.
 
 ## Effect on the implementation
 
@@ -60,8 +65,8 @@ authentication protocol negotiation, and stream protection?
   public key to an explicit set of allowed 9P usernames.
 - Bind the authenticated username into the core server session so a later
   `Tauth` or `Tattach` cannot claim a different `uname`.
-- Replace declarative WireGuard and Tailscale descriptor classes with the
-  enforced `p9any:noise-ik@<domain>` class. Do not retain aliases.
+- Replace declarative network-tunnel descriptor classes with the enforced
+  `p9any:noise-ik@<domain>` class. Do not retain aliases.
 - Keep Unix sockets and loopback connections as explicit local trust paths.
 - Keep Vault admission, namespace policy, and governance outside r9p; Vault
   receives the verified session identity before applying those policies.

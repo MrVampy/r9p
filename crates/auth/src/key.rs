@@ -152,16 +152,22 @@ fn write_new_file(path: &Path, bytes: &[u8], mode: u32, label: &str) -> Result<(
         .mode(mode)
         .open(path)
         .map_err(|error| Error::from(format!("create {label} {}: {error}", path.display())))?;
-    file.write_all(bytes)
+    let result = file
+        .write_all(bytes)
         .and_then(|()| file.write_all(b"\n"))
         .and_then(|()| file.sync_all())
-        .map_err(|error| Error::from(format!("write {label} {}: {error}", path.display())))?;
-    fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|error| {
-        Error::from(format!(
-            "set {label} permissions {}: {error}",
-            path.display()
-        ))
-    })
+        .and_then(|()| fs::set_permissions(path, fs::Permissions::from_mode(mode)));
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            drop(file);
+            let _ = fs::remove_file(path);
+            Err(Error::from(format!(
+                "write {label} {}: {error}",
+                path.display()
+            )))
+        }
+    }
 }
 
 fn key_array(bytes: &[u8], label: &str) -> Result<[u8; KEY_BYTES]> {

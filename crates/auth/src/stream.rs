@@ -160,7 +160,7 @@ impl r9p::multiplex::MultiplexTransport for SecureStream {
 fn lock<'a, T>(mutex: &'a Mutex<T>, label: &str) -> io::Result<MutexGuard<'a, T>> {
     mutex
         .lock()
-        .map_err(|_| io::Error::new(io::ErrorKind::Other, format!("{label} poisoned")))
+        .map_err(|_| io::Error::other(format!("{label} poisoned")))
 }
 
 fn next_nonce(nonce: u64) -> io::Result<u64> {

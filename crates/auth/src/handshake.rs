@@ -48,8 +48,10 @@ pub fn authenticate_client(
 
     let params = noise_params()?;
     let prologue = prologue(config.domain());
-    let mut handshake = snow::Builder::new(params)
+    let builder = snow::Builder::new(params)
         .prologue(&prologue)
+        .map_err(noise_error("configure authentication domain"))?;
+    let mut handshake = builder
         .local_private_key(config.private_key().as_bytes())
         .map_err(noise_error("configure client private key"))?
         .remote_public_key(config.server_key().as_bytes())
@@ -88,8 +90,10 @@ pub fn authenticate_server(
 
     let params = noise_params()?;
     let prologue = prologue(config.domain());
-    let mut handshake = snow::Builder::new(params)
+    let builder = snow::Builder::new(params)
         .prologue(&prologue)
+        .map_err(noise_error("configure authentication domain"))?;
+    let mut handshake = builder
         .local_private_key(config.private_key().as_bytes())
         .map_err(noise_error("configure server private key"))?
         .build_responder()

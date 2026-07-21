@@ -77,9 +77,8 @@ impl SecureStream {
                 let _ = self.socket.shutdown(Shutdown::Both);
                 noise_io_error(error)
             })?;
-        state.nonce = next_nonce(state.nonce).map_err(|error| {
+        state.nonce = next_nonce(state.nonce).inspect_err(|_| {
             let _ = self.socket.shutdown(Shutdown::Both);
-            error
         })?;
         plaintext.truncate(plaintext_len);
         state.plaintext = plaintext;
@@ -139,9 +138,8 @@ impl Write for SecureStream {
                 "encrypted 9P record exceeds its framing limit",
             )
         })?;
-        state.nonce = next_nonce(state.nonce).map_err(|error| {
+        state.nonce = next_nonce(state.nonce).inspect_err(|_| {
             let _ = self.socket.shutdown(Shutdown::Both);
-            error
         })?;
         if let Err(error) = self
             .socket

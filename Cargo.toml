@@ -37,4 +37,4 @@ snow = { version = "=0.10.0", default-features = false, features = [
     "use-curve25519",
     "use-getrandom",
 ] }
-zeroize = { version = "=1.9.0", default-features = false }
+zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }

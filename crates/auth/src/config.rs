@@ -1,12 +1,12 @@
 use crate::{PrivateKey, PublicKey, CONFIG_FORMAT};
 use r9p::error::{Error, Result};
+use r9p::export_descriptor::validate_p9any_domain;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
 
-const MAX_DOMAIN_BYTES: usize = 255;
 const MAX_PRINCIPAL_BYTES: usize = 255;
 
 #[derive(Clone, Debug)]
@@ -30,7 +30,7 @@ impl ClientConfig {
         server_key: PublicKey,
     ) -> Result<Self> {
         let domain = domain.into();
-        validate_domain(&domain)?;
+        validate_p9any_domain(&domain)?;
         Ok(Self {
             domain,
             private_key,
@@ -76,7 +76,7 @@ impl ServerConfig {
         peers: impl IntoIterator<Item = (PublicKey, String)>,
     ) -> Result<Self> {
         let domain = domain.into();
-        validate_domain(&domain)?;
+        validate_p9any_domain(&domain)?;
         let mut allowed = BTreeMap::<PublicKey, BTreeSet<String>>::new();
         for (key, principal) in peers {
             validate_principal(&principal)?;
@@ -146,23 +146,6 @@ pub(crate) fn validate_principal(principal: &str) -> Result<()> {
         .any(|byte| byte == 0 || byte.is_ascii_control())
     {
         return Err(Error::from("session principal contains a control byte"));
-    }
-    Ok(())
-}
-
-fn validate_domain(domain: &str) -> Result<()> {
-    if domain.is_empty() || domain.len() > MAX_DOMAIN_BYTES {
-        return Err(Error::from(format!(
-            "auth domain must contain 1 to {MAX_DOMAIN_BYTES} bytes"
-        )));
-    }
-    if !domain
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
-    {
-        return Err(Error::from(
-            "auth domain must use ascii letters, digits, dot, dash, or underscore",
-        ));
     }
     Ok(())
 }

@@ -32,6 +32,21 @@ pub fn remote_tcp_requires_a_network_authority_test() {
   |> should.be_error
 }
 
+pub fn p9any_requires_the_noise_ik_provider_and_a_valid_domain_test() {
+  export_descriptor.render(
+    export_descriptor.Descriptor(..descriptor(), auth: "p9any:dp9ik@vault"),
+  )
+  |> should.be_error
+
+  export_descriptor.render(
+    export_descriptor.Descriptor(
+      ..descriptor(),
+      auth: "p9any:noise-ik@vault/domain",
+    ),
+  )
+  |> should.be_error
+}
+
 fn descriptor() -> export_descriptor.Descriptor {
   export_descriptor.Descriptor(
     endpoint_bind: "192.168.0.20:4100",

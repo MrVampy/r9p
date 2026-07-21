@@ -12,3 +12,4 @@ workspace = true
 [dependencies]
 r9p.workspace = true
 snow.workspace = true
+zeroize.workspace = true

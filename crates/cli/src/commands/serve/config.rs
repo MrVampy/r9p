@@ -196,12 +196,7 @@ pub(super) fn parse_export_config(global: Config, args: Vec<String>) -> CliResul
     let auth = match &auth_config {
         Some(path) => {
             let config = r9p_auth::ServerConfig::read(path)?;
-            AuthBoundary::parse(&format!(
-                "{}:{}@{}",
-                r9p_auth::AUTH_CLASS,
-                r9p_auth::AUTH_PROTOCOL,
-                config.domain()
-            ))?
+            AuthBoundary::p9any_noise_ik(config.domain())?
         }
         None => AuthBoundary::none(),
     };
@@ -277,7 +272,7 @@ fn validate_serve_bind(bind: &BindTarget) -> CliResult<()> {
     if let BindTarget::Tcp(address) = bind {
         if !address.ip().is_loopback() {
             return Err(cli_error(
-                "r9p serve only admits loopback TCP binds in Plan 47; use r9p export --auth for an authenticated network boundary",
+                "r9p serve only admits loopback TCP binds; use r9p export --auth-config for an authenticated network boundary",
             ));
         }
     }

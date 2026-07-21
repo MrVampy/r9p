@@ -9,11 +9,16 @@ use std::{
     path::Path,
     sync::Arc,
 };
+use zeroize::{Zeroize, Zeroizing};
 
 const KEY_BYTES: usize = 32;
 const KEY_HEX_BYTES: usize = KEY_BYTES * 2;
 #[derive(Clone)]
-pub struct PrivateKey(Arc<[u8; KEY_BYTES]>);
+pub struct PrivateKey(Arc<PrivateKeyBytes>);
+
+struct PrivateKeyBytes {
+    bytes: [u8; KEY_BYTES],
+}
 
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 pub struct PublicKey([u8; KEY_BYTES]);
@@ -26,7 +31,7 @@ pub struct KeyPair {
 
 impl PrivateKey {
     pub fn from_hex(value: &str) -> Result<Self> {
-        decode_key(value).map(|bytes| Self(Arc::new(bytes)))
+        decode_key(value).map(|bytes| Self(Arc::new(PrivateKeyBytes { bytes })))
     }
 
     pub fn read(path: &Path) -> Result<Self> {
@@ -52,11 +57,17 @@ impl PrivateKey {
     }
 
     pub(crate) fn as_bytes(&self) -> &[u8; KEY_BYTES] {
-        self.0.as_ref()
+        &self.0.bytes
     }
 
     fn render(&self) -> String {
         encode_key(self.as_bytes())
+    }
+}
+
+impl Drop for PrivateKeyBytes {
+    fn drop(&mut self) {
+        self.bytes.zeroize();
     }
 }
 
@@ -112,10 +123,12 @@ pub fn generate_key_pair() -> Result<KeyPair> {
     let pair = snow::Builder::new(params)
         .generate_keypair()
         .map_err(|error| Error::from(format!("generate Noise key pair: {error}")))?;
-    let private = key_array(&pair.private, "generated private key")?;
-    let public = key_array(&pair.public, "generated public key")?;
+    let snow::Keypair { private, public } = pair;
+    let private = Zeroizing::new(private);
+    let private = key_array(private.as_slice(), "generated private key")?;
+    let public = key_array(&public, "generated public key")?;
     Ok(KeyPair {
-        private: PrivateKey(Arc::new(private)),
+        private: PrivateKey(Arc::new(PrivateKeyBytes { bytes: private })),
         public: PublicKey(public),
     })
 }
@@ -252,6 +265,29 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o640))
             .map_err(|error| Error::from(error.to_string()))?;
         assert!(PrivateKey::read(&path).is_err());
+        fs::remove_dir_all(root).map_err(|error| Error::from(error.to_string()))
+    }
+
+    #[test]
+    fn key_generation_refuses_to_replace_existing_paths() -> Result<()> {
+        let serial = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| Error::from(error.to_string()))?
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("r9p-auth-no-replace-test-{serial}"));
+        fs::create_dir(&root).map_err(|error| Error::from(error.to_string()))?;
+        let private_path = root.join("private");
+        let public_path = root.join("public");
+        fs::write(&public_path, b"existing\n").map_err(|error| Error::from(error.to_string()))?;
+
+        let pair = generate_key_pair()?;
+        assert!(write_key_pair(&private_path, &public_path, &pair).is_err());
+        assert!(!private_path.exists());
+        assert_eq!(
+            fs::read(&public_path).map_err(|error| Error::from(error.to_string()))?,
+            b"existing\n"
+        );
+
         fs::remove_dir_all(root).map_err(|error| Error::from(error.to_string()))
     }
 }

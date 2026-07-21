@@ -17,17 +17,23 @@ pub(crate) fn auth_keygen_cmd(config: Config, args: Vec<String>) -> CliResult<()
         match args[index].as_str() {
             "--private" => {
                 index += 1;
-                private_path = Some(PathBuf::from(
+                let path = PathBuf::from(
                     args.get(index)
                         .ok_or_else(|| cli_error("missing private key path"))?,
-                ));
+                );
+                if private_path.replace(path).is_some() {
+                    return Err(cli_error("private key path already specified"));
+                }
             }
             "--public" => {
                 index += 1;
-                public_path = Some(PathBuf::from(
+                let path = PathBuf::from(
                     args.get(index)
                         .ok_or_else(|| cli_error("missing public key path"))?,
-                ));
+                );
+                if public_path.replace(path).is_some() {
+                    return Err(cli_error("public key path already specified"));
+                }
             }
             "-h" | "--help" => usage(0),
             other => return Err(cli_error(format!("unknown auth-keygen option {other}"))),

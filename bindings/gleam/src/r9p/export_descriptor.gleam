@@ -62,7 +62,11 @@ fn validate(descriptor: Descriptor) -> Result(Nil, String) {
   )
   use _ <- result.try(validate_choice("mode", descriptor.mode, ["ro", "rw"]))
   use _ <- result.try(
-    validate_choice("protocol", descriptor.protocol, ["9P2000", "9P2000.L"]),
+    validate_choice("protocol", descriptor.protocol, [
+      "9P2000",
+      "9P2000.r9p-symlink",
+      "9P2000.L",
+    ]),
   )
   use _ <- result.try(validate_u32("pid", descriptor.pid))
   use _ <- result.try(validate_u32("msize", descriptor.msize))
@@ -128,12 +132,30 @@ fn auth_class(auth: String) -> Result(String, String) {
           case
             details != ""
             && list.contains(["p9any", "uds-peercred"], class)
+            && { class != "p9any" || valid_p9any_details(details) }
           {
             True -> Ok(class)
             False -> Error("invalid auth boundary " <> auth)
           }
         _ -> Error("invalid auth boundary " <> auth)
       }
+  }
+}
+
+fn valid_p9any_details(details: String) -> Bool {
+  case string.split_once(details, on: "@") {
+    Ok(#("noise-ik", domain)) -> {
+      let characters = string.to_graphemes(domain)
+      characters != []
+      && list.length(characters) <= 255
+      && list.all(characters, fn(character) {
+        string.contains(
+          "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_",
+          character,
+        )
+      })
+    }
+    _ -> False
   }
 }
 

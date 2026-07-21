@@ -55,3 +55,22 @@ Deno.test("renderExportDescriptor rejects invalid authority boundaries", () => {
     })
   );
 });
+
+Deno.test("renderExportDescriptor validates the p9any provider and domain", () => {
+  for (const auth of ["p9any:dp9ik@vault", "p9any:noise-ik@vault/domain"]) {
+    assertThrows(() =>
+      renderExportDescriptor({
+        endpointBind: "192.168.0.20:4567",
+        aname: "/",
+        uname: "codex",
+        exportedRoot: "/",
+        transportClass: "tcp",
+        mode: "ro",
+        auth,
+        pid: 42,
+        protocol: "9P2000",
+        msize: 65_536,
+      })
+    );
+  }
+});

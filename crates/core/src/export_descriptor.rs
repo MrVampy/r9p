@@ -3,6 +3,9 @@ use std::{collections::BTreeMap, net::SocketAddr};
 use crate::{Error, Result};
 
 pub const EXPORT_FORMAT_V1: &str = "r9p-export.v1";
+pub const P9ANY_NOISE_IK: &str = "noise-ik";
+
+const MAX_AUTH_DOMAIN_BYTES: usize = 255;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportDescriptor {
@@ -56,6 +59,7 @@ pub enum AuthClass {
 
 impl ExportDescriptor {
     pub fn render(&self) -> Result<String> {
+        self.validate_authority_boundary()?;
         let mut fields = vec![
             ("format", EXPORT_FORMAT_V1.to_string()),
             ("endpoint_bind", self.endpoint_bind.clone()),
@@ -163,6 +167,7 @@ impl ExportDescriptor {
     }
 
     fn validate_authority_boundary(&self) -> Result<()> {
+        self.auth.validate()?;
         match (self.transport_class, self.auth.class) {
             (TransportClass::Tcp, AuthClass::None)
                 if !tcp_endpoint_is_loopback(&self.endpoint_bind) =>
@@ -256,12 +261,19 @@ impl AuthBoundary {
             .split_once(':')
             .ok_or_else(|| Error::from(format!("invalid auth boundary {value}")))?;
         let class = AuthClass::parse(class)?;
-        if class == AuthClass::None || details.is_empty() {
-            return Err(Error::from(format!("invalid auth boundary {value}")));
-        }
-        Ok(Self {
+        let boundary = Self {
             class,
             details: details.to_string(),
+        };
+        boundary.validate()?;
+        Ok(boundary)
+    }
+
+    pub fn p9any_noise_ik(domain: &str) -> Result<Self> {
+        validate_p9any_domain(domain)?;
+        Ok(Self {
+            class: AuthClass::P9any,
+            details: format!("{P9ANY_NOISE_IK}@{domain}"),
         })
     }
 
@@ -269,6 +281,29 @@ impl AuthBoundary {
         match self.class {
             AuthClass::None if self.details.is_empty() => "none".to_string(),
             _ => format!("{}:{}", self.class.as_str(), self.details),
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        match self.class {
+            AuthClass::None if self.details.is_empty() => Ok(()),
+            AuthClass::P9any => {
+                let domain = self
+                    .details
+                    .strip_prefix(P9ANY_NOISE_IK)
+                    .and_then(|value| value.strip_prefix('@'))
+                    .ok_or_else(|| {
+                        Error::from(format!(
+                            "p9any auth boundary must use {P9ANY_NOISE_IK}@domain"
+                        ))
+                    })?;
+                validate_p9any_domain(domain)
+            }
+            AuthClass::UnixPeerCred if !self.details.is_empty() => Ok(()),
+            _ => Err(Error::from(format!(
+                "invalid auth boundary {}",
+                self.render()
+            ))),
         }
     }
 }
@@ -331,6 +366,23 @@ fn validate_extension_field_name(field: &str) -> Result<()> {
         return Err(Error::from(format!(
             "descriptor extension field {field} must use lowercase ascii, digits, or underscore"
         )));
+    }
+    Ok(())
+}
+
+pub fn validate_p9any_domain(domain: &str) -> Result<()> {
+    if domain.is_empty() || domain.len() > MAX_AUTH_DOMAIN_BYTES {
+        return Err(Error::from(format!(
+            "auth domain must contain 1 to {MAX_AUTH_DOMAIN_BYTES} bytes"
+        )));
+    }
+    if !domain
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+    {
+        return Err(Error::from(
+            "auth domain must use ascii letters, digits, dot, dash, or underscore",
+        ));
     }
     Ok(())
 }
@@ -514,8 +566,7 @@ mod tests {
     fn descriptor_rejects_auth_none_for_non_loopback_tcp() {
         let mut descriptor = descriptor();
         descriptor.endpoint_bind = "192.0.2.1:564".to_string();
-        let rendered = descriptor.render().expect("descriptor should render");
-        assert!(ExportDescriptor::parse(&rendered).is_err());
+        assert!(descriptor.render().is_err());
     }
 
     #[test]
@@ -532,14 +583,19 @@ mod tests {
     fn descriptor_rejects_transport_incompatible_auth_boundaries() {
         let mut tcp = descriptor();
         tcp.auth = AuthBoundary::parse("uds-peercred:1000:100").expect("auth should parse");
-        assert!(ExportDescriptor::parse(&tcp.render().expect("descriptor should render")).is_err());
+        assert!(tcp.render().is_err());
 
         let mut unix = descriptor();
         unix.transport_class = TransportClass::Unix;
         unix.endpoint_bind = "unix:/tmp/r9p.sock".to_string();
         unix.auth = AuthBoundary::parse("p9any:noise-ik@vault").expect("auth should parse");
-        assert!(
-            ExportDescriptor::parse(&unix.render().expect("descriptor should render")).is_err()
-        );
+        assert!(unix.render().is_err());
+    }
+
+    #[test]
+    fn descriptor_rejects_unknown_p9any_provider_and_invalid_domain() {
+        assert!(AuthBoundary::parse("p9any:dp9ik@vault").is_err());
+        assert!(AuthBoundary::parse("p9any:noise-ik@vault/domain").is_err());
+        assert!(AuthBoundary::parse("p9any:noise-ik@").is_err());
     }
 }

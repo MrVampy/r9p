@@ -7,7 +7,7 @@ export interface ExportDescriptorOptions {
   mode: "ro" | "rw";
   auth: string;
   pid: number;
-  protocol: "9P2000" | "9P2000.L";
+  protocol: "9P2000" | "9P2000.r9p-symlink" | "9P2000.L";
   msize: number;
   expiresAt?: string;
   localRootLabel?: string;
@@ -111,7 +111,8 @@ function validateOptions(options: ExportDescriptorOptions): void {
     : options.auth.slice(authClass.length + 1);
   if (
     !["none", "p9any", "uds-peercred"].includes(authClass) ||
-    (authClass !== "none" && authDetails === "")
+    (authClass !== "none" && authDetails === "") ||
+    (authClass === "p9any" && !validP9anyDetails(authDetails))
   ) {
     throw new Error(`invalid auth boundary ${options.auth}`);
   }
@@ -132,6 +133,11 @@ function validateOptions(options: ExportDescriptorOptions): void {
       "descriptor p9any session auth is not valid for unix sockets",
     );
   }
+}
+
+function validP9anyDetails(details: string): boolean {
+  const match = /^noise-ik@([A-Za-z0-9._-]{1,255})$/.exec(details);
+  return match !== null;
 }
 
 function validateToken(field: string, value: string): void {

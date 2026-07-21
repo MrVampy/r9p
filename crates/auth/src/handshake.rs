@@ -306,4 +306,38 @@ mod tests {
             .is_err());
         Ok(())
     }
+
+    #[test]
+    fn client_rejects_a_server_that_does_not_match_its_pinned_key() -> Result<()> {
+        let server_key = generate_key_pair()?;
+        let other_server_key = generate_key_pair()?;
+        let client_key = generate_key_pair()?;
+        let server_config = ServerConfig::new(
+            "vault",
+            server_key.private,
+            [(client_key.public, "codex".to_string())],
+        )?;
+        let client_config =
+            ClientConfig::new("vault", client_key.private, other_server_key.public)?;
+        let listener =
+            TcpListener::bind("127.0.0.1:0").map_err(|error| Error::from(error.to_string()))?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| Error::from(error.to_string()))?;
+        let server = thread::spawn(move || {
+            let (stream, _) = listener
+                .accept()
+                .map_err(|error| Error::from(error.to_string()))?;
+            authenticate_server(stream, &server_config, Duration::from_secs(2))
+        });
+        let stream = TcpStream::connect(address).map_err(|error| Error::from(error.to_string()))?;
+        assert!(
+            authenticate_client(stream, &client_config, "codex", Duration::from_secs(2)).is_err()
+        );
+        assert!(server
+            .join()
+            .map_err(|_| Error::from("auth server panicked"))?
+            .is_err());
+        Ok(())
+    }
 }

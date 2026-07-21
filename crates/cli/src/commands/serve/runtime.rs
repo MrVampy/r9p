@@ -1,7 +1,7 @@
 use std::{
     fs as std_fs,
     io::Write,
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
     os::unix::fs::FileTypeExt,
     os::unix::net::UnixListener,
     path::{Path, PathBuf},
@@ -101,16 +101,7 @@ impl BoundListener {
                         .map_err(|error| cli_error(format!("accept TCP connection: {error}")))?;
                     match &auth {
                         Some(auth) => {
-                            match authenticate_server(stream, auth, AUTH_HANDSHAKE_TIMEOUT) {
-                                Ok(session) => spawn_connection(
-                                    session.stream,
-                                    config.clone(),
-                                    Some(session.peer.principal().as_bytes().to_vec()),
-                                ),
-                                Err(error) => {
-                                    eprintln!("r9p: reject unauthenticated connection: {error}")
-                                }
-                            }
+                            spawn_authenticated_connection(stream, config.clone(), auth.clone())
                         }
                         None => spawn_connection(stream, config.clone(), None),
                     }
@@ -126,6 +117,22 @@ impl BoundListener {
         }
         Ok(())
     }
+}
+
+fn spawn_authenticated_connection(stream: TcpStream, config: ServeConfig, auth: AuthConfig) {
+    thread::spawn(move || {
+        let session = match authenticate_server(stream, &auth, AUTH_HANDSHAKE_TIMEOUT) {
+            Ok(session) => session,
+            Err(error) => {
+                eprintln!("r9p: reject unauthenticated connection: {error}");
+                return;
+            }
+        };
+        let principal = session.peer.principal().as_bytes().to_vec();
+        if let Err(error) = serve_connection(session.stream, config, Some(principal)) {
+            eprintln!("r9p: serve connection: {error}");
+        }
+    });
 }
 
 fn spawn_connection<S>(stream: S, config: ServeConfig, session_uname: Option<Vec<u8>>)

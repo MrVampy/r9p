@@ -61,6 +61,7 @@ impl SecureStream {
         self.socket.read_exact(&mut length[1..])?;
         let ciphertext_len = usize::from(u16::from_be_bytes(length));
         if ciphertext_len < AUTH_TAG_BYTES {
+            let _ = self.socket.shutdown(Shutdown::Both);
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "encrypted 9P record is shorter than its authentication tag",
@@ -72,8 +73,14 @@ impl SecureStream {
         let plaintext_len = self
             .transport
             .read_message(state.nonce, &ciphertext, &mut plaintext)
-            .map_err(noise_io_error)?;
-        state.nonce = next_nonce(state.nonce)?;
+            .map_err(|error| {
+                let _ = self.socket.shutdown(Shutdown::Both);
+                noise_io_error(error)
+            })?;
+        state.nonce = next_nonce(state.nonce).map_err(|error| {
+            let _ = self.socket.shutdown(Shutdown::Both);
+            error
+        })?;
         plaintext.truncate(plaintext_len);
         state.plaintext = plaintext;
         state.offset = 0;
@@ -121,16 +128,29 @@ impl Write for SecureStream {
         let ciphertext_len = self
             .transport
             .write_message(state.nonce, &input[..count], &mut ciphertext)
-            .map_err(noise_io_error)?;
+            .map_err(|error| {
+                let _ = self.socket.shutdown(Shutdown::Both);
+                noise_io_error(error)
+            })?;
         let encoded_len = u16::try_from(ciphertext_len).map_err(|_| {
+            let _ = self.socket.shutdown(Shutdown::Both);
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 "encrypted 9P record exceeds its framing limit",
             )
         })?;
-        self.socket.write_all(&encoded_len.to_be_bytes())?;
-        self.socket.write_all(&ciphertext[..ciphertext_len])?;
-        state.nonce = next_nonce(state.nonce)?;
+        state.nonce = next_nonce(state.nonce).map_err(|error| {
+            let _ = self.socket.shutdown(Shutdown::Both);
+            error
+        })?;
+        if let Err(error) = self
+            .socket
+            .write_all(&encoded_len.to_be_bytes())
+            .and_then(|()| self.socket.write_all(&ciphertext[..ciphertext_len]))
+        {
+            let _ = self.socket.shutdown(Shutdown::Both);
+            return Err(error);
+        }
         Ok(count)
     }
 

@@ -28,6 +28,11 @@ This map defines the local sources agents should inspect before making source-sp
 - `crates/core/src/export_descriptor.rs`
   - Generic `r9p-export.v1` descriptor parsing, validation, and encoding.
   - It carries no service-registration lifecycle or runtime namespace policy.
+- `crates/auth/src/`
+  - P9any provider negotiation, Noise IK authentication, authenticated record
+    framing, key material, and typed client/server session configuration.
+  - It binds a verified transport session to a 9P username but carries no
+    backend admission or namespace policy.
 - `crates/core/src/multiplex/`
   - Layered blocking transport facade for concurrent tagged client calls.
 - `crates/core/src/stat.rs`

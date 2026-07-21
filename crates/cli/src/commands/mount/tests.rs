@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use super::{
     decode_mountinfo_path, mountinfo_targets_for_absolute, parse_mount_config,
-    parse_mount_ensure_config, parse_mount_supervisor_config,
+    parse_mount_ensure_config, parse_mount_supervisor_config, systemd_command, SystemdUnitScope,
 };
 use crate::{target::Config, DEFAULT_MSIZE};
 
@@ -272,6 +272,8 @@ fn parses_mount_supervisor_options() {
         ".vault/live".to_string(),
         "--unit".to_string(),
         "vault-runtime-r9p-live-mount".to_string(),
+        "--unit-scope".to_string(),
+        "user".to_string(),
         "--expect-endpoint".to_string(),
         "192.168.0.30:9564".to_string(),
         "--expect-change-feed".to_string(),
@@ -288,6 +290,7 @@ fn parses_mount_supervisor_options() {
 
     assert_eq!(config.mountpoint, cwd.join(".vault/live"));
     assert_eq!(config.unit.as_deref(), Some("vault-runtime-r9p-live-mount"));
+    assert_eq!(config.unit_scope, Some(SystemdUnitScope::User));
     assert_eq!(
         config.expected_endpoint.as_deref(),
         Some("192.168.0.30:9564")
@@ -308,12 +311,54 @@ fn parses_mount_supervisor_options() {
 }
 
 #[test]
+fn mount_supervisor_requires_a_scope_for_a_unit() {
+    let error = parse_mount_supervisor_config(vec![
+        "--mountpoint".to_string(),
+        ".vault/live".to_string(),
+        "--unit".to_string(),
+        "vault-live-r9p-mount.service".to_string(),
+    ])
+    .expect_err("a unit without its manager scope must fail");
+
+    assert_eq!(
+        error.to_string(),
+        "--unit requires --unit-scope user|system"
+    );
+}
+
+#[test]
+fn mount_supervisor_parses_a_system_unit_scope() {
+    let config = parse_mount_supervisor_config(vec![
+        "--mountpoint".to_string(),
+        ".vault/live".to_string(),
+        "--unit".to_string(),
+        "vault-live-r9p-mount.service".to_string(),
+        "--unit-scope".to_string(),
+        "system".to_string(),
+    ])
+    .expect("a system unit scope should parse");
+
+    assert_eq!(config.unit_scope, Some(SystemdUnitScope::System));
+}
+
+#[test]
+fn systemd_commands_target_the_selected_manager() {
+    let user = systemd_command("systemctl", SystemdUnitScope::User);
+    let system = systemd_command("systemctl", SystemdUnitScope::System);
+
+    assert_eq!(user.get_args().collect::<Vec<_>>(), vec!["--user"]);
+    assert!(system.get_args().next().is_none());
+}
+
+#[test]
 fn parses_mount_ensure_options_and_mount_invocation() {
     let (config, mount_args) = parse_mount_ensure_config(vec![
         "--mountpoint".to_string(),
         ".vault/live".to_string(),
         "--unit".to_string(),
         "vault-runtime-r9p-live-mount".to_string(),
+        "--unit-scope".to_string(),
+        "user".to_string(),
         "--attempts".to_string(),
         "4".to_string(),
         "--".to_string(),
@@ -327,6 +372,7 @@ fn parses_mount_ensure_options_and_mount_invocation() {
 
     assert_eq!(config.mountpoint, cwd.join(".vault/live"));
     assert_eq!(config.unit.as_deref(), Some("vault-runtime-r9p-live-mount"));
+    assert_eq!(config.unit_scope, Some(SystemdUnitScope::User));
     assert_eq!(config.attempts, 4);
     assert_eq!(
         mount_args,

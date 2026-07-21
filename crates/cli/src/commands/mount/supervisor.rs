@@ -11,11 +11,18 @@ use crate::errors::{cli_error, CliResult};
 pub(super) struct MountSupervisorConfig {
     pub(super) mountpoint: PathBuf,
     pub(super) unit: Option<String>,
+    pub(super) unit_scope: Option<SystemdUnitScope>,
     pub(super) expected_endpoint: Option<String>,
     pub(super) expected_status_file: Option<String>,
     pub(super) expected_change_feed: Option<String>,
     pub(super) status_file: Option<PathBuf>,
     pub(super) attempts: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SystemdUnitScope {
+    User,
+    System,
 }
 
 pub(super) fn mount_status_cmd(args: Vec<String>) -> CliResult<()> {
@@ -62,8 +69,8 @@ pub(super) fn mount_stop_cmd(args: Vec<String>) -> CliResult<()> {
 
 fn check_mount_status(config: &MountSupervisorConfig) -> CliResult<()> {
     assert_single_mount_layer(&config.mountpoint)?;
-    if let Some(unit) = &config.unit {
-        let unit_command = systemd_unit_command(unit)?;
+    if let (Some(unit), Some(scope)) = (&config.unit, config.unit_scope) {
+        let unit_command = systemd_unit_command(unit, scope)?;
         assert_unit_command_contains(
             &unit_command,
             config.expected_endpoint.as_deref(),
@@ -84,18 +91,18 @@ fn check_mount_status(config: &MountSupervisorConfig) -> CliResult<()> {
 }
 
 fn stop_mount(config: &MountSupervisorConfig) -> CliResult<()> {
-    if let Some(unit) = &config.unit {
-        let _ = Command::new("systemctl")
-            .args(["--user", "stop", unit])
+    if let (Some(unit), Some(scope)) = (&config.unit, config.unit_scope) {
+        let _ = systemd_command("systemctl", scope)
+            .args(["stop", unit])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
     }
     unmount_mountpoint_layers(&config.mountpoint, config.attempts)?;
-    if let Some(unit) = &config.unit {
-        let _ = Command::new("systemctl")
-            .args(["--user", "reset-failed", unit])
+    if let (Some(unit), Some(scope)) = (&config.unit, config.unit_scope) {
+        let _ = systemd_command("systemctl", scope)
+            .args(["reset-failed", unit])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -109,11 +116,13 @@ fn start_systemd_mount(config: &MountSupervisorConfig, mount_args: &[String]) ->
         .unit
         .as_deref()
         .ok_or_else(|| cli_error("r9p mount ensure requires --unit"))?;
+    let scope = config
+        .unit_scope
+        .ok_or_else(|| cli_error("r9p mount ensure requires --unit-scope"))?;
     let executable =
         env::current_exe().map_err(|error| cli_error(format!("resolve current r9p: {error}")))?;
-    let mut command = Command::new("systemd-run");
+    let mut command = systemd_command("systemd-run", scope);
     command.args([
-        "--user",
         "--unit",
         unit,
         "--collect",
@@ -174,6 +183,7 @@ pub(super) fn parse_mount_supervisor_config(args: Vec<String>) -> CliResult<Moun
     let mut config = MountSupervisorConfig {
         mountpoint: PathBuf::new(),
         unit: None,
+        unit_scope: None,
         expected_endpoint: None,
         expected_status_file: None,
         expected_change_feed: None,
@@ -197,6 +207,13 @@ pub(super) fn parse_mount_supervisor_config(args: Vec<String>) -> CliResult<Moun
                         .ok_or_else(|| cli_error("missing unit"))?
                         .clone(),
                 );
+            }
+            "--unit-scope" => {
+                index += 1;
+                config.unit_scope = Some(parse_systemd_unit_scope(
+                    args.get(index)
+                        .ok_or_else(|| cli_error("missing unit scope"))?,
+                )?);
             }
             "--expect-endpoint" => {
                 index += 1;
@@ -246,8 +263,23 @@ pub(super) fn parse_mount_supervisor_config(args: Vec<String>) -> CliResult<Moun
     if config.mountpoint.as_os_str().is_empty() {
         return Err(cli_error("missing --mountpoint"));
     }
+    match (&config.unit, config.unit_scope) {
+        (Some(_), None) => return Err(cli_error("--unit requires --unit-scope user|system")),
+        (None, Some(_)) => return Err(cli_error("--unit-scope requires --unit")),
+        _ => {}
+    }
     config.mountpoint = absolute_mountpoint(&config.mountpoint)?;
     Ok(config)
+}
+
+fn parse_systemd_unit_scope(value: &str) -> CliResult<SystemdUnitScope> {
+    match value {
+        "user" => Ok(SystemdUnitScope::User),
+        "system" => Ok(SystemdUnitScope::System),
+        _ => Err(cli_error(format!(
+            "invalid unit scope {value}; expected user or system"
+        ))),
+    }
 }
 
 fn assert_single_mount_layer(mountpoint: &Path) -> CliResult<()> {
@@ -339,17 +371,9 @@ pub(super) fn decode_mountinfo_path(path: &str) -> String {
     out
 }
 
-fn systemd_unit_command(unit: &str) -> CliResult<String> {
-    let output = Command::new("systemctl")
-        .args([
-            "--user",
-            "show",
-            unit,
-            "-p",
-            "ExecStart",
-            "--value",
-            "--no-pager",
-        ])
+fn systemd_unit_command(unit: &str, scope: SystemdUnitScope) -> CliResult<String> {
+    let output = systemd_command("systemctl", scope)
+        .args(["show", unit, "-p", "ExecStart", "--value", "--no-pager"])
         .output()
         .map_err(|error| cli_error(format!("systemctl show {unit}: {error}")))?;
     if !output.status.success() {
@@ -359,6 +383,14 @@ fn systemd_unit_command(unit: &str) -> CliResult<String> {
         )));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+pub(super) fn systemd_command(program: &str, scope: SystemdUnitScope) -> Command {
+    let mut command = Command::new(program);
+    if scope == SystemdUnitScope::User {
+        command.arg("--user");
+    }
+    command
 }
 
 fn assert_unit_command_contains(
@@ -451,7 +483,7 @@ fn wait_with_timeout(child: &mut std::process::Child, timeout: Duration) -> std:
 
 fn mount_supervisor_usage(code: i32) -> ! {
     eprintln!(
-        "usage: r9p mount ensure|status|stop --mountpoint path [--unit name] [--status-file path] [--expect-endpoint endpoint] [--expect-change-feed path] [--expect-status-file path] [--attempts count] [-- mount args...]"
+        "usage: r9p mount ensure|status|stop --mountpoint path [--unit name --unit-scope user|system] [--status-file path] [--expect-endpoint endpoint] [--expect-change-feed path] [--expect-status-file path] [--attempts count] [-- mount args...]"
     );
     std::process::exit(code);
 }

@@ -22,7 +22,7 @@ pub(crate) fn mount_cmd(global: Config, args: Vec<String>) -> CliResult<()> {
 #[cfg(test)]
 use supervisor::{
     decode_mountinfo_path, mountinfo_targets_for_absolute, parse_mount_ensure_config,
-    parse_mount_supervisor_config,
+    parse_mount_supervisor_config, systemd_command, SystemdUnitScope,
 };
 
 #[cfg(test)]

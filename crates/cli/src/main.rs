@@ -245,7 +245,9 @@ pub(crate) fn usage() -> ! {
     eprintln!("  session list --socket path [namespace-path]");
     eprintln!("  session read --socket path namespace-path");
     eprintln!("  mount [--aname aname] [--uname uname] endpoint mountpoint");
-    eprintln!("  mount ensure|status|stop --mountpoint path [--unit name]");
+    eprintln!(
+        "  mount ensure|status|stop --mountpoint path [--unit name --unit-scope user|system]"
+    );
     eprintln!("  serve [--bind address] [--max-fids count] [--writable] root");
     eprintln!(
         "  export [--bind address] [--max-fids count] [--writable] [--descriptor machine] root"

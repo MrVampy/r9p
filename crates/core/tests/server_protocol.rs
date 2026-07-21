@@ -2,8 +2,8 @@ use r9p::{
     codec::{self, Variant},
     error::{
         Error, Result, EBADDIROFFSET, EBADMODE, EFIDBUSY, EFIDINUSE, EFIDNOTOPEN, EFIDOPEN,
-        EWSTATATIME, EWSTATDEV, EWSTATDIRLENGTH, EWSTATDMDIR, EWSTATMUID, EWSTATQID, EWSTATTYPE,
-        EWSTATUID,
+        ENOAUTH, EWSTATATIME, EWSTATDEV, EWSTATDIRLENGTH, EWSTATDMDIR, EWSTATMUID, EWSTATQID,
+        EWSTATTYPE, EWSTATUID,
     },
     fid::{Fid, NOFID},
     message::{RMessage, TMessage, NOTAG},
@@ -408,6 +408,51 @@ fn auth_fids_are_open_read_write_without_topen() -> Result<()> {
         Some(RMessage::Write { tag: 3, count: 9 })
     );
     Ok(())
+}
+
+#[test]
+fn transport_authenticated_uname_bounds_tauth_and_tattach() {
+    let mut server = Server::with_config(
+        (),
+        ServerConfig {
+            session_uname: Some(b"codex".to_vec()),
+            ..ServerConfig::default()
+        },
+    );
+    negotiate(&mut server);
+    let attach = match server.admit(TMessage::Attach {
+        tag: 1,
+        fid: 1,
+        afid: NOFID,
+        uname: b"root".to_vec(),
+        aname: Vec::new(),
+    }) {
+        ServerEvent::Reply(reply) => reply,
+        other => panic!("mismatched session uname reached backend: {other:?}"),
+    };
+    assert_error(attach, ENOAUTH);
+
+    let auth = match server.admit(TMessage::Auth {
+        tag: 2,
+        afid: 2,
+        uname: b"root".to_vec(),
+        aname: Vec::new(),
+    }) {
+        ServerEvent::Reply(reply) => reply,
+        other => panic!("mismatched auth uname reached backend: {other:?}"),
+    };
+    assert_error(auth, ENOAUTH);
+
+    assert!(matches!(
+        server.admit(TMessage::Attach {
+            tag: 3,
+            fid: 3,
+            afid: NOFID,
+            uname: b"codex".to_vec(),
+            aname: Vec::new(),
+        }),
+        ServerEvent::Dispatch(_)
+    ));
 }
 
 #[test]

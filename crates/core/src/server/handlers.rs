@@ -106,6 +106,7 @@ impl<T> Server<T> {
             TMessage::Auth {
                 afid, uname, aname, ..
             } => {
+                self.session.authorize_uname(&uname)?;
                 if afid == NOFID {
                     return Err(Error::from_static(ENOAUTH));
                 }
@@ -122,6 +123,7 @@ impl<T> Server<T> {
                 aname,
                 ..
             } => {
+                self.session.authorize_uname(&uname)?;
                 if afid != NOFID {
                     let auth_state = self.session.fid(afid)?;
                     if !auth_state.qid.is_auth() {

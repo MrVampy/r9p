@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/auth",
     "crates/beam-port",
     "crates/core",
     "crates/cli",
@@ -27,5 +28,7 @@ fuse = { version = "0.1.0", path = "crates/fuse" }
 fs = { version = "0.1.0", path = "crates/fs" }
 libc = "=0.2.186"
 r9p = { version = "0.1.0", path = "crates/core" }
+r9p-auth = { version = "0.1.0", path = "crates/auth" }
 serde_json = { version = "1", default-features = false, features = ["std"] }
 session = { version = "0.1.0", path = "crates/session" }
+snow = "=0.10.0"

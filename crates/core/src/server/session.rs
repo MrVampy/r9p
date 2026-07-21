@@ -1,6 +1,6 @@
 use crate::{
     codec::{Variant, MIN_MSIZE},
-    error::{Error, Result, EBADFID, EBADMSIZE, EFIDBUSY, EFIDINUSE, EFIDLIMIT},
+    error::{Error, Result, EBADFID, EBADMSIZE, EFIDBUSY, EFIDINUSE, EFIDLIMIT, ENOAUTH},
     fid::{Fid, FidState},
     flush::{RequestKey, RequestTable},
 };
@@ -85,6 +85,15 @@ impl Session {
                         .is_some_and(|reservation| reservation.new_fid)
                 })
                 .count()
+    }
+
+    pub(super) fn authorize_uname(&self, uname: &[u8]) -> Result<()> {
+        match &self.config.session_uname {
+            Some(authenticated) if authenticated.as_slice() != uname => {
+                Err(Error::from_static(ENOAUTH))
+            }
+            _ => Ok(()),
+        }
     }
 
     pub fn contains_fid(&self, fid: Fid) -> bool {

@@ -1,0 +1,14 @@
+[package]
+name = "r9p-auth"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+description = "Plan 9 p9any session authentication and encrypted transport for r9p"
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+r9p.workspace = true
+snow.workspace = true

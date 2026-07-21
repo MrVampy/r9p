@@ -1,3 +1,4 @@
+use crate::NOISE_PATTERN;
 use r9p::error::{Error, Result};
 use snow::params::NoiseParams;
 use std::{
@@ -11,8 +12,6 @@ use std::{
 
 const KEY_BYTES: usize = 32;
 const KEY_HEX_BYTES: usize = KEY_BYTES * 2;
-const NOISE_PATTERN: &str = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
-
 #[derive(Clone)]
 pub struct PrivateKey(Arc<[u8; KEY_BYTES]>);
 

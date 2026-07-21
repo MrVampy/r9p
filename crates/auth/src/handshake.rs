@@ -1,6 +1,6 @@
 use crate::{
     config::validate_principal, p9any, ClientConfig, PublicKey, SecureStream, ServerConfig,
-    CONFIG_FORMAT,
+    CONFIG_FORMAT, NOISE_PATTERN,
 };
 use r9p::error::{Error, Result};
 use snow::{params::NoiseParams, HandshakeState};
@@ -10,7 +10,6 @@ use std::{
     time::Duration,
 };
 
-const NOISE_PATTERN: &str = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
 const MAX_NOISE_MESSAGE_BYTES: usize = u16::MAX as usize;
 const MAX_PRINCIPAL_BYTES: usize = 255;
 const SERVER_ACK: &[u8] = b"r9p-session-authenticated.v1";

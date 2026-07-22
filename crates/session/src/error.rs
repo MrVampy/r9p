@@ -175,7 +175,8 @@ fn is_protocol_error(message: &str) -> bool {
 }
 
 fn is_transport_message(message: &str) -> bool {
-    message.contains("9P frame")
+    (message.starts_with("connect ") && message.contains("(os error "))
+        || message.contains("9P frame")
         || message.contains("9P reader stopped")
         || message.contains("9P response timeout")
         || message.contains("clone 9P stream")
@@ -238,5 +239,14 @@ mod tests {
         let error = client_error(P9Error::from("9P reader stopped before response"));
         assert_eq!(error.errno, libc::ENOTCONN);
         assert!(error.message().contains("9P reader stopped"));
+    }
+
+    #[test]
+    fn local_connection_refusal_maps_to_transport_errno() {
+        let error = client_error(P9Error::from(
+            "connect 127.0.0.1:9641: Connection refused (os error 111)",
+        ));
+        assert_eq!(error.errno, libc::ECONNREFUSED);
+        assert!(error.message().contains("Connection refused"));
     }
 }

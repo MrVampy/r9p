@@ -11,6 +11,7 @@ use r9p::{
 use std::{
     env, fs,
     io::{self, Read, Write},
+    net::TcpListener,
     os::unix::net::UnixListener,
     path::{Path, PathBuf},
     process,
@@ -91,6 +92,32 @@ fn connect_waits_for_unix_socket_to_appear() {
     drop(client);
     server.join().expect("server should not panic");
     let _ = fs::remove_file(socket_path);
+}
+
+#[test]
+fn connect_waits_for_tcp_listener_to_appear() {
+    let reservation = TcpListener::bind("127.0.0.1:0").expect("reserve TCP address");
+    let address = reservation.local_addr().expect("inspect TCP address");
+    drop(reservation);
+    let server = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(100));
+        let listener = TcpListener::bind(address).expect("TCP listener should bind");
+        let (stream, _) = listener.accept().expect("server should accept");
+        handle_connection(stream).expect("server connection should complete");
+    });
+
+    let client = Client::connect_with_timeout(
+        &connection(address.to_string()),
+        Duration::from_secs(2),
+    )
+    .expect("client should wait for TCP listener and connect");
+    let stat = client
+        .stat_timeout(client.root_fid(), Duration::from_secs(1))
+        .expect("root stat should succeed");
+    assert_eq!(stat.name, b".".to_vec());
+
+    drop(client);
+    server.join().expect("server should not panic");
 }
 
 #[test]

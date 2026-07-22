@@ -8,8 +8,17 @@
 mod broker;
 mod export;
 
+use std::{io, net::TcpStream};
+
 pub use broker::{BrokerConfig, BrokerStatus, ReverseBroker};
 pub use export::{FilesystemExport, FilesystemExportConfig, FilesystemExportStatus};
+
+fn configure_transport_socket(stream: &TcpStream) -> io::Result<()> {
+    // Reverse sessions carry latency-sensitive 9P request/response frames.
+    // Leaving Nagle enabled compounds delayed acknowledgements across the
+    // small, sequential walks and stats used by filesystem clients.
+    stream.set_nodelay(true)
+}
 
 #[cfg(test)]
 mod tests;

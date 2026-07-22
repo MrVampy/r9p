@@ -14,6 +14,11 @@ application-specific protocol machinery?
   `authenticate_server`
 - `crates/auth/src/stream.rs`, especially `SecureStream::try_clone` and its
   `Read`, `Write`, and `ConnectionStream` implementations
+- `crates/reverse/src/broker.rs`, especially `spawn_reverse_acceptor`,
+  `spawn_proxy_acceptor`, and `bridge`
+- `crates/reverse/src/export.rs`, especially `export_loop`
+- `crates/core/src/blocking.rs`, especially the established
+  `connect_tcp_stream` socket setup
 - `crates/core/src/server/connection.rs` and
   `crates/core/src/server/file_tree_handler.rs`
 - `crates/cli/src/commands/serve/runtime.rs`
@@ -70,6 +75,14 @@ application-specific protocol machinery?
   `exportfs` after dialing a remote compute host. Listen and reverse-connect
   are therefore connection postures beneath the same 9P service abstraction,
   not different service contracts.
+- Reverse connections carry many small, causally ordered 9P frames. The
+  ordinary r9p TCP client already disables Nagle, but the reverse exporter and
+  broker accepted sockets did not. Measurements across the laptop-to-M7 path
+  showed roughly 21 ms effective RTT against a 1.8 ms minimum RTT, with
+  uncached filesystem lookups compounding to hundreds of milliseconds. The
+  reverse adapter must therefore set `TCP_NODELAY` on both the outward export
+  leg and accepted broker sockets; this is transport configuration, not 9P
+  semantics.
 
 ## Effect
 
@@ -81,8 +94,10 @@ The implementation now bounds queued streams, concurrent authentication, and
 active bridges; keeps the consumer proxy loopback-only; discards observably
 closed idle streams; exposes typed status counters; replenishes a consumed
 stream without an artificial delay; and applies capped exponential reconnect
-delay with deterministic worker phasing. The `r9p` CLI exposes the same broker
-and exporter without adding registry semantics.
+delay with deterministic worker phasing. Every reverse transport socket also
+disables Nagle so metadata-heavy clients do not pay delayed-ack latency for
+each small 9P exchange. The `r9p` CLI exposes the same broker and exporter
+without adding registry semantics.
 
 ## Open questions
 

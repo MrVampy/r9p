@@ -17,6 +17,8 @@ use r9p::{
 };
 use r9p_auth::{authenticate_client, ClientConfig};
 
+use crate::configure_transport_socket;
+
 #[derive(Clone)]
 pub struct FilesystemExportConfig {
     pub broker_endpoint: SocketAddr,
@@ -144,19 +146,25 @@ fn validate_config(config: &FilesystemExportConfig) -> Result<()> {
 fn export_loop(config: FilesystemExportConfig, worker_index: usize, state: ExportState) {
     let mut failed_attempts = 0_u32;
     while !state.shutdown.load(Ordering::Acquire) {
-        let stream =
-            match TcpStream::connect_timeout(&config.broker_endpoint, config.connect_timeout) {
-                Ok(stream) => stream,
-                Err(_) => {
-                    state.connection_failures.fetch_add(1, Ordering::AcqRel);
-                    sleep_until_retry(
-                        &state.shutdown,
-                        retry_delay(&config, worker_index, failed_attempts),
-                    );
-                    failed_attempts = failed_attempts.saturating_add(1);
-                    continue;
-                }
-            };
+        let stream = match TcpStream::connect_timeout(
+            &config.broker_endpoint,
+            config.connect_timeout,
+        )
+        .and_then(|stream| {
+            configure_transport_socket(&stream)?;
+            Ok(stream)
+        }) {
+            Ok(stream) => stream,
+            Err(_) => {
+                state.connection_failures.fetch_add(1, Ordering::AcqRel);
+                sleep_until_retry(
+                    &state.shutdown,
+                    retry_delay(&config, worker_index, failed_attempts),
+                );
+                failed_attempts = failed_attempts.saturating_add(1);
+                continue;
+            }
+        };
         let stream = match authenticate_client(
             stream,
             &config.auth,

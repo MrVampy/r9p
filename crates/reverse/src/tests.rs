@@ -12,6 +12,20 @@ use r9p_auth::{generate_key_pair, ClientConfig, ServerConfig};
 use super::{BrokerConfig, FilesystemExport, FilesystemExportConfig, ReverseBroker};
 
 #[test]
+fn reverse_transport_socket_disables_nagle() -> Result<(), Box<dyn std::error::Error>> {
+    let listener = std::net::TcpListener::bind(address(Ipv4Addr::LOCALHOST, 0))?;
+    let client = std::net::TcpStream::connect(listener.local_addr()?)?;
+    let (server, _) = listener.accept()?;
+
+    super::configure_transport_socket(&client)?;
+    super::configure_transport_socket(&server)?;
+
+    assert!(client.nodelay()?);
+    assert!(server.nodelay()?);
+    Ok(())
+}
+
+#[test]
 fn reverse_export_serves_a_writable_file_tree() -> Result<(), Box<dyn std::error::Error>> {
     let server = generate_key_pair()?;
     let client = generate_key_pair()?;

@@ -13,6 +13,8 @@ use std::{
 use r9p::error::{Error, Result};
 use r9p_auth::{authenticate_server, SecureStream, ServerConfig};
 
+use crate::configure_transport_socket;
+
 #[derive(Clone)]
 pub struct BrokerConfig {
     pub reverse_bind: SocketAddr,
@@ -193,6 +195,13 @@ fn spawn_reverse_acceptor(
                 if shutdown.load(Ordering::Acquire) {
                     break;
                 }
+                if configure_transport_socket(&stream).is_err() {
+                    counters
+                        .rejected_reverse_connections
+                        .fetch_add(1, Ordering::AcqRel);
+                    let _ = stream.shutdown(Shutdown::Both);
+                    continue;
+                }
                 let Some(handshake_slot) = CounterSlot::try_acquire(
                     Arc::clone(&counters),
                     CounterKind::Handshake,
@@ -273,6 +282,13 @@ fn spawn_proxy_acceptor(
                 };
                 if shutdown.load(Ordering::Acquire) {
                     break;
+                }
+                if configure_transport_socket(&local).is_err() {
+                    counters
+                        .unavailable_proxy_connections
+                        .fetch_add(1, Ordering::AcqRel);
+                    let _ = local.shutdown(Shutdown::Both);
+                    continue;
                 }
                 let Some(bridge_slot) = CounterSlot::try_acquire(
                     Arc::clone(&counters),

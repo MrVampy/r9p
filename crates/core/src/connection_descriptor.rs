@@ -14,7 +14,7 @@ pub struct ConnectionDescriptor {
     pub exported_root: String,
     pub authority_boundary: String,
     pub generation: u64,
-    pub valid_until_ms: u64,
+    pub valid_for_ms: u64,
 }
 
 impl ConnectionDescriptor {
@@ -30,7 +30,7 @@ impl ConnectionDescriptor {
             ("exported_root", self.exported_root.clone()),
             ("authority_boundary", self.authority_boundary.clone()),
             ("generation", self.generation.to_string()),
-            ("valid_until_ms", self.valid_until_ms.to_string()),
+            ("valid_for_ms", self.valid_for_ms.to_string()),
         ];
         let mut rendered = String::new();
         for (field, value) in fields {
@@ -91,7 +91,7 @@ impl ConnectionDescriptor {
             exported_root: required(&fields, "exported_root")?.to_string(),
             authority_boundary: required(&fields, "authority_boundary")?.to_string(),
             generation: parse_u64(required(&fields, "generation")?, "generation")?,
-            valid_until_ms: parse_u64(required(&fields, "valid_until_ms")?, "valid_until_ms")?,
+            valid_for_ms: parse_u64(required(&fields, "valid_for_ms")?, "valid_for_ms")?,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -120,9 +120,9 @@ impl ConnectionDescriptor {
                 "connection descriptor generation must be positive",
             ));
         }
-        if self.valid_until_ms == 0 {
+        if self.valid_for_ms == 0 {
             return Err(Error::from(
-                "connection descriptor valid_until_ms must be positive",
+                "connection descriptor valid_for_ms must be positive",
             ));
         }
         Ok(())
@@ -141,7 +141,7 @@ fn known_field(field: &str) -> bool {
             | "exported_root"
             | "authority_boundary"
             | "generation"
-            | "valid_until_ms"
+            | "valid_for_ms"
     )
 }
 
@@ -193,7 +193,7 @@ mod tests {
             exported_root: "/agents".to_string(),
             authority_boundary: "loopback".to_string(),
             generation: 4,
-            valid_until_ms: 19_000,
+            valid_for_ms: 19_000,
         }
     }
 
@@ -212,6 +212,15 @@ mod tests {
     }
 
     #[test]
+    fn connection_descriptor_rejects_nonportable_absolute_validity() {
+        let rendered = descriptor()
+            .render()
+            .expect("render descriptor")
+            .replace("valid_for_ms\t19000", "valid_until_ms\t19000");
+        assert!(ConnectionDescriptor::parse(&rendered).is_err());
+    }
+
+    #[test]
     fn connection_descriptor_requires_absolute_exported_root() {
         let mut descriptor = descriptor();
         descriptor.exported_root = "agents".to_string();
@@ -221,7 +230,7 @@ mod tests {
     #[test]
     fn connection_descriptor_rejects_expired_shape_without_validity() {
         let mut descriptor = descriptor();
-        descriptor.valid_until_ms = 0;
+        descriptor.valid_for_ms = 0;
         assert!(descriptor.render().is_err());
     }
 }

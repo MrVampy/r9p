@@ -222,10 +222,12 @@ admission boundary would turn a placement mechanism into an ambient proxy.
 `r9p-connection.v1` is the generic machine handoff after a resolver has selected
 a service channel. It carries the service and channel identities, endpoint,
 attach identity, exported root, authority boundary, generation, and finite
-validity. It deliberately does not carry registry policy or whether the
-provider reached the endpoint by listening or reverse-connecting. Callers must
-still satisfy the declared data-plane authority boundary; receiving a
-descriptor is not transport authentication.
+relative validity. Relative validity avoids exporting a resolver's local
+monotonic-clock origin across processes or hosts. It deliberately does not
+carry registry policy or whether the provider reached the endpoint by
+listening or reverse-connecting. Callers must still satisfy the declared
+data-plane authority boundary; receiving a descriptor is not transport
+authentication.
 
 `r9p mount` runs a bounded worker pool rather than spawning one OS thread per
 FUSE request. The defaults follow the conservative libfuse/Linux shape:

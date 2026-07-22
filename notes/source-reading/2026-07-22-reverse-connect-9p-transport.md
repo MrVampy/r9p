@@ -91,4 +91,6 @@ and exporter without adding registry semantics.
 - Generic namespace addressing should resolve listen-backed and reverse-backed
   services to the same connection descriptor. Admission, lease, revocation,
   and relay selection belong to that namespace authority; the r9p transport
-  must not absorb them.
+  must not absorb them. Descriptor validity must be relative because a
+  resolver's monotonic-clock origin is neither portable nor comparable across
+  processes or hosts.

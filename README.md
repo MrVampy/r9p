@@ -17,6 +17,8 @@ Current surfaces and consumers:
 - `r9p reverse-broker` and `r9p reverse-export`, an authenticated outbound
   publication posture for a filesystem owner that cannot accept inbound
   connections.
+- `r9p-connection.v1`, the transport-posture-neutral handoff from a service
+  resolver to an ordinary 9P client.
 - `r9p auth-keygen`, key creation for authenticated remote 9P sessions.
 - Racme serves an Acme-compatible 9P namespace through `r9p`.
 - Vault consumes `r9p` for its runtime listener, one-shot client operations,
@@ -214,6 +216,16 @@ naming, leases, capability admission, and direct-versus-relay choice remain the
 responsibility of the governing namespace. The loopback proxy restriction is
 intentional: exposing another network listener without its own end-to-end
 admission boundary would turn a placement mechanism into an ambient proxy.
+
+### Resolved connections
+
+`r9p-connection.v1` is the generic machine handoff after a resolver has selected
+a service channel. It carries the service and channel identities, endpoint,
+attach identity, exported root, authority boundary, generation, and finite
+validity. It deliberately does not carry registry policy or whether the
+provider reached the endpoint by listening or reverse-connecting. Callers must
+still satisfy the declared data-plane authority boundary; receiving a
+descriptor is not transport authentication.
 
 `r9p mount` runs a bounded worker pool rather than spawning one OS thread per
 FUSE request. The defaults follow the conservative libfuse/Linux shape:

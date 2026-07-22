@@ -19,6 +19,11 @@ application-specific protocol machinery?
 - `crates/reverse/src/export.rs`, especially `export_loop`
 - `crates/core/src/blocking.rs`, especially the established
   `connect_tcp_stream` socket setup
+- `crates/fuse/src/fuse/dispatch.rs`, especially `R9pFuse::reconnect`
+- `crates/fuse/src/fuse/mount_state.rs`, especially lazy path-backed node
+  rebinding
+- `crates/fuse/src/node.rs`, especially `rebind_paths`,
+  `apply_rebind_results`, and `mark_path_bindings_stale`
 - `crates/core/src/server/connection.rs` and
   `crates/core/src/server/file_tree_handler.rs`
 - `crates/cli/src/commands/serve/runtime.rs`
@@ -83,6 +88,15 @@ application-specific protocol machinery?
   reverse adapter must therefore set `TCP_NODELAY` on both the outward export
   leg and accepted broker sockets; this is transport configuration, not 9P
   semantics.
+- The FUSE reconnect path performed network walks and stats for every cached
+  node before swapping in the replacement client and replying to the request
+  that detected the transport error. A metadata-heavy consumer could therefore
+  turn one recoverable timeout into a minutes-long kernel FUSE wait, while
+  concurrent workers started redundant reconnects. The node table already
+  retains paths and supports lazy rebinding. Reconnect should be serialized,
+  bounded by the configured connect timeout, swap the new root session once,
+  mark non-root bindings stale without network work, and let later operations
+  rebind only the paths they actually use.
 
 ## Effect
 
@@ -96,7 +110,9 @@ closed idle streams; exposes typed status counters; replenishes a consumed
 stream without an artificial delay; and applies capped exponential reconnect
 delay with deterministic worker phasing. Every reverse transport socket also
 disables Nagle so metadata-heavy clients do not pay delayed-ack latency for
-each small 9P exchange. The `r9p` CLI exposes the same broker and exporter
+each small 9P exchange. FUSE recovery now serializes reconnects and converts
+cached non-root bindings to lazy path-backed rebinding instead of eagerly
+replaying the whole cache. The `r9p` CLI exposes the same broker and exporter
 without adding registry semantics.
 
 ## Open questions

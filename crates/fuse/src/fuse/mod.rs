@@ -50,6 +50,7 @@ pub struct R9pFuse {
     uid: u32,
     gid: u32,
     shape_recovery: Arc<Mutex<ShapeRecovery>>,
+    reconnect: Arc<Mutex<()>>,
 }
 
 impl R9pFuse {
@@ -110,6 +111,7 @@ impl R9pFuse {
             uid,
             gid,
             shape_recovery: Arc::new(Mutex::new(ShapeRecovery::new())),
+            reconnect: Arc::new(Mutex::new(())),
         };
         fs.run(mount.file_mut(), feed_events)
     }

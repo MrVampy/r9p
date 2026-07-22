@@ -242,51 +242,44 @@ impl R9pFuse {
     }
 
     pub(super) fn reconnect(&mut self) -> Result<()> {
+        let reconnect = Arc::clone(&self.reconnect);
+        let _reconnect_guard = reconnect
+            .lock()
+            .map_err(|_| Error::new(libc::EIO, "reconnect lock poisoned"))?;
         if self.config.debug {
             eprintln!("r9p mount: reconnecting to {}", self.config.address);
         }
         let tracker = self.client.snapshot()?.tracker();
-        let client = Client::connect_with_tracker(&self.config.connection(), tracker)?;
+        let client = Client::connect_with_tracker_timeout(
+            &self.config.connection(),
+            tracker,
+            self.config.connect_timeout,
+        )?;
         let root_fid = client.root_fid();
         let root_stat = client.stat_timeout(root_fid, self.config.lookup_timeout)?;
-        let paths = {
-            let nodes = self.nodes()?;
-            nodes.rebind_paths()
-        };
-        let mut rebound = Vec::new();
-        let mut stale = Vec::new();
-        for (nodeid, path) in paths {
-            if nodeid == ROOT_NODEID {
-                rebound.push((nodeid, root_fid, root_stat.clone()));
-                continue;
-            }
-            let fid = match client.walk_timeout(root_fid, &path, self.config.lookup_timeout) {
-                Ok(fid) => fid,
-                Err(_) => {
-                    stale.push(nodeid);
-                    continue;
-                }
-            };
-            match client.stat_timeout(fid, self.config.lookup_timeout) {
-                Ok(stat) => rebound.push((nodeid, fid, stat)),
-                Err(_) => {
-                    let _ = client.clunk_timeout(fid, self.config.control_timeout);
-                    stale.push(nodeid);
-                }
-            }
-        }
-        let old_fids = {
+        let lazy_rebind_count = {
             let mut nodes = self.nodes()?;
-            nodes.apply_rebind_results(rebound, stale)
+            let stale = nodes
+                .rebind_paths()
+                .into_iter()
+                .filter_map(|(nodeid, _)| (nodeid != ROOT_NODEID).then_some(nodeid))
+                .collect::<Vec<_>>();
+            let lazy_rebind_count = stale.len();
+            self.client.replace(client)?;
+            let _ =
+                nodes.apply_rebind_results(vec![(ROOT_NODEID, root_fid, root_stat)], stale);
+            lazy_rebind_count
         };
-        self.client.replace(client)?;
-        if self.config.debug && !old_fids.is_empty() {
-            eprintln!(
-                "r9p mount: reconnect replaced {} stale node fids",
-                old_fids.len()
-            );
-        }
+        self.record_mount_diagnostic(
+            "transport_reconnected",
+            0,
+            format!("lazy_rebind_count={lazy_rebind_count}"),
+        );
         if self.config.debug {
+            eprintln!(
+                "r9p mount: reconnect marked {} node bindings for lazy rebind",
+                lazy_rebind_count
+            );
             eprintln!("r9p mount: reconnect complete");
         }
         Ok(())

@@ -114,13 +114,12 @@ fn reverse_broker_discards_closed_idle_streams() -> Result<(), Box<dyn std::erro
 
     let live_root = TestRoot::new()?;
     fs::write(live_root.path.join("identity"), b"live\n")?;
-    let live = FilesystemExport::start(export_config(
+    let _live = FilesystemExport::start(export_config(
         broker.reverse_endpoint(),
         client_config,
         live_root.path.clone(),
         2,
     ))?;
-    wait_ready(&broker, &live)?;
     let mut reader = Client::connect_with_variant(
         std::net::TcpStream::connect(broker.proxy_endpoint())?,
         "codex",

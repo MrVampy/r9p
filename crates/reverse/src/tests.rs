@@ -51,8 +51,14 @@ fn reverse_export_serves_a_writable_file_tree() -> Result<(), Box<dyn std::error
         "/",
         65_536,
         Variant::R9pSymlink,
-    )?;
-    assert_eq!(reader.read_path("/specimen.txt")?, b"from laptop\n");
+    )
+    .map_err(|error| stage_error("connect reader", error))?;
+    assert_eq!(
+        reader
+            .read_path("/specimen.txt")
+            .map_err(|error| stage_error("read specimen", error))?,
+        b"from laptop\n"
+    );
     drop(reader);
 
     wait_for_waiting_stream(&broker)?;
@@ -62,14 +68,21 @@ fn reverse_export_serves_a_writable_file_tree() -> Result<(), Box<dyn std::error
         "/",
         65_536,
         Variant::R9pSymlink,
-    )?;
-    writer.write_file("/specimen.txt", b"changed on compute\n")?;
+    )
+    .map_err(|error| stage_error("connect writer", error))?;
+    writer
+        .write_file("/specimen.txt", b"changed on compute\n")
+        .map_err(|error| stage_error("write specimen", error))?;
     drop(writer);
     assert_eq!(
         fs::read(root.path.join("specimen.txt"))?,
         b"changed on compute\n"
     );
     Ok(())
+}
+
+fn stage_error(stage: &str, error: r9p::error::Error) -> Box<dyn std::error::Error> {
+    format!("{stage}: {}", String::from_utf8_lossy(error.message())).into()
 }
 
 fn wait_ready(

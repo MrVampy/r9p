@@ -1,0 +1,15 @@
+[package]
+name = "r9p-reverse"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+description = "Authenticated reverse-connect transport for serving 9P across inbound-restricted hosts"
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+fs.workspace = true
+r9p.workspace = true
+r9p-auth.workspace = true

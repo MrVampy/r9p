@@ -282,6 +282,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "r9p-reverse"
+version = "0.1.0"
+dependencies = [
+ "fs",
+ "r9p",
+ "r9p-auth",
+]
+
+[[package]]
 name = "rustc_version"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

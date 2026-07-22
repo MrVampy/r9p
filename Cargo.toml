@@ -7,6 +7,7 @@ members = [
     "crates/fs",
     "crates/fuse",
     "crates/front",
+    "crates/reverse",
     "crates/session",
 ]
 resolver = "2"
@@ -29,6 +30,7 @@ fs = { version = "0.1.0", path = "crates/fs" }
 libc = "=0.2.186"
 r9p = { version = "0.1.0", path = "crates/core" }
 r9p-auth = { version = "0.1.0", path = "crates/auth" }
+r9p-reverse = { version = "0.1.0", path = "crates/reverse" }
 serde_json = { version = "1", default-features = false, features = ["std"] }
 session = { version = "0.1.0", path = "crates/session" }
 snow = { version = "=0.10.0", default-features = false, features = [

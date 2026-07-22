@@ -158,13 +158,18 @@ impl FileTree for LocalTree {
             None
         };
         inner.open_files.insert(fid, file);
+        let mut opened_qid = qid;
         if let Some(stat) = refreshed {
+            opened_qid = stat.qid;
             if let Some(node) = inner.fids.get_mut(&fid) {
                 node.stat = stat.clone();
             }
             inner.remember(&stat);
         }
-        Ok(OpenFile { qid, iounit: 0 })
+        Ok(OpenFile {
+            qid: opened_qid,
+            iounit: 0,
+        })
     }
 
     fn read(&mut self, fid: Fid, qid: Qid, offset: u64, count: u32) -> Result<ReadData> {

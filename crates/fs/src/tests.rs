@@ -10,7 +10,7 @@ use std::{
     env, fs,
     os::unix::{ffi::OsStrExt, fs::symlink},
     process,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[test]
@@ -182,6 +182,13 @@ fn read_only_export_rejects_writes() -> Result<()> {
 fn writable_export_creates_truncates_and_writes() -> Result<()> {
     let root = fixture_root("writable")?;
     fs::write(root.join("body"), b"abcdef").map_err(|error| Error::from(error.to_string()))?;
+    fs::OpenOptions::new()
+        .write(true)
+        .open(root.join("body"))
+        .and_then(|file| {
+            file.set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1)))
+        })
+        .map_err(|error| Error::from(error.to_string()))?;
 
     let mut server = Server::new(LocalTree::open_with_config(
         &root,

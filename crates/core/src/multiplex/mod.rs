@@ -113,6 +113,51 @@ mod tests {
     }
 
     #[test]
+    fn explicit_shutdown_interrupts_a_pending_call() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .map_err(|error| io_error("bind test listener", error))?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| io_error("read listener address", error))?;
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener
+                .accept()
+                .map_err(|error| io_error("accept test connection", error))?;
+            handshake(&mut stream)?;
+            match read_tmessage(&mut stream)? {
+                TMessage::Read { .. } => {}
+                other => {
+                    return Err(Error::from(format!(
+                        "expected pending Tread, got {other:?}"
+                    )))
+                }
+            }
+            match read_tmessage(&mut stream) {
+                Err(_) => Ok(()),
+                Ok(other) => Err(Error::from(format!(
+                    "expected shutdown transport, got {other:?}"
+                ))),
+            }
+        });
+        let client = MultiplexedClient::connect(
+            TcpStream::connect(address).map_err(|error| io_error("connect test client", error))?,
+            "glenda",
+            "",
+            8192,
+        )?;
+        let pending = client.submit(|protocol| protocol.read(client.root_fid(), 0, 100))?;
+
+        client.shutdown()?;
+        let error = pending.wait().expect_err("pending call survived shutdown");
+        assert!(String::from_utf8_lossy(error.message()).contains("transport closed"));
+
+        server
+            .join()
+            .map_err(|_| Error::from("shutdown server panicked"))??;
+        Ok(())
+    }
+
+    #[test]
     fn flush_releases_original_waiter() -> Result<()> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .map_err(|error| io_error("bind test listener", error))?;

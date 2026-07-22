@@ -195,6 +195,14 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
         codec::max_write_payload(self.msize()).max(1)
     }
 
+    /// Shuts down this client's shared transport, interrupting every pending
+    /// call on the connection.
+    pub fn shutdown(&self) -> Result<()> {
+        lock(&self.inner.writer, "lock 9P writer")?
+            .shutdown_transport()
+            .map_err(|error| io_error("shutdown 9P transport", error))
+    }
+
     pub fn submit_op(&self, op: Op) -> Result<PendingCall> {
         self.submit_message(op.message)
     }

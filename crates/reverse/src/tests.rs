@@ -39,7 +39,8 @@ fn reverse_export_serves_a_writable_file_tree() -> Result<(), Box<dyn std::error
         connection_pool: 4,
         connect_timeout: Duration::from_secs(2),
         authentication_timeout: Duration::from_secs(2),
-        reconnect_delay: Duration::from_millis(25),
+        reconnect_min_delay: Duration::from_millis(25),
+        reconnect_max_delay: Duration::from_millis(200),
         msize: 65_536,
         max_fids: 256,
     })?;
@@ -79,6 +80,78 @@ fn reverse_export_serves_a_writable_file_tree() -> Result<(), Box<dyn std::error
         b"changed on compute\n"
     );
     Ok(())
+}
+
+#[test]
+fn reverse_broker_discards_closed_idle_streams() -> Result<(), Box<dyn std::error::Error>> {
+    let server = generate_key_pair()?;
+    let client = generate_key_pair()?;
+    let server_config = ServerConfig::new(
+        "r9p-reverse-stale-test",
+        server.private.clone(),
+        [(client.public, "laptop".to_string())],
+    )?;
+    let client_config = ClientConfig::new("r9p-reverse-stale-test", client.private, server.public)?;
+    let broker = ReverseBroker::start(BrokerConfig {
+        reverse_bind: address(Ipv4Addr::LOCALHOST, 0),
+        proxy_bind: address(Ipv4Addr::LOCALHOST, 0),
+        auth: server_config,
+        peer_principal: "laptop".to_string(),
+        max_waiting_streams: 2,
+        authentication_timeout: Duration::from_secs(2),
+        proxy_wait_timeout: Duration::from_secs(2),
+    })?;
+    let stale_root = TestRoot::new()?;
+    fs::write(stale_root.path.join("identity"), b"stale\n")?;
+    let stale = FilesystemExport::start(export_config(
+        broker.reverse_endpoint(),
+        client_config.clone(),
+        stale_root.path.clone(),
+        2,
+    ))?;
+    wait_ready(&broker, &stale)?;
+    drop(stale);
+
+    let live_root = TestRoot::new()?;
+    fs::write(live_root.path.join("identity"), b"live\n")?;
+    let live = FilesystemExport::start(export_config(
+        broker.reverse_endpoint(),
+        client_config,
+        live_root.path.clone(),
+        2,
+    ))?;
+    wait_ready(&broker, &live)?;
+    let mut reader = Client::connect_with_variant(
+        std::net::TcpStream::connect(broker.proxy_endpoint())?,
+        "codex",
+        "/",
+        65_536,
+        Variant::R9pSymlink,
+    )?;
+    assert_eq!(reader.read_path("/identity")?, b"live\n");
+    Ok(())
+}
+
+fn export_config(
+    broker_endpoint: SocketAddr,
+    auth: ClientConfig,
+    root: PathBuf,
+    connection_pool: usize,
+) -> FilesystemExportConfig {
+    FilesystemExportConfig {
+        broker_endpoint,
+        auth,
+        principal: "laptop".to_string(),
+        root,
+        writable: true,
+        connection_pool,
+        connect_timeout: Duration::from_secs(2),
+        authentication_timeout: Duration::from_secs(2),
+        reconnect_min_delay: Duration::from_millis(25),
+        reconnect_max_delay: Duration::from_millis(200),
+        msize: 65_536,
+        max_fids: 256,
+    }
 }
 
 fn stage_error(stage: &str, error: r9p::error::Error) -> Box<dyn std::error::Error> {

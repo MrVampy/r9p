@@ -8,8 +8,8 @@
 mod broker;
 mod export;
 
-pub use broker::{BrokerConfig, ReverseBroker};
-pub use export::{FilesystemExport, FilesystemExportConfig};
+pub use broker::{BrokerConfig, BrokerStatus, ReverseBroker};
+pub use export::{FilesystemExport, FilesystemExportConfig, FilesystemExportStatus};
 
 #[cfg(test)]
 mod tests;

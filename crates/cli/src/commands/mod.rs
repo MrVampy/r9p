@@ -5,6 +5,7 @@ pub(crate) mod machine;
 pub(crate) mod mount;
 pub(crate) mod mutate;
 pub(crate) mod read_write;
+pub(crate) mod reverse;
 pub(crate) mod script;
 pub(crate) mod serve;
 pub(crate) mod session;

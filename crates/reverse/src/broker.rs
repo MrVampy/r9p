@@ -2,9 +2,9 @@ use std::{
     io,
     net::{Shutdown, SocketAddr, TcpListener, TcpStream},
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        mpsc::{self, Receiver, SyncSender, TrySendError},
-        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError},
+        Arc,
     },
     thread::{self, JoinHandle},
     time::Duration,
@@ -27,9 +27,31 @@ pub struct BrokerConfig {
 pub struct ReverseBroker {
     reverse_endpoint: SocketAddr,
     proxy_endpoint: SocketAddr,
-    waiting_streams: Arc<AtomicUsize>,
+    counters: Arc<BrokerCounters>,
     shutdown: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BrokerStatus {
+    pub waiting_streams: usize,
+    pub active_handshakes: usize,
+    pub active_bridges: usize,
+    pub rejected_reverse_connections: u64,
+    pub authentication_failures: u64,
+    pub unavailable_proxy_connections: u64,
+    pub completed_bridges: u64,
+}
+
+#[derive(Default)]
+struct BrokerCounters {
+    waiting_streams: AtomicUsize,
+    active_handshakes: AtomicUsize,
+    active_bridges: AtomicUsize,
+    rejected_reverse_connections: AtomicU64,
+    authentication_failures: AtomicU64,
+    unavailable_proxy_connections: AtomicU64,
+    completed_bridges: AtomicU64,
 }
 
 impl ReverseBroker {
@@ -52,29 +74,29 @@ impl ReverseBroker {
             .local_addr()
             .map_err(|error| io_error("inspect proxy listener", error))?;
         let (sender, receiver) = mpsc::sync_channel(config.max_waiting_streams);
-        let receiver = Arc::new(Mutex::new(receiver));
-        let waiting_streams = Arc::new(AtomicUsize::new(0));
+        let counters = Arc::new(BrokerCounters::default());
         let shutdown = Arc::new(AtomicBool::new(false));
 
         let reverse_thread = spawn_reverse_acceptor(
             reverse_listener,
             config.clone(),
             sender,
-            Arc::clone(&waiting_streams),
+            Arc::clone(&counters),
             Arc::clone(&shutdown),
         )?;
         let proxy_thread = spawn_proxy_acceptor(
             proxy_listener,
             config.proxy_wait_timeout,
+            config.max_waiting_streams,
             receiver,
-            Arc::clone(&waiting_streams),
+            Arc::clone(&counters),
             Arc::clone(&shutdown),
         )?;
 
         Ok(Self {
             reverse_endpoint,
             proxy_endpoint,
-            waiting_streams,
+            counters,
             shutdown,
             threads: vec![reverse_thread, proxy_thread],
         })
@@ -89,11 +111,32 @@ impl ReverseBroker {
     }
 
     pub fn waiting_streams(&self) -> usize {
-        self.waiting_streams.load(Ordering::Acquire)
+        self.counters.waiting_streams.load(Ordering::Acquire)
     }
 
     pub fn is_ready(&self) -> bool {
         self.waiting_streams() > 0
+    }
+
+    pub fn status(&self) -> BrokerStatus {
+        BrokerStatus {
+            waiting_streams: self.counters.waiting_streams.load(Ordering::Acquire),
+            active_handshakes: self.counters.active_handshakes.load(Ordering::Acquire),
+            active_bridges: self.counters.active_bridges.load(Ordering::Acquire),
+            rejected_reverse_connections: self
+                .counters
+                .rejected_reverse_connections
+                .load(Ordering::Acquire),
+            authentication_failures: self
+                .counters
+                .authentication_failures
+                .load(Ordering::Acquire),
+            unavailable_proxy_connections: self
+                .counters
+                .unavailable_proxy_connections
+                .load(Ordering::Acquire),
+            completed_bridges: self.counters.completed_bridges.load(Ordering::Acquire),
+        }
     }
 }
 
@@ -117,6 +160,7 @@ fn validate_config(config: &BrokerConfig) -> Result<()> {
             .bytes()
             .any(|byte| byte.is_ascii_control())
         || config.max_waiting_streams == 0
+        || config.max_waiting_streams > 256
         || config.authentication_timeout.is_zero()
         || config.proxy_wait_timeout.is_zero()
     {
@@ -131,7 +175,7 @@ fn spawn_reverse_acceptor(
     listener: TcpListener,
     config: BrokerConfig,
     sender: SyncSender<SecureStream>,
-    waiting: Arc<AtomicUsize>,
+    counters: Arc<BrokerCounters>,
     shutdown: Arc<AtomicBool>,
 ) -> Result<JoinHandle<()>> {
     thread::Builder::new()
@@ -149,31 +193,59 @@ fn spawn_reverse_acceptor(
                 if shutdown.load(Ordering::Acquire) {
                     break;
                 }
+                let Some(handshake_slot) = CounterSlot::try_acquire(
+                    Arc::clone(&counters),
+                    CounterKind::Handshake,
+                    config.max_waiting_streams,
+                ) else {
+                    counters
+                        .rejected_reverse_connections
+                        .fetch_add(1, Ordering::AcqRel);
+                    let _ = stream.shutdown(Shutdown::Both);
+                    continue;
+                };
                 let auth = config.auth.clone();
                 let principal = config.peer_principal.clone();
                 let sender = sender.clone();
-                let waiting = Arc::clone(&waiting);
+                let handshake_counters = Arc::clone(&counters);
                 let timeout = config.authentication_timeout;
-                let _ = thread::Builder::new()
+                if thread::Builder::new()
                     .name("r9p-reverse-handshake".to_string())
                     .spawn(move || {
+                        let _handshake_slot = handshake_slot;
                         let Ok(session) = authenticate_server(stream, &auth, timeout) else {
+                            handshake_counters
+                                .authentication_failures
+                                .fetch_add(1, Ordering::AcqRel);
                             return;
                         };
                         if session.peer.principal() != principal {
+                            handshake_counters
+                                .authentication_failures
+                                .fetch_add(1, Ordering::AcqRel);
                             let _ = session.stream.shutdown();
                             return;
                         }
-                        waiting.fetch_add(1, Ordering::AcqRel);
+                        handshake_counters
+                            .waiting_streams
+                            .fetch_add(1, Ordering::AcqRel);
                         match sender.try_send(session.stream) {
                             Ok(()) => {}
                             Err(TrySendError::Full(stream))
                             | Err(TrySendError::Disconnected(stream)) => {
-                                waiting.fetch_sub(1, Ordering::AcqRel);
+                                handshake_counters
+                                    .waiting_streams
+                                    .fetch_sub(1, Ordering::AcqRel);
                                 let _ = stream.shutdown();
                             }
                         }
-                    });
+                    })
+                    .is_err()
+                {
+                    counters
+                        .rejected_reverse_connections
+                        .fetch_add(1, Ordering::AcqRel);
+                }
             }
         })
         .map_err(|error| Error::from(format!("spawn reverse acceptor: {error}")))
@@ -182,8 +254,9 @@ fn spawn_reverse_acceptor(
 fn spawn_proxy_acceptor(
     listener: TcpListener,
     wait_timeout: Duration,
-    receiver: Arc<Mutex<Receiver<SecureStream>>>,
-    waiting: Arc<AtomicUsize>,
+    max_active_bridges: usize,
+    receiver: Receiver<SecureStream>,
+    counters: Arc<BrokerCounters>,
     shutdown: Arc<AtomicBool>,
 ) -> Result<JoinHandle<()>> {
     thread::Builder::new()
@@ -201,25 +274,112 @@ fn spawn_proxy_acceptor(
                 if shutdown.load(Ordering::Acquire) {
                     break;
                 }
-                let receiver = Arc::clone(&receiver);
-                let waiting = Arc::clone(&waiting);
-                let _ = thread::Builder::new()
+                let Some(bridge_slot) = CounterSlot::try_acquire(
+                    Arc::clone(&counters),
+                    CounterKind::Bridge,
+                    max_active_bridges,
+                ) else {
+                    counters
+                        .unavailable_proxy_connections
+                        .fetch_add(1, Ordering::AcqRel);
+                    let _ = local.shutdown(Shutdown::Both);
+                    continue;
+                };
+                let Some(remote) =
+                    receive_live_stream(&receiver, wait_timeout, &counters, &shutdown)
+                else {
+                    counters
+                        .unavailable_proxy_connections
+                        .fetch_add(1, Ordering::AcqRel);
+                    let _ = local.shutdown(Shutdown::Both);
+                    continue;
+                };
+                let bridge_counters = Arc::clone(&counters);
+                if thread::Builder::new()
                     .name("r9p-reverse-bridge".to_string())
                     .spawn(move || {
-                        let remote = receiver
-                            .lock()
-                            .ok()
-                            .and_then(|receiver| receiver.recv_timeout(wait_timeout).ok());
-                        let Some(remote) = remote else {
-                            let _ = local.shutdown(Shutdown::Both);
-                            return;
-                        };
-                        waiting.fetch_sub(1, Ordering::AcqRel);
+                        let _bridge_slot = bridge_slot;
                         let _ = bridge(local, remote);
-                    });
+                        bridge_counters
+                            .completed_bridges
+                            .fetch_add(1, Ordering::AcqRel);
+                    })
+                    .is_err()
+                {
+                    counters
+                        .unavailable_proxy_connections
+                        .fetch_add(1, Ordering::AcqRel);
+                }
             }
         })
         .map_err(|error| Error::from(format!("spawn proxy acceptor: {error}")))
+}
+
+fn receive_live_stream(
+    receiver: &Receiver<SecureStream>,
+    wait_timeout: Duration,
+    counters: &BrokerCounters,
+    shutdown: &AtomicBool,
+) -> Option<SecureStream> {
+    let deadline = std::time::Instant::now() + wait_timeout;
+    while !shutdown.load(Ordering::Acquire) {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        let stream = match receiver.recv_timeout(remaining) {
+            Ok(stream) => stream,
+            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => return None,
+        };
+        counters.waiting_streams.fetch_sub(1, Ordering::AcqRel);
+        match stream.peer_closed(Duration::from_millis(2)) {
+            Ok(true) | Err(_) => {
+                let _ = stream.shutdown();
+            }
+            Ok(false) => return Some(stream),
+        }
+    }
+    None
+}
+
+enum CounterKind {
+    Handshake,
+    Bridge,
+}
+
+struct CounterSlot {
+    counters: Arc<BrokerCounters>,
+    kind: CounterKind,
+}
+
+impl CounterSlot {
+    fn try_acquire(counters: Arc<BrokerCounters>, kind: CounterKind, limit: usize) -> Option<Self> {
+        let counter = match kind {
+            CounterKind::Handshake => &counters.active_handshakes,
+            CounterKind::Bridge => &counters.active_bridges,
+        };
+        counter
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                (value < limit).then_some(value + 1)
+            })
+            .ok()?;
+        Some(Self { counters, kind })
+    }
+}
+
+impl Drop for CounterSlot {
+    fn drop(&mut self) {
+        match self.kind {
+            CounterKind::Handshake => {
+                self.counters
+                    .active_handshakes
+                    .fetch_sub(1, Ordering::AcqRel);
+            }
+            CounterKind::Bridge => {
+                self.counters.active_bridges.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+    }
 }
 
 fn bridge(local: TcpStream, remote: SecureStream) -> io::Result<()> {

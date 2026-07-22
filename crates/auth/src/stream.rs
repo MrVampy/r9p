@@ -3,6 +3,7 @@ use std::{
     io::{self, Read, Write},
     net::{Shutdown, TcpStream},
     sync::{Arc, Mutex, MutexGuard},
+    time::Duration,
 };
 
 const AUTH_TAG_BYTES: usize = 16;
@@ -49,6 +50,36 @@ impl SecureStream {
 
     pub fn shutdown(&self) -> io::Result<()> {
         self.socket.shutdown(Shutdown::Both)
+    }
+
+    pub fn peer_closed(&self, timeout: Duration) -> io::Result<bool> {
+        if timeout.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "peer-close observation timeout must be nonzero",
+            ));
+        }
+        let previous = self.socket.read_timeout()?;
+        self.socket.set_read_timeout(Some(timeout))?;
+        let mut byte = [0_u8; 1];
+        let observed = match self.socket.peek(&mut byte) {
+            Ok(0) => Ok(true),
+            Ok(_) => Ok(false),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        };
+        let restored = self.socket.set_read_timeout(previous);
+        match (observed, restored) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        }
     }
 
     fn read_record(&mut self, state: &mut ReadState) -> io::Result<bool> {

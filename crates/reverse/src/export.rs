@@ -2,7 +2,7 @@ use std::{
     net::{SocketAddr, TcpStream},
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
@@ -27,7 +27,8 @@ pub struct FilesystemExportConfig {
     pub connection_pool: usize,
     pub connect_timeout: Duration,
     pub authentication_timeout: Duration,
-    pub reconnect_delay: Duration,
+    pub reconnect_min_delay: Duration,
+    pub reconnect_max_delay: Duration,
     pub msize: u32,
     pub max_fids: usize,
 }
@@ -35,9 +36,19 @@ pub struct FilesystemExportConfig {
 pub struct FilesystemExport {
     shutdown: Arc<AtomicBool>,
     connected_streams: Arc<AtomicUsize>,
-    endpoint: SocketAddr,
+    connection_failures: Arc<AtomicU64>,
+    authentication_failures: Arc<AtomicU64>,
+    completed_sessions: Arc<AtomicU64>,
     active_streams: Arc<Mutex<Vec<Option<r9p_auth::SecureStream>>>>,
     threads: Vec<JoinHandle<()>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FilesystemExportStatus {
+    pub connected_streams: usize,
+    pub connection_failures: u64,
+    pub authentication_failures: u64,
+    pub completed_sessions: u64,
 }
 
 impl FilesystemExport {
@@ -51,6 +62,9 @@ impl FilesystemExport {
         )?;
         let shutdown = Arc::new(AtomicBool::new(false));
         let connected_streams = Arc::new(AtomicUsize::new(0));
+        let connection_failures = Arc::new(AtomicU64::new(0));
+        let authentication_failures = Arc::new(AtomicU64::new(0));
+        let completed_sessions = Arc::new(AtomicU64::new(0));
         let active_streams = Arc::new(Mutex::new(
             std::iter::repeat_with(|| None)
                 .take(config.connection_pool)
@@ -61,6 +75,9 @@ impl FilesystemExport {
             let config = config.clone();
             let worker_shutdown = Arc::clone(&shutdown);
             let worker_connected = Arc::clone(&connected_streams);
+            let worker_connection_failures = Arc::clone(&connection_failures);
+            let worker_authentication_failures = Arc::clone(&authentication_failures);
+            let worker_completed_sessions = Arc::clone(&completed_sessions);
             let worker_streams = Arc::clone(&active_streams);
             threads.push(
                 thread::Builder::new()
@@ -71,6 +88,9 @@ impl FilesystemExport {
                             index,
                             worker_shutdown,
                             worker_connected,
+                            worker_connection_failures,
+                            worker_authentication_failures,
+                            worker_completed_sessions,
                             worker_streams,
                         )
                     })
@@ -80,7 +100,9 @@ impl FilesystemExport {
         Ok(Self {
             shutdown,
             connected_streams,
-            endpoint: config.broker_endpoint,
+            connection_failures,
+            authentication_failures,
+            completed_sessions,
             active_streams,
             threads,
         })
@@ -88,6 +110,15 @@ impl FilesystemExport {
 
     pub fn connected_streams(&self) -> usize {
         self.connected_streams.load(Ordering::Acquire)
+    }
+
+    pub fn status(&self) -> FilesystemExportStatus {
+        FilesystemExportStatus {
+            connected_streams: self.connected_streams.load(Ordering::Acquire),
+            connection_failures: self.connection_failures.load(Ordering::Acquire),
+            authentication_failures: self.authentication_failures.load(Ordering::Acquire),
+            completed_sessions: self.completed_sessions.load(Ordering::Acquire),
+        }
     }
 }
 
@@ -103,7 +134,6 @@ impl Drop for FilesystemExport {
         } else {
             self.shutdown.store(true, Ordering::Release);
         }
-        let _ = TcpStream::connect(self.endpoint);
         for thread in self.threads.drain(..) {
             let _ = thread.join();
         }
@@ -118,7 +148,8 @@ fn validate_config(config: &FilesystemExportConfig) -> Result<()> {
         || config.connection_pool > 256
         || config.connect_timeout.is_zero()
         || config.authentication_timeout.is_zero()
-        || config.reconnect_delay.is_zero()
+        || config.reconnect_min_delay.is_zero()
+        || config.reconnect_max_delay < config.reconnect_min_delay
         || config.msize < 1024
         || config.max_fids == 0
     {
@@ -134,14 +165,23 @@ fn export_loop(
     worker_index: usize,
     shutdown: Arc<AtomicBool>,
     connected: Arc<AtomicUsize>,
+    connection_failures: Arc<AtomicU64>,
+    authentication_failures: Arc<AtomicU64>,
+    completed_sessions: Arc<AtomicU64>,
     active_streams: Arc<Mutex<Vec<Option<r9p_auth::SecureStream>>>>,
 ) {
+    let mut failed_attempts = 0_u32;
     while !shutdown.load(Ordering::Acquire) {
         let stream =
             match TcpStream::connect_timeout(&config.broker_endpoint, config.connect_timeout) {
                 Ok(stream) => stream,
                 Err(_) => {
-                    sleep_until_retry(&shutdown, config.reconnect_delay);
+                    connection_failures.fetch_add(1, Ordering::AcqRel);
+                    sleep_until_retry(
+                        &shutdown,
+                        retry_delay(&config, worker_index, failed_attempts),
+                    );
+                    failed_attempts = failed_attempts.saturating_add(1);
                     continue;
                 }
             };
@@ -153,14 +193,20 @@ fn export_loop(
         ) {
             Ok(stream) => stream,
             Err(_) => {
-                sleep_until_retry(&shutdown, config.reconnect_delay);
+                authentication_failures.fetch_add(1, Ordering::AcqRel);
+                sleep_until_retry(
+                    &shutdown,
+                    retry_delay(&config, worker_index, failed_attempts),
+                );
+                failed_attempts = failed_attempts.saturating_add(1);
                 continue;
             }
         };
+        failed_attempts = 0;
         let shutdown_stream = match stream.try_clone() {
             Ok(stream) => stream,
             Err(_) => {
-                sleep_until_retry(&shutdown, config.reconnect_delay);
+                connection_failures.fetch_add(1, Ordering::AcqRel);
                 continue;
             }
         };
@@ -198,8 +244,28 @@ fn export_loop(
             streams[worker_index] = None;
         }
         connected.fetch_sub(1, Ordering::AcqRel);
-        sleep_until_retry(&shutdown, config.reconnect_delay);
+        completed_sessions.fetch_add(1, Ordering::AcqRel);
     }
+}
+
+fn retry_delay(
+    config: &FilesystemExportConfig,
+    worker_index: usize,
+    failed_attempts: u32,
+) -> Duration {
+    let exponent = failed_attempts.min(12);
+    let multiplier = 1_u32 << exponent;
+    let base = config
+        .reconnect_min_delay
+        .saturating_mul(multiplier)
+        .min(config.reconnect_max_delay);
+    let divisor = u32::try_from(config.connection_pool).unwrap_or(u32::MAX);
+    let phase = u32::try_from(worker_index)
+        .ok()
+        .and_then(|index| config.reconnect_min_delay.checked_mul(index))
+        .map(|spread| spread / divisor)
+        .unwrap_or_default();
+    base.saturating_add(phase).min(config.reconnect_max_delay)
 }
 
 fn sleep_until_retry(shutdown: &AtomicBool, duration: Duration) {

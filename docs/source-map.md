@@ -33,6 +33,11 @@ This map defines the local sources agents should inspect before making source-sp
     framing, key material, and typed client/server session configuration.
   - It binds a verified transport session to a 9P username but carries no
     backend admission or namespace policy.
+- `crates/reverse/src/`
+  - Generic authenticated reverse-connect runtime adapter.
+  - The filesystem owner connects outward and serves ordinary 9P over a
+    bounded pool; the broker pairs those streams with a loopback client
+    endpoint without interpreting 9P or owning namespace policy.
 - `crates/core/src/multiplex/`
   - Layered blocking transport facade for concurrent tagged client calls.
 - `crates/core/src/stat.rs`
@@ -71,6 +76,12 @@ Use these when the question is "what does `r9p` do now?"
   - Acme 9P file behavior when an Acme-specific compatibility question appears.
 
 Use plan9port when the question is "what does the established 9P ecosystem expect?"
+
+For reverse-connect lineage, also inspect `refs/plan9port/src/cmd/9import.c`
+and the Plan 9 `import`, `exportfs`, `cpu`, and `srv` manuals when present. They
+show that the 9P server need not be the side that accepted the underlying
+connection and that a service name can denote a posted channel rather than a
+fixed listener.
 
 ## Racme
 

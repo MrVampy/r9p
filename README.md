@@ -14,6 +14,9 @@ Current surfaces and consumers:
 - `r9p serve`, a local filesystem-backed 9P server that is read-only by
   default and explicitly writable with `--writable`.
 - `r9p export`, `serve` plus a machine-readable `r9p-export.v1` descriptor.
+- `r9p reverse-broker` and `r9p reverse-export`, an authenticated outbound
+  publication posture for a filesystem owner that cannot accept inbound
+  connections.
 - `r9p auth-keygen`, key creation for authenticated remote 9P sessions.
 - Racme serves an Acme-compatible 9P namespace through `r9p`.
 - Vault consumes `r9p` for its runtime listener, one-shot client operations,
@@ -106,6 +109,8 @@ r9p mount [--uname uname] [--aname aname] [--attr-timeout seconds] [--entry-time
 r9p mount ensure|status|stop --mountpoint path [--unit name --unit-scope user|system] [--status-file path] [--expect-endpoint endpoint] [--expect-change-feed path] [--expect-status-file path] [--attempts count] [-- mount args...]
 r9p serve [--bind address] [--max-fids count] [--writable] root
 r9p export [--bind address] [--max-fids count] [--writable] [--descriptor machine] [--descriptor-file path] [--auth-config path] [--descriptor-field key=value] root
+r9p reverse-broker --reverse-bind address [--proxy-bind loopback-address] --principal name --auth-config path [--pool count]
+r9p reverse-export --connect address --principal name --auth-config path [--pool count] [--reconnect-min-delay seconds] [--reconnect-max-delay seconds] [--writable] root
 r9p auth-keygen --private path --public path
 ```
 
@@ -186,6 +191,29 @@ X25519 static keys, and carry 9P over ChaCha20-Poly1305 records with BLAKE2s.
 Each session creates its own ephemeral handshake state; there is no per-session
 operator setup. The provider follows p9any's extensible negotiation shape but
 does not claim dp9ik or unmodified factotum interoperability.
+
+### Reverse-connect 9P
+
+`reverse-export` changes connection placement, not the 9P protocol or the
+exported tree. The filesystem-owning host authenticates outward to a
+`reverse-broker` and serves an ordinary 9P session on every connected stream.
+The broker exposes a loopback-only proxy endpoint and copies bytes between one
+local client and one authenticated reverse stream. It does not parse 9P,
+resolve service names, admit Vault capabilities, or own the exported files.
+
+The pool and all listener work are bounded. Failed exporter connections use a
+capped exponential retry delay with deterministic worker phasing; successful
+sessions replenish the pool immediately. Before assigning a queued stream, the
+broker discards peers whose TCP close is already observable. Status snapshots
+report pool, handshake, bridge, rejection, and failure counters to embedding
+applications.
+
+This is a runtime adapter, not a registration system. A service may publish the
+broker's ordinary endpoint using its existing registry lifecycle, but service
+naming, leases, capability admission, and direct-versus-relay choice remain the
+responsibility of the governing namespace. The loopback proxy restriction is
+intentional: exposing another network listener without its own end-to-end
+admission boundary would turn a placement mechanism into an ambient proxy.
 
 `r9p mount` runs a bounded worker pool rather than spawning one OS thread per
 FUSE request. The defaults follow the conservative libfuse/Linux shape:

@@ -245,8 +245,8 @@ unsafe fn child_exec_fusermount(
     libc::setenv(env_name.as_ptr(), env_value.as_ptr(), 1);
 
     let opt_flag = CString::new("-o").expect("static arg contains no NUL");
-    let opt_value = CString::new(mount_options(auto_unmount, allow_other))
-        .expect("static arg contains no NUL");
+    let opt_value =
+        CString::new(mount_options(auto_unmount, allow_other)).expect("static arg contains no NUL");
     let dashdash = CString::new("--").expect("static arg contains no NUL");
     for binary in fusermount_candidates() {
         let fusermount = CString::new(binary).expect("static command contains no NUL");
@@ -487,10 +487,7 @@ mod tests {
         assert_eq!("", mount_options(false, false));
         assert_eq!("auto_unmount", mount_options(true, false));
         assert_eq!("allow_other", mount_options(false, true));
-        assert_eq!(
-            "auto_unmount,allow_other",
-            mount_options(true, true)
-        );
+        assert_eq!("auto_unmount,allow_other", mount_options(true, true));
     }
 
     #[test]

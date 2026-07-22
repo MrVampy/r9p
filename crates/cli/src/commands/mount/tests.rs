@@ -74,6 +74,7 @@ fn parses_final_mount_options() {
             "1.5".to_string(),
             "--entry-timeout".to_string(),
             "2".to_string(),
+            "--allow-other".to_string(),
             "--msize".to_string(),
             "8192".to_string(),
             "127.0.0.1:564".to_string(),
@@ -116,6 +117,7 @@ fn parses_final_mount_options() {
     assert_eq!(config.change_feed_backpressure_limit, 128);
     assert_eq!(config.attr_timeout, Duration::from_millis(1500));
     assert_eq!(config.entry_timeout, Duration::from_secs(2));
+    assert!(config.allow_other);
     assert_eq!(config.max_workers, 8);
     assert_eq!(config.max_background, 24);
     assert_eq!(config.congestion_threshold, 18);
@@ -151,6 +153,7 @@ fn mount_defaults_use_short_positive_kernel_cache() {
     assert_eq!(config.attr_timeout, fuse::DEFAULT_ATTR_TIMEOUT);
     assert_eq!(config.entry_timeout, fuse::DEFAULT_ENTRY_TIMEOUT);
     assert_eq!(config.connect_timeout, Duration::from_secs(30));
+    assert!(!config.allow_other);
 }
 
 #[test]

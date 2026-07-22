@@ -100,7 +100,7 @@ impl R9pFuse {
         )));
         let uid = unsafe { libc::getuid() };
         let gid = unsafe { libc::getgid() };
-        let mut mount = mount_fuse(Path::new(&config.mountpoint))?;
+        let mut mount = mount_fuse(Path::new(&config.mountpoint), config.allow_other)?;
         let fs = Self {
             client,
             nodes,

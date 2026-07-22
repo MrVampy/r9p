@@ -99,6 +99,7 @@ fn mount_config(
         change_feed_scope: None,
         change_feed_poll_interval: Duration::ZERO,
         change_feed_backpressure_limit: 0,
+        allow_other: false,
         debug: false,
     }
 }

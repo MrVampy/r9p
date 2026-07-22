@@ -222,6 +222,7 @@ fn mount_config_normalization_keeps_worker_and_background_limits_nonzero() {
         change_feed_scope: None,
         change_feed_poll_interval: Duration::ZERO,
         change_feed_backpressure_limit: 0,
+        allow_other: false,
         debug: false,
     };
 

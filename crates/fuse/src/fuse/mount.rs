@@ -109,16 +109,16 @@ impl MountCleanup {
     }
 }
 
-pub(super) fn mount_fuse(mountpoint: &Path) -> Result<FuseMount> {
+pub(super) fn mount_fuse(mountpoint: &Path, allow_other: bool) -> Result<FuseMount> {
     let absolute_mountpoint = absolute_mountpoint(mountpoint)?;
     clear_stale_fuse_mount(&absolute_mountpoint);
     let mountpoint_str = absolute_mountpoint
         .to_str()
         .ok_or_else(|| Error::new(libc::EINVAL, "mountpoint is not valid UTF-8"))?
         .to_string();
-    let fd = match mount_fuse_attempt(&mountpoint_str, true) {
+    let fd = match mount_fuse_attempt(&mountpoint_str, true, allow_other) {
         Ok(fd) => fd,
-        Err(_) => mount_fuse_attempt(&mountpoint_str, false)?,
+        Err(_) => mount_fuse_attempt(&mountpoint_str, false, allow_other)?,
     };
     let connection_id = connection_id_for_mountpoint(&mountpoint_str);
     let fuse_fd = Arc::new(AtomicI32::new(fd));
@@ -134,7 +134,11 @@ pub(super) fn mount_fuse(mountpoint: &Path) -> Result<FuseMount> {
     })
 }
 
-fn mount_fuse_attempt(mountpoint_str: &str, auto_unmount: bool) -> Result<RawFd> {
+fn mount_fuse_attempt(
+    mountpoint_str: &str,
+    auto_unmount: bool,
+    allow_other: bool,
+) -> Result<RawFd> {
     let mut sockets = [0_i32; 2];
     let rc = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, sockets.as_mut_ptr()) };
     if rc < 0 {
@@ -151,7 +155,7 @@ fn mount_fuse_attempt(mountpoint_str: &str, auto_unmount: bool) -> Result<RawFd>
     if pid == 0 {
         unsafe {
             libc::close(sockets[1]);
-            child_exec_fusermount(sockets[0], mountpoint_str, auto_unmount);
+            child_exec_fusermount(sockets[0], mountpoint_str, auto_unmount, allow_other);
         }
     }
     unsafe {
@@ -228,7 +232,12 @@ fn absolute_mountpoint(mountpoint: &Path) -> Result<PathBuf> {
         .map_err(|error| Error::io("resolve mountpoint path", error))
 }
 
-unsafe fn child_exec_fusermount(comm_fd: RawFd, mountpoint: &str, auto_unmount: bool) -> ! {
+unsafe fn child_exec_fusermount(
+    comm_fd: RawFd,
+    mountpoint: &str,
+    auto_unmount: bool,
+    allow_other: bool,
+) -> ! {
     unblock_termination_signals();
     let env_name = CString::new("_FUSE_COMMFD").expect("static env name contains no NUL");
     let env_value = CString::new(comm_fd.to_string()).expect("fd string contains no NUL");
@@ -236,11 +245,12 @@ unsafe fn child_exec_fusermount(comm_fd: RawFd, mountpoint: &str, auto_unmount: 
     libc::setenv(env_name.as_ptr(), env_value.as_ptr(), 1);
 
     let opt_flag = CString::new("-o").expect("static arg contains no NUL");
-    let opt_value = CString::new("auto_unmount").expect("static arg contains no NUL");
+    let opt_value = CString::new(mount_options(auto_unmount, allow_other))
+        .expect("static arg contains no NUL");
     let dashdash = CString::new("--").expect("static arg contains no NUL");
     for binary in fusermount_candidates() {
         let fusermount = CString::new(binary).expect("static command contains no NUL");
-        if auto_unmount {
+        if auto_unmount || allow_other {
             libc::execlp(
                 fusermount.as_ptr(),
                 fusermount.as_ptr(),
@@ -261,6 +271,15 @@ unsafe fn child_exec_fusermount(comm_fd: RawFd, mountpoint: &str, auto_unmount: 
         }
     }
     libc::_exit(1);
+}
+
+const fn mount_options(auto_unmount: bool, allow_other: bool) -> &'static str {
+    match (auto_unmount, allow_other) {
+        (true, true) => "auto_unmount,allow_other",
+        (true, false) => "auto_unmount",
+        (false, true) => "allow_other",
+        (false, false) => "",
+    }
 }
 
 const fn fusermount_candidates() -> [&'static str; 2] {
@@ -453,11 +472,25 @@ fn decode_mounts_path(path: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_mounts_path, fusermount_candidates, parse_connection_id_from_mountinfo};
+    use super::{
+        decode_mounts_path, fusermount_candidates, mount_options,
+        parse_connection_id_from_mountinfo,
+    };
 
     #[test]
     fn prefers_fusermount3_before_fuse2_helper() {
         assert_eq!(["fusermount3", "fusermount"], fusermount_candidates());
+    }
+
+    #[test]
+    fn renders_explicit_fuse_access_options() {
+        assert_eq!("", mount_options(false, false));
+        assert_eq!("auto_unmount", mount_options(true, false));
+        assert_eq!("allow_other", mount_options(false, true));
+        assert_eq!(
+            "auto_unmount,allow_other",
+            mount_options(true, true)
+        );
     }
 
     #[test]

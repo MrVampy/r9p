@@ -43,6 +43,7 @@ pub struct Config {
     pub change_feed_scope: Option<String>,
     pub change_feed_poll_interval: Duration,
     pub change_feed_backpressure_limit: usize,
+    pub allow_other: bool,
     pub debug: bool,
 }
 

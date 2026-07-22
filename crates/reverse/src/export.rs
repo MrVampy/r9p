@@ -34,13 +34,18 @@ pub struct FilesystemExportConfig {
 }
 
 pub struct FilesystemExport {
+    state: ExportState,
+    threads: Vec<JoinHandle<()>>,
+}
+
+#[derive(Clone)]
+struct ExportState {
     shutdown: Arc<AtomicBool>,
     connected_streams: Arc<AtomicUsize>,
     connection_failures: Arc<AtomicU64>,
     authentication_failures: Arc<AtomicU64>,
     completed_sessions: Arc<AtomicU64>,
     active_streams: Arc<Mutex<Vec<Option<r9p_auth::SecureStream>>>>,
-    threads: Vec<JoinHandle<()>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -60,79 +65,55 @@ impl FilesystemExport {
                 writable: config.writable,
             },
         )?;
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let connected_streams = Arc::new(AtomicUsize::new(0));
-        let connection_failures = Arc::new(AtomicU64::new(0));
-        let authentication_failures = Arc::new(AtomicU64::new(0));
-        let completed_sessions = Arc::new(AtomicU64::new(0));
-        let active_streams = Arc::new(Mutex::new(
-            std::iter::repeat_with(|| None)
-                .take(config.connection_pool)
-                .collect(),
-        ));
+        let state = ExportState {
+            shutdown: Arc::new(AtomicBool::new(false)),
+            connected_streams: Arc::new(AtomicUsize::new(0)),
+            connection_failures: Arc::new(AtomicU64::new(0)),
+            authentication_failures: Arc::new(AtomicU64::new(0)),
+            completed_sessions: Arc::new(AtomicU64::new(0)),
+            active_streams: Arc::new(Mutex::new(
+                std::iter::repeat_with(|| None)
+                    .take(config.connection_pool)
+                    .collect(),
+            )),
+        };
         let mut threads = Vec::with_capacity(config.connection_pool);
         for index in 0..config.connection_pool {
             let config = config.clone();
-            let worker_shutdown = Arc::clone(&shutdown);
-            let worker_connected = Arc::clone(&connected_streams);
-            let worker_connection_failures = Arc::clone(&connection_failures);
-            let worker_authentication_failures = Arc::clone(&authentication_failures);
-            let worker_completed_sessions = Arc::clone(&completed_sessions);
-            let worker_streams = Arc::clone(&active_streams);
+            let worker_state = state.clone();
             threads.push(
                 thread::Builder::new()
                     .name(format!("r9p-reverse-export-{index}"))
-                    .spawn(move || {
-                        export_loop(
-                            config,
-                            index,
-                            worker_shutdown,
-                            worker_connected,
-                            worker_connection_failures,
-                            worker_authentication_failures,
-                            worker_completed_sessions,
-                            worker_streams,
-                        )
-                    })
+                    .spawn(move || export_loop(config, index, worker_state))
                     .map_err(|error| Error::from(format!("spawn reverse export: {error}")))?,
             );
         }
-        Ok(Self {
-            shutdown,
-            connected_streams,
-            connection_failures,
-            authentication_failures,
-            completed_sessions,
-            active_streams,
-            threads,
-        })
+        Ok(Self { state, threads })
     }
 
     pub fn connected_streams(&self) -> usize {
-        self.connected_streams.load(Ordering::Acquire)
+        self.state.connected_streams.load(Ordering::Acquire)
     }
 
     pub fn status(&self) -> FilesystemExportStatus {
         FilesystemExportStatus {
-            connected_streams: self.connected_streams.load(Ordering::Acquire),
-            connection_failures: self.connection_failures.load(Ordering::Acquire),
-            authentication_failures: self.authentication_failures.load(Ordering::Acquire),
-            completed_sessions: self.completed_sessions.load(Ordering::Acquire),
+            connected_streams: self.state.connected_streams.load(Ordering::Acquire),
+            connection_failures: self.state.connection_failures.load(Ordering::Acquire),
+            authentication_failures: self.state.authentication_failures.load(Ordering::Acquire),
+            completed_sessions: self.state.completed_sessions.load(Ordering::Acquire),
         }
     }
 }
 
 impl Drop for FilesystemExport {
     fn drop(&mut self) {
-        if let Ok(streams) = self.active_streams.lock() {
-            self.shutdown.store(true, Ordering::Release);
-            for stream in streams.iter() {
-                if let Some(stream) = stream {
-                    let _ = stream.shutdown();
-                }
+        if let Ok(streams) = self.state.active_streams.lock() {
+            self.state.shutdown.store(true, Ordering::Release);
+            for stream in streams.iter().flatten() {
+                let _ = stream.shutdown();
             }
         } else {
-            self.shutdown.store(true, Ordering::Release);
+            self.state.shutdown.store(true, Ordering::Release);
         }
         for thread in self.threads.drain(..) {
             let _ = thread.join();
@@ -160,25 +141,16 @@ fn validate_config(config: &FilesystemExportConfig) -> Result<()> {
     Ok(())
 }
 
-fn export_loop(
-    config: FilesystemExportConfig,
-    worker_index: usize,
-    shutdown: Arc<AtomicBool>,
-    connected: Arc<AtomicUsize>,
-    connection_failures: Arc<AtomicU64>,
-    authentication_failures: Arc<AtomicU64>,
-    completed_sessions: Arc<AtomicU64>,
-    active_streams: Arc<Mutex<Vec<Option<r9p_auth::SecureStream>>>>,
-) {
+fn export_loop(config: FilesystemExportConfig, worker_index: usize, state: ExportState) {
     let mut failed_attempts = 0_u32;
-    while !shutdown.load(Ordering::Acquire) {
+    while !state.shutdown.load(Ordering::Acquire) {
         let stream =
             match TcpStream::connect_timeout(&config.broker_endpoint, config.connect_timeout) {
                 Ok(stream) => stream,
                 Err(_) => {
-                    connection_failures.fetch_add(1, Ordering::AcqRel);
+                    state.connection_failures.fetch_add(1, Ordering::AcqRel);
                     sleep_until_retry(
-                        &shutdown,
+                        &state.shutdown,
                         retry_delay(&config, worker_index, failed_attempts),
                     );
                     failed_attempts = failed_attempts.saturating_add(1);
@@ -193,9 +165,9 @@ fn export_loop(
         ) {
             Ok(stream) => stream,
             Err(_) => {
-                authentication_failures.fetch_add(1, Ordering::AcqRel);
+                state.authentication_failures.fetch_add(1, Ordering::AcqRel);
                 sleep_until_retry(
-                    &shutdown,
+                    &state.shutdown,
                     retry_delay(&config, worker_index, failed_attempts),
                 );
                 failed_attempts = failed_attempts.saturating_add(1);
@@ -206,12 +178,12 @@ fn export_loop(
         let shutdown_stream = match stream.try_clone() {
             Ok(stream) => stream,
             Err(_) => {
-                connection_failures.fetch_add(1, Ordering::AcqRel);
+                state.connection_failures.fetch_add(1, Ordering::AcqRel);
                 continue;
             }
         };
-        if let Ok(mut streams) = active_streams.lock() {
-            if shutdown.load(Ordering::Acquire) {
+        if let Ok(mut streams) = state.active_streams.lock() {
+            if state.shutdown.load(Ordering::Acquire) {
                 let _ = stream.shutdown();
                 break;
             }
@@ -220,7 +192,7 @@ fn export_loop(
             let _ = stream.shutdown();
             return;
         }
-        connected.fetch_add(1, Ordering::AcqRel);
+        state.connected_streams.fetch_add(1, Ordering::AcqRel);
         let tree = LocalTree::open_with_config(
             &config.root,
             LocalTreeConfig {
@@ -240,11 +212,11 @@ fn export_loop(
                 tree,
             );
         }
-        if let Ok(mut streams) = active_streams.lock() {
+        if let Ok(mut streams) = state.active_streams.lock() {
             streams[worker_index] = None;
         }
-        connected.fetch_sub(1, Ordering::AcqRel);
-        completed_sessions.fetch_add(1, Ordering::AcqRel);
+        state.connected_streams.fetch_sub(1, Ordering::AcqRel);
+        state.completed_sessions.fetch_add(1, Ordering::AcqRel);
     }
 }
 

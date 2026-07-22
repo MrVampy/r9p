@@ -89,6 +89,7 @@ dependencies = [
  "libc",
  "r9p",
  "r9p-auth",
+ "r9p-reverse",
  "session",
 ]
 

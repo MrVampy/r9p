@@ -152,6 +152,15 @@ impl Client {
             .map_err(client_error)
     }
 
+    /// Reads until the requested byte bound, EOF, or transport failure without
+    /// imposing a response deadline. This is intended for namespace files
+    /// whose read itself is the blocking subscription contract.
+    pub fn read_full(&self, fid: Fid, offset: u64, count: u32) -> Result<Vec<u8>> {
+        self.inner
+            .read_full(fid, offset, count)
+            .map_err(client_error)
+    }
+
     pub fn write_timeout(
         &self,
         fid: Fid,
@@ -166,6 +175,12 @@ impl Client {
 
     pub fn clunk_timeout(&self, fid: Fid, timeout: Duration) -> Result<()> {
         self.inner.clunk_timeout(fid, timeout).map_err(client_error)
+    }
+
+    /// Closes the shared transport and interrupts every pending call on this
+    /// session connection.
+    pub fn shutdown(&self) -> Result<()> {
+        self.inner.shutdown().map_err(client_error)
     }
 
     pub fn remove_timeout(&self, fid: Fid, timeout: Duration) -> Result<()> {

@@ -47,6 +47,21 @@ fn connects_explicit_unix_socket() {
         .expect("root stat should succeed");
     assert_eq!(stat.name, b".".to_vec());
 
+    let root = client
+        .clone_fid_timeout(client.root_fid(), Duration::from_secs(1))
+        .expect("root fid should clone");
+    client
+        .open_timeout(root, r9p::blocking::OREAD, Duration::from_secs(1))
+        .expect("root directory should open");
+    let bytes = client
+        .read_full(root, 0, 8192)
+        .expect("blocking full read should succeed");
+    assert!(bytes.is_empty());
+    client
+        .clunk_timeout(root, Duration::from_secs(1))
+        .expect("root clone should clunk");
+    client.shutdown().expect("session should shut down");
+
     drop(client);
     server.join().expect("server should not panic");
     let _ = fs::remove_file(socket_path);

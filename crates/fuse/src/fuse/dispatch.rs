@@ -266,8 +266,7 @@ impl R9pFuse {
                 .collect::<Vec<_>>();
             let lazy_rebind_count = stale.len();
             self.client.replace(client)?;
-            let _ =
-                nodes.apply_rebind_results(vec![(ROOT_NODEID, root_fid, root_stat)], stale);
+            let _ = nodes.apply_rebind_results(vec![(ROOT_NODEID, root_fid, root_stat)], stale);
             lazy_rebind_count
         };
         self.record_mount_diagnostic(

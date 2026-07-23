@@ -127,11 +127,7 @@ fn reverse_export_serves_an_application_owned_tree() -> Result<(), Box<dyn std::
     let export = ReverseExport::start(
         ReverseExportConfig {
             broker_endpoint: broker.reverse_endpoint(),
-            auth: ClientConfig::new(
-                "r9p-reverse-tree-test",
-                client.private,
-                server.public,
-            )?,
+            auth: ClientConfig::new("r9p-reverse-tree-test", client.private, server.public)?,
             principal: "participant".to_string(),
             connection_pool: 2,
             connect_timeout: Duration::from_secs(2),
@@ -345,13 +341,7 @@ impl FileTree for IdentityTree {
         Ok(OpenFile { qid, iounit: 0 })
     }
 
-    fn read(
-        &mut self,
-        _fid: Fid,
-        qid: Qid,
-        offset: u64,
-        count: u32,
-    ) -> R9pResult<ReadData> {
+    fn read(&mut self, _fid: Fid, qid: Qid, offset: u64, count: u32) -> R9pResult<ReadData> {
         if qid.qtype == QTDIR {
             return Ok(ReadData::Directory(vec![self.stat(self.identity)?]));
         }

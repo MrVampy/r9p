@@ -106,11 +106,9 @@ fn connect_waits_for_tcp_listener_to_appear() {
         handle_connection(stream).expect("server connection should complete");
     });
 
-    let client = Client::connect_with_timeout(
-        &connection(address.to_string()),
-        Duration::from_secs(2),
-    )
-    .expect("client should wait for TCP listener and connect");
+    let client =
+        Client::connect_with_timeout(&connection(address.to_string()), Duration::from_secs(2))
+            .expect("client should wait for TCP listener and connect");
     let stat = client
         .stat_timeout(client.root_fid(), Duration::from_secs(1))
         .expect("root stat should succeed");

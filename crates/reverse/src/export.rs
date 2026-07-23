@@ -103,14 +103,7 @@ impl FilesystemExport {
                     ..ServerConfig::default()
                 },
             },
-            move || {
-                LocalTree::open_with_config(
-                    &root,
-                    LocalTreeConfig {
-                        writable,
-                    },
-                )
-            },
+            move || LocalTree::open_with_config(&root, LocalTreeConfig { writable }),
         )?;
         Ok(Self { inner })
     }

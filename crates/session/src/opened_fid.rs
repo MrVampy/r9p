@@ -16,12 +16,7 @@ pub struct OpenedFid {
 }
 
 impl Client {
-    pub fn open_path_timeout(
-        &self,
-        path: &str,
-        mode: u8,
-        timeout: Duration,
-    ) -> Result<OpenedFid> {
+    pub fn open_path_timeout(&self, path: &str, mode: u8, timeout: Duration) -> Result<OpenedFid> {
         let names = path_names(path)?;
         let fid = if names.is_empty() {
             self.clone_fid_timeout(self.root_fid(), timeout)?
@@ -41,12 +36,7 @@ impl Client {
 }
 
 impl OpenedFid {
-    pub fn read_timeout(
-        &mut self,
-        offset: u64,
-        count: u32,
-        timeout: Duration,
-    ) -> Result<Vec<u8>> {
+    pub fn read_timeout(&mut self, offset: u64, count: u32, timeout: Duration) -> Result<Vec<u8>> {
         self.client
             .read_timeout(self.required_fid()?, offset, count, timeout)
     }
@@ -65,12 +55,7 @@ impl OpenedFid {
         self.client.read_full(self.required_fid()?, offset, count)
     }
 
-    pub fn write_timeout(
-        &mut self,
-        offset: u64,
-        data: &[u8],
-        timeout: Duration,
-    ) -> Result<u32> {
+    pub fn write_timeout(&mut self, offset: u64, data: &[u8], timeout: Duration) -> Result<u32> {
         self.client
             .write_timeout(self.required_fid()?, offset, data, timeout)
     }

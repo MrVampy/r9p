@@ -4,6 +4,9 @@ use crate::{Error, Result};
 
 pub const EXPORT_FORMAT_V1: &str = "r9p-export.v1";
 pub const P9ANY_NOISE_IK: &str = "noise-ik";
+pub const SESSION_ENDPOINT_BIND_FIELD: &str = "session_endpoint_bind";
+pub const SESSION_ANAME_FIELD: &str = "session_aname";
+pub const SESSION_AUTH_FIELD: &str = "session_auth";
 
 const MAX_AUTH_DOMAIN_BYTES: usize = 255;
 
@@ -23,6 +26,14 @@ pub struct ExportDescriptor {
     pub local_root_label: Option<String>,
     pub namespace_mount_paths: Vec<String>,
     pub extra_fields: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionEndpoint {
+    pub endpoint_bind: String,
+    pub aname: String,
+    pub transport_class: TransportClass,
+    pub auth: AuthBoundary,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,8 +69,45 @@ pub enum AuthClass {
 }
 
 impl ExportDescriptor {
+    pub fn with_session_endpoint(mut self, endpoint: SessionEndpoint) -> Result<Self> {
+        endpoint.validate()?;
+        for (field, value) in [
+            (SESSION_ENDPOINT_BIND_FIELD, endpoint.endpoint_bind),
+            (SESSION_ANAME_FIELD, endpoint.aname),
+            (SESSION_AUTH_FIELD, endpoint.auth.render()),
+        ] {
+            if self.extra_fields.insert(field.to_string(), value).is_some() {
+                return Err(Error::from(format!(
+                    "descriptor already contains session endpoint field {field}"
+                )));
+            }
+        }
+        Ok(self)
+    }
+
+    pub fn session_endpoint(&self) -> Result<Option<SessionEndpoint>> {
+        let bind = self.extra_fields.get(SESSION_ENDPOINT_BIND_FIELD);
+        let aname = self.extra_fields.get(SESSION_ANAME_FIELD);
+        let auth = self.extra_fields.get(SESSION_AUTH_FIELD);
+        match (bind, aname, auth) {
+            (None, None, None) => Ok(None),
+            (Some(bind), Some(aname), Some(auth)) => {
+                let endpoint = SessionEndpoint {
+                    endpoint_bind: bind.clone(),
+                    aname: aname.clone(),
+                    transport_class: transport_class_for_endpoint(bind),
+                    auth: AuthBoundary::parse(auth)?,
+                };
+                endpoint.validate()?;
+                Ok(Some(endpoint))
+            }
+            _ => Err(Error::from("descriptor has an incomplete session endpoint")),
+        }
+    }
+
     pub fn render(&self) -> Result<String> {
         self.validate_authority_boundary()?;
+        self.session_endpoint()?;
         let mut fields = vec![
             ("format", EXPORT_FORMAT_V1.to_string()),
             ("endpoint_bind", self.endpoint_bind.clone()),
@@ -163,32 +211,26 @@ impl ExportDescriptor {
             extra_fields,
         };
         descriptor.validate_authority_boundary()?;
+        descriptor.session_endpoint()?;
         Ok(descriptor)
     }
 
     fn validate_authority_boundary(&self) -> Result<()> {
-        self.auth.validate()?;
-        match (self.transport_class, self.auth.class) {
-            (TransportClass::Tcp, AuthClass::None)
-                if !tcp_endpoint_is_loopback(&self.endpoint_bind) =>
-            {
-                return Err(Error::from(
-                    "descriptor auth=none is only admitted for loopback TCP",
-                ));
-            }
-            (TransportClass::Tcp, AuthClass::UnixPeerCred) => {
-                return Err(Error::from(
-                    "descriptor uds-peercred auth is not valid for TCP",
-                ));
-            }
-            (TransportClass::Unix, AuthClass::P9any) => {
-                return Err(Error::from(
-                    "descriptor p9any session auth is not valid for unix sockets",
-                ));
-            }
-            _ => {}
+        validate_transport_auth(self.transport_class, &self.endpoint_bind, &self.auth)
+    }
+}
+
+impl SessionEndpoint {
+    fn validate(&self) -> Result<()> {
+        validate_token(SESSION_ENDPOINT_BIND_FIELD, &self.endpoint_bind)?;
+        validate_token(SESSION_ANAME_FIELD, &self.aname)?;
+        if self.endpoint_bind.is_empty() {
+            return Err(Error::from("session endpoint bind is empty"));
         }
-        Ok(())
+        if self.aname.is_empty() {
+            return Err(Error::from("session endpoint aname is empty"));
+        }
+        validate_transport_auth(self.transport_class, &self.endpoint_bind, &self.auth)
     }
 }
 
@@ -450,6 +492,34 @@ fn tcp_endpoint_is_loopback(endpoint: &str) -> bool {
             .unwrap_or(false)
 }
 
+fn transport_class_for_endpoint(endpoint: &str) -> TransportClass {
+    if endpoint.starts_with("unix:") || endpoint.starts_with("unix!") {
+        TransportClass::Unix
+    } else {
+        TransportClass::Tcp
+    }
+}
+
+fn validate_transport_auth(
+    transport_class: TransportClass,
+    endpoint_bind: &str,
+    auth: &AuthBoundary,
+) -> Result<()> {
+    auth.validate()?;
+    match (transport_class, auth.class) {
+        (TransportClass::Tcp, AuthClass::None) if !tcp_endpoint_is_loopback(endpoint_bind) => Err(
+            Error::from("descriptor auth=none is only admitted for loopback TCP"),
+        ),
+        (TransportClass::Tcp, AuthClass::UnixPeerCred) => Err(Error::from(
+            "descriptor uds-peercred auth is not valid for TCP",
+        )),
+        (TransportClass::Unix, AuthClass::P9any) => Err(Error::from(
+            "descriptor p9any session auth is not valid for unix sockets",
+        )),
+        _ => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -493,6 +563,37 @@ mod tests {
             parsed.extra_fields.get("content_path").map(String::as_str),
             Some("/export/content.bin")
         );
+    }
+
+    #[test]
+    fn descriptor_round_trips_authenticated_session_endpoint() {
+        let expected = SessionEndpoint {
+            endpoint_bind: "192.0.2.10:19640".to_string(),
+            aname: "service-generation".to_string(),
+            transport_class: TransportClass::Tcp,
+            auth: AuthBoundary::p9any_noise_ik("agents").expect("auth should be valid"),
+        };
+        let descriptor = descriptor()
+            .with_session_endpoint(expected.clone())
+            .expect("session endpoint should be valid");
+        let rendered = descriptor.render().expect("descriptor should render");
+        let parsed = ExportDescriptor::parse(&rendered).expect("descriptor should parse");
+        assert_eq!(
+            parsed
+                .session_endpoint()
+                .expect("session endpoint should parse"),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn descriptor_rejects_incomplete_session_endpoint() {
+        let mut descriptor = descriptor();
+        descriptor.extra_fields.insert(
+            SESSION_ENDPOINT_BIND_FIELD.to_string(),
+            "192.0.2.10:19640".to_string(),
+        );
+        assert!(descriptor.render().is_err());
     }
 
     #[test]

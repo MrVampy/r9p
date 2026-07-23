@@ -7,6 +7,7 @@ mod error;
 pub mod feed;
 mod opened_fid;
 mod request;
+mod resolved;
 mod slot;
 mod transport;
 
@@ -21,4 +22,7 @@ pub use error::{errno_for_9p_error, p9_error, Error, Result};
 pub use opened_fid::OpenedFid;
 pub use r9p::{ORDWR, OREAD, OTRUNC, OWRITE};
 pub use request::{with_fuse_unique, RequestTracker};
+pub use resolved::{
+    AuthorityBindings, NamespaceClient, ResolvedNamespace, ResolvedNamespaceConfig, ResolvedTarget,
+};
 pub use slot::ClientSlot;

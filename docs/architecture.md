@@ -37,6 +37,14 @@ sockets or decide endpoint permissions, peer identity, authentication, service
 admission, TLS, or daemon lifecycle. A runtime with its own executor can
 continue to use `admit` and `complete` directly.
 
+The reverse-connect adapter follows the same backend boundary.
+`ReverseExport` owns authenticated outbound connection pooling, bounded
+reconnect, shutdown, and one ordinary 9P server session per accepted stream.
+Its caller supplies a fresh `FileTree` factory, so an application tree does not
+have to impersonate a host filesystem to use reverse attachment.
+`FilesystemExport` is the convenience specialization that opens `LocalTree`
+instances; the broker remains unaware of either tree.
+
 The server core owns wire-level fid lifecycle. It records open modes and
 directory offsets, rejects operations that violate 9P sequencing, and reserves
 fid transitions across split request completion. Clone walks share a source

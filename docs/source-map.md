@@ -39,9 +39,13 @@ This map defines the local sources agents should inspect before making source-sp
     backend admission or namespace policy.
 - `crates/reverse/src/`
   - Generic authenticated reverse-connect runtime adapter.
-  - The filesystem owner connects outward and serves ordinary 9P over a
-    bounded pool; the broker pairs those streams with a loopback client
-    endpoint without interpreting 9P or owning namespace policy.
+  - An application-owned tree or filesystem owner connects outward and serves
+    ordinary 9P over a bounded pool; the broker pairs those streams with a
+    loopback client endpoint without interpreting 9P or owning namespace
+    policy.
+  - `ReverseExport` owns the generic outbound lifecycle and accepts a fresh
+    `FileTree` factory per session. `FilesystemExport` is the local-tree
+    specialization used by the CLI.
 - `crates/core/src/multiplex/`
   - Layered blocking transport facade for concurrent tagged client calls.
 - `crates/core/src/stat.rs`

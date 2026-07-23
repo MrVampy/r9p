@@ -13,11 +13,24 @@ use fs::{LocalTree, LocalTreeConfig};
 use r9p::{
     codec::Variant,
     error::{Error, Result},
-    server::{serve_file_tree_connection, ServerConfig},
+    server::{serve_file_tree_connection, FileTree, ServerConfig},
 };
 use r9p_auth::{authenticate_client, ClientConfig};
 
 use crate::configure_transport_socket;
+
+#[derive(Clone)]
+pub struct ReverseExportConfig {
+    pub broker_endpoint: SocketAddr,
+    pub auth: ClientConfig,
+    pub principal: String,
+    pub connection_pool: usize,
+    pub connect_timeout: Duration,
+    pub authentication_timeout: Duration,
+    pub reconnect_min_delay: Duration,
+    pub reconnect_max_delay: Duration,
+    pub server: ServerConfig,
+}
 
 #[derive(Clone)]
 pub struct FilesystemExportConfig {
@@ -36,6 +49,10 @@ pub struct FilesystemExportConfig {
 }
 
 pub struct FilesystemExport {
+    inner: ReverseExport,
+}
+
+pub struct ReverseExport {
     state: ExportState,
     threads: Vec<JoinHandle<()>>,
 }
@@ -51,7 +68,7 @@ struct ExportState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FilesystemExportStatus {
+pub struct ReverseExportStatus {
     pub connected_streams: usize,
     pub connection_failures: u64,
     pub authentication_failures: u64,
@@ -60,13 +77,60 @@ pub struct FilesystemExportStatus {
 
 impl FilesystemExport {
     pub fn start(config: FilesystemExportConfig) -> Result<Self> {
-        validate_config(&config)?;
         LocalTree::open_with_config(
             &config.root,
             LocalTreeConfig {
                 writable: config.writable,
             },
         )?;
+        let root = config.root.clone();
+        let writable = config.writable;
+        let inner = ReverseExport::start(
+            ReverseExportConfig {
+                broker_endpoint: config.broker_endpoint,
+                auth: config.auth,
+                principal: config.principal,
+                connection_pool: config.connection_pool,
+                connect_timeout: config.connect_timeout,
+                authentication_timeout: config.authentication_timeout,
+                reconnect_min_delay: config.reconnect_min_delay,
+                reconnect_max_delay: config.reconnect_max_delay,
+                server: ServerConfig {
+                    default_msize: config.msize,
+                    max_msize: config.msize,
+                    max_fids: config.max_fids,
+                    variant: Variant::R9pSymlink,
+                    ..ServerConfig::default()
+                },
+            },
+            move || {
+                LocalTree::open_with_config(
+                    &root,
+                    LocalTreeConfig {
+                        writable,
+                    },
+                )
+            },
+        )?;
+        Ok(Self { inner })
+    }
+
+    pub fn connected_streams(&self) -> usize {
+        self.inner.connected_streams()
+    }
+
+    pub fn status(&self) -> ReverseExportStatus {
+        self.inner.status()
+    }
+}
+
+impl ReverseExport {
+    pub fn start<T, F>(config: ReverseExportConfig, tree_factory: F) -> Result<Self>
+    where
+        T: FileTree + Send + 'static,
+        F: Fn() -> Result<T> + Send + Sync + 'static,
+    {
+        validate_config(&config)?;
         let state = ExportState {
             shutdown: Arc::new(AtomicBool::new(false)),
             connected_streams: Arc::new(AtomicUsize::new(0)),
@@ -79,14 +143,16 @@ impl FilesystemExport {
                     .collect(),
             )),
         };
+        let tree_factory = Arc::new(tree_factory);
         let mut threads = Vec::with_capacity(config.connection_pool);
         for index in 0..config.connection_pool {
             let config = config.clone();
             let worker_state = state.clone();
+            let tree_factory = Arc::clone(&tree_factory);
             threads.push(
                 thread::Builder::new()
                     .name(format!("r9p-reverse-export-{index}"))
-                    .spawn(move || export_loop(config, index, worker_state))
+                    .spawn(move || export_loop(config, index, worker_state, tree_factory))
                     .map_err(|error| Error::from(format!("spawn reverse export: {error}")))?,
             );
         }
@@ -97,8 +163,8 @@ impl FilesystemExport {
         self.state.connected_streams.load(Ordering::Acquire)
     }
 
-    pub fn status(&self) -> FilesystemExportStatus {
-        FilesystemExportStatus {
+    pub fn status(&self) -> ReverseExportStatus {
+        ReverseExportStatus {
             connected_streams: self.state.connected_streams.load(Ordering::Acquire),
             connection_failures: self.state.connection_failures.load(Ordering::Acquire),
             authentication_failures: self.state.authentication_failures.load(Ordering::Acquire),
@@ -107,7 +173,7 @@ impl FilesystemExport {
     }
 }
 
-impl Drop for FilesystemExport {
+impl Drop for ReverseExport {
     fn drop(&mut self) {
         if let Ok(streams) = self.state.active_streams.lock() {
             self.state.shutdown.store(true, Ordering::Release);
@@ -123,7 +189,7 @@ impl Drop for FilesystemExport {
     }
 }
 
-fn validate_config(config: &FilesystemExportConfig) -> Result<()> {
+fn validate_config(config: &ReverseExportConfig) -> Result<()> {
     if config.principal.is_empty()
         || config.principal.len() > 255
         || config.principal.bytes().any(|byte| byte.is_ascii_control())
@@ -133,17 +199,27 @@ fn validate_config(config: &FilesystemExportConfig) -> Result<()> {
         || config.authentication_timeout.is_zero()
         || config.reconnect_min_delay.is_zero()
         || config.reconnect_max_delay < config.reconnect_min_delay
-        || config.msize < 1024
-        || config.max_fids == 0
+        || config.server.default_msize < 1024
+        || config.server.max_msize < config.server.default_msize
+        || config.server.max_fids == 0
+        || config.server.max_async_requests == 0
     {
         return Err(Error::from(
-            "reverse export requires a broker endpoint, bounded pool, principal, finite timeouts, msize, and fid limit",
+            "reverse export requires a broker endpoint, bounded pool, principal, finite timeouts, and bounded 9P server configuration",
         ));
     }
     Ok(())
 }
 
-fn export_loop(config: FilesystemExportConfig, worker_index: usize, state: ExportState) {
+fn export_loop<T, F>(
+    config: ReverseExportConfig,
+    worker_index: usize,
+    state: ExportState,
+    tree_factory: Arc<F>,
+) where
+    T: FileTree + Send + 'static,
+    F: Fn() -> Result<T> + Send + Sync + 'static,
+{
     let mut failed_attempts = 0_u32;
     while !state.shutdown.load(Ordering::Acquire) {
         let stream =
@@ -199,24 +275,8 @@ fn export_loop(config: FilesystemExportConfig, worker_index: usize, state: Expor
             return;
         }
         state.connected_streams.fetch_add(1, Ordering::AcqRel);
-        let tree = LocalTree::open_with_config(
-            &config.root,
-            LocalTreeConfig {
-                writable: config.writable,
-            },
-        );
-        if let Ok(tree) = tree {
-            let _ = serve_file_tree_connection(
-                stream,
-                ServerConfig {
-                    default_msize: config.msize,
-                    max_msize: config.msize,
-                    max_fids: config.max_fids,
-                    variant: Variant::R9pSymlink,
-                    ..ServerConfig::default()
-                },
-                tree,
-            );
+        if let Ok(tree) = tree_factory() {
+            let _ = serve_file_tree_connection(stream, config.server.clone(), tree);
         }
         if let Ok(mut streams) = state.active_streams.lock() {
             streams[worker_index] = None;
@@ -227,7 +287,7 @@ fn export_loop(config: FilesystemExportConfig, worker_index: usize, state: Expor
 }
 
 fn retry_delay(
-    config: &FilesystemExportConfig,
+    config: &ReverseExportConfig,
     worker_index: usize,
     failed_attempts: u32,
 ) -> Duration {

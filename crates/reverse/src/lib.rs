@@ -11,7 +11,10 @@ mod export;
 use std::{io, net::TcpStream};
 
 pub use broker::{BrokerConfig, BrokerStatus, ReverseBroker};
-pub use export::{FilesystemExport, FilesystemExportConfig, FilesystemExportStatus};
+pub use export::{
+    FilesystemExport, FilesystemExportConfig, ReverseExport, ReverseExportConfig,
+    ReverseExportStatus,
+};
 
 fn configure_transport_socket(stream: &TcpStream) -> io::Result<()> {
     // Reverse sessions carry latency-sensitive 9P request/response frames.

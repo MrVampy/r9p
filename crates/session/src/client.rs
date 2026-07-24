@@ -91,6 +91,10 @@ impl Client {
         self.inner.max_write_payload()
     }
 
+    pub fn clone_fid(&self, fid: Fid) -> Result<Fid> {
+        self.inner.clone_fid(fid).map_err(client_error)
+    }
+
     pub fn clone_fid_timeout(&self, fid: Fid, timeout: Duration) -> Result<Fid> {
         self.inner
             .clone_fid_timeout(fid, timeout)
@@ -107,6 +111,14 @@ impl Client {
         self.inner
             .walk_timeout(fid, names, timeout)
             .map_err(client_error)
+    }
+
+    pub fn walk_path(&self, path: &str) -> Result<Fid> {
+        self.inner.walk_path(path).map_err(client_error)
+    }
+
+    pub fn open(&self, fid: Fid, mode: u8) -> Result<Qid> {
+        self.inner.open(fid, mode).map_err(client_error)
     }
 
     pub fn open_timeout(&self, fid: Fid, mode: u8, timeout: Duration) -> Result<Qid> {
@@ -138,6 +150,10 @@ impl Client {
         self.inner
             .read_timeout(fid, offset, count, timeout)
             .map_err(client_error)
+    }
+
+    pub fn read(&self, fid: Fid, offset: u64, count: u32) -> Result<Vec<u8>> {
+        self.inner.read(fid, offset, count).map_err(client_error)
     }
 
     pub fn read_full_timeout(
@@ -200,6 +216,10 @@ impl Client {
             .map_err(client_error)
     }
 
+    pub fn write(&self, fid: Fid, offset: u64, data: &[u8]) -> Result<u32> {
+        self.inner.write(fid, offset, data).map_err(client_error)
+    }
+
     pub fn write_then_read_delimited_timeout(
         &self,
         fid: Fid,
@@ -225,6 +245,10 @@ impl Client {
 
     pub fn clunk_timeout(&self, fid: Fid, timeout: Duration) -> Result<()> {
         self.inner.clunk_timeout(fid, timeout).map_err(client_error)
+    }
+
+    pub fn clunk(&self, fid: Fid) -> Result<()> {
+        self.inner.clunk(fid).map_err(client_error)
     }
 
     /// Closes the shared transport and interrupts every pending call on this

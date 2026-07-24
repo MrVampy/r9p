@@ -10,7 +10,7 @@ mod export;
 
 use std::{io, net::TcpStream};
 
-pub use broker::{BrokerConfig, BrokerStatus, ReverseBroker};
+pub use broker::{BrokerConfig, BrokerStatus, ProxyEndpoint, ReverseBroker};
 pub use export::{
     FilesystemExport, FilesystemExportConfig, ReverseExport, ReverseExportConfig,
     ReverseExportStatus,

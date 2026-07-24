@@ -2,6 +2,7 @@ use std::{
     fs,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
+    sync::atomic::AtomicBool,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -9,17 +10,19 @@ use std::{
 use r9p::{
     blocking::Client,
     codec::Variant,
-    error::{Result as R9pResult, EPERM},
-    fid::Fid,
-    qid::{Qid, DMDIR, QTDIR},
-    server::{FileTree, OpenFile, ReadData, ServerConfig as R9pServerConfig},
+    error::EPERM,
+    qid::Qid,
+    server::{
+        ConnectionHandler, OpenFile, ReadData, ServerCompletion, ServerConfig as R9pServerConfig,
+        ServerRequest, ServerRequestKind,
+    },
     stat::Stat,
 };
 use r9p_auth::{generate_key_pair, ClientConfig, ServerConfig};
 
 use super::{
-    BrokerConfig, FilesystemExport, FilesystemExportConfig, ReverseBroker, ReverseExport,
-    ReverseExportConfig,
+    BrokerConfig, FilesystemExport, FilesystemExportConfig, ProxyEndpoint, ReverseBroker,
+    ReverseExport, ReverseExportConfig,
 };
 
 #[test]
@@ -42,7 +45,7 @@ fn reverse_export_serves_a_writable_file_tree() -> Result<(), Box<dyn std::error
     let client = generate_key_pair()?;
     let broker = ReverseBroker::start(BrokerConfig {
         reverse_bind: address(Ipv4Addr::LOCALHOST, 0),
-        proxy_bind: address(Ipv4Addr::LOCALHOST, 0),
+        proxy_bind: ProxyEndpoint::tcp(address(Ipv4Addr::LOCALHOST, 0)),
         auth: ServerConfig::new(
             "r9p-reverse-test",
             server.private,
@@ -72,7 +75,7 @@ fn reverse_export_serves_a_writable_file_tree() -> Result<(), Box<dyn std::error
     wait_ready(&broker, &export)?;
 
     let mut reader = Client::connect_with_variant(
-        std::net::TcpStream::connect(broker.proxy_endpoint())?,
+        std::net::TcpStream::connect(tcp_proxy_endpoint(&broker)?)?,
         "codex",
         "/",
         65_536,
@@ -89,7 +92,7 @@ fn reverse_export_serves_a_writable_file_tree() -> Result<(), Box<dyn std::error
 
     wait_for_waiting_stream(&broker)?;
     let mut writer = Client::connect_with_variant(
-        std::net::TcpStream::connect(broker.proxy_endpoint())?,
+        std::net::TcpStream::connect(tcp_proxy_endpoint(&broker)?)?,
         "codex",
         "/",
         65_536,
@@ -113,7 +116,7 @@ fn reverse_export_serves_an_application_owned_tree() -> Result<(), Box<dyn std::
     let client = generate_key_pair()?;
     let broker = ReverseBroker::start(BrokerConfig {
         reverse_bind: address(Ipv4Addr::LOCALHOST, 0),
-        proxy_bind: address(Ipv4Addr::LOCALHOST, 0),
+        proxy_bind: ProxyEndpoint::tcp(address(Ipv4Addr::LOCALHOST, 0)),
         auth: ServerConfig::new(
             "r9p-reverse-tree-test",
             server.private,
@@ -124,7 +127,7 @@ fn reverse_export_serves_an_application_owned_tree() -> Result<(), Box<dyn std::
         authentication_timeout: Duration::from_secs(2),
         proxy_wait_timeout: Duration::from_secs(2),
     })?;
-    let export = ReverseExport::start(
+    let export = ReverseExport::start_handler(
         ReverseExportConfig {
             broker_endpoint: broker.reverse_endpoint(),
             auth: ClientConfig::new("r9p-reverse-tree-test", client.private, server.public)?,
@@ -142,12 +145,65 @@ fn reverse_export_serves_an_application_owned_tree() -> Result<(), Box<dyn std::
                 ..R9pServerConfig::default()
             },
         },
-        || Ok(IdentityTree::new()),
+        || Ok(IdentityHandler),
     )?;
     wait_generic_ready(&broker, &export)?;
 
     let mut reader = Client::connect(
-        std::net::TcpStream::connect(broker.proxy_endpoint())?,
+        std::net::TcpStream::connect(tcp_proxy_endpoint(&broker)?)?,
+        "agent",
+        "/",
+        65_536,
+    )?;
+    assert_eq!(reader.read_path("/identity")?, b"application-tree\n");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn reverse_broker_exposes_a_unix_proxy_endpoint() -> Result<(), Box<dyn std::error::Error>> {
+    let server = generate_key_pair()?;
+    let client = generate_key_pair()?;
+    let runtime = TestRoot::new()?;
+    let socket = runtime.path.join("proxy.sock");
+    let broker = ReverseBroker::start(BrokerConfig {
+        reverse_bind: address(Ipv4Addr::LOCALHOST, 0),
+        proxy_bind: ProxyEndpoint::unix(&socket),
+        auth: ServerConfig::new(
+            "r9p-reverse-unix-test",
+            server.private,
+            [(client.public, "participant".to_string())],
+        )?,
+        peer_principal: "participant".to_string(),
+        max_waiting_streams: 2,
+        authentication_timeout: Duration::from_secs(2),
+        proxy_wait_timeout: Duration::from_secs(2),
+    })?;
+    let export = ReverseExport::start_handler(
+        ReverseExportConfig {
+            broker_endpoint: broker.reverse_endpoint(),
+            auth: ClientConfig::new("r9p-reverse-unix-test", client.private, server.public)?,
+            principal: "participant".to_string(),
+            connection_pool: 2,
+            connect_timeout: Duration::from_secs(2),
+            authentication_timeout: Duration::from_secs(2),
+            reconnect_min_delay: Duration::from_millis(25),
+            reconnect_max_delay: Duration::from_millis(200),
+            server: R9pServerConfig {
+                default_msize: 65_536,
+                max_msize: 65_536,
+                max_fids: 64,
+                variant: Variant::Plain,
+                ..R9pServerConfig::default()
+            },
+        },
+        || Ok(IdentityHandler),
+    )?;
+    wait_generic_ready(&broker, &export)?;
+
+    assert_eq!(broker.proxy_endpoint(), &ProxyEndpoint::unix(&socket));
+    let mut reader = Client::connect(
+        std::os::unix::net::UnixStream::connect(&socket)?,
         "agent",
         "/",
         65_536,
@@ -168,7 +224,7 @@ fn reverse_broker_discards_closed_idle_streams() -> Result<(), Box<dyn std::erro
     let client_config = ClientConfig::new("r9p-reverse-stale-test", client.private, server.public)?;
     let broker = ReverseBroker::start(BrokerConfig {
         reverse_bind: address(Ipv4Addr::LOCALHOST, 0),
-        proxy_bind: address(Ipv4Addr::LOCALHOST, 0),
+        proxy_bind: ProxyEndpoint::tcp(address(Ipv4Addr::LOCALHOST, 0)),
         auth: server_config,
         peer_principal: "laptop".to_string(),
         max_waiting_streams: 2,
@@ -195,7 +251,7 @@ fn reverse_broker_discards_closed_idle_streams() -> Result<(), Box<dyn std::erro
         2,
     ))?;
     let mut reader = Client::connect_with_variant(
-        std::net::TcpStream::connect(broker.proxy_endpoint())?,
+        std::net::TcpStream::connect(tcp_proxy_endpoint(&broker)?)?,
         "codex",
         "/",
         65_536,
@@ -274,6 +330,15 @@ fn address(ip: Ipv4Addr, port: u16) -> SocketAddr {
     SocketAddr::new(IpAddr::V4(ip), port)
 }
 
+fn tcp_proxy_endpoint(
+    broker: &ReverseBroker,
+) -> Result<SocketAddr, Box<dyn std::error::Error>> {
+    broker
+        .proxy_endpoint()
+        .as_tcp()
+        .ok_or_else(|| "test broker did not expose a TCP proxy".into())
+}
+
 struct TestRoot {
     path: PathBuf,
 }
@@ -297,71 +362,60 @@ impl Drop for TestRoot {
     }
 }
 
-struct IdentityTree {
-    root: Qid,
-    identity: Qid,
-}
+struct IdentityHandler;
 
-impl IdentityTree {
-    fn new() -> Self {
-        Self {
-            root: Qid::dir(1),
-            identity: Qid::file(2),
-        }
-    }
-}
-
-impl FileTree for IdentityTree {
-    fn attach(&mut self, _fid: Fid, _uname: &[u8], _aname: &[u8]) -> R9pResult<Qid> {
-        Ok(self.root)
-    }
-
-    fn walk(
-        &mut self,
-        _fid: Fid,
-        _newfid: Fid,
-        start: Qid,
-        names: &[Vec<u8>],
-    ) -> R9pResult<Vec<Qid>> {
-        let mut current = start;
-        let mut qids = Vec::new();
-        for name in names {
-            current = match (current.path, name.as_slice()) {
-                (_, b".") => current,
-                (_, b"..") => self.root,
-                (1, b"identity") => self.identity,
-                _ => break,
-            };
-            qids.push(current);
-        }
-        Ok(qids)
-    }
-
-    fn open(&mut self, _fid: Fid, qid: Qid, _mode: u8) -> R9pResult<OpenFile> {
-        Ok(OpenFile { qid, iounit: 0 })
-    }
-
-    fn read(&mut self, _fid: Fid, qid: Qid, offset: u64, count: u32) -> R9pResult<ReadData> {
-        if qid.qtype == QTDIR {
-            return Ok(ReadData::Directory(vec![self.stat(self.identity)?]));
-        }
-        if qid != self.identity {
-            return Err(r9p::Error::from_static(EPERM));
-        }
-        let bytes = b"application-tree\n";
-        let start = usize::try_from(offset)
-            .unwrap_or(usize::MAX)
-            .min(bytes.len());
-        let end = start
-            .saturating_add(usize::try_from(count).unwrap_or(usize::MAX))
-            .min(bytes.len());
-        Ok(ReadData::Bytes(bytes[start..end].to_vec()))
-    }
-
-    fn stat(&mut self, qid: Qid) -> R9pResult<Stat> {
-        match qid.path {
-            1 => Ok(Stat::new(".", qid, DMDIR | 0o500)),
-            2 => Ok(Stat::new("identity", qid, 0o400)),
+impl ConnectionHandler for IdentityHandler {
+    fn perform(
+        &self,
+        request: &ServerRequest,
+        _cancel: Option<&AtomicBool>,
+    ) -> r9p::Result<ServerCompletion> {
+        let root = Qid::dir(1);
+        let identity = Qid::file(2);
+        match &request.kind {
+            ServerRequestKind::Attach { .. } => Ok(ServerCompletion::Attach { qid: root }),
+            ServerRequestKind::Walk { start, wnames, .. } => {
+                let mut current = *start;
+                let mut qids = Vec::new();
+                for name in wnames {
+                    current = match (current.path, name.as_slice()) {
+                        (_, b".") => current,
+                        (_, b"..") => root,
+                        (1, b"identity") => identity,
+                        _ => break,
+                    };
+                    qids.push(current);
+                }
+                Ok(ServerCompletion::Walk { qids })
+            }
+            ServerRequestKind::Open { qid, .. } => {
+                Ok(ServerCompletion::Open(OpenFile { qid: *qid, iounit: 0 }))
+            }
+            ServerRequestKind::Read {
+                qid, offset, count, ..
+            } if *qid == identity => {
+                let bytes = b"application-tree\n";
+                let start = usize::try_from(*offset)
+                    .unwrap_or(usize::MAX)
+                    .min(bytes.len());
+                let end = start
+                    .saturating_add(usize::try_from(*count).unwrap_or(usize::MAX))
+                    .min(bytes.len());
+                Ok(ServerCompletion::Read(ReadData::Bytes(
+                    bytes[start..end].to_vec(),
+                )))
+            }
+            ServerRequestKind::Clunk { .. } => Ok(ServerCompletion::Clunk),
+            ServerRequestKind::Stat { qid, .. } if *qid == root => {
+                Ok(ServerCompletion::Stat {
+                    stat: Stat::new(".", *qid, r9p::qid::DMDIR | 0o500),
+                })
+            }
+            ServerRequestKind::Stat { qid, .. } if *qid == identity => {
+                Ok(ServerCompletion::Stat {
+                    stat: Stat::new("identity", *qid, 0o400),
+                })
+            }
             _ => Err(r9p::Error::from_static(EPERM)),
         }
     }

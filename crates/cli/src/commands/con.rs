@@ -1,13 +1,13 @@
 use std::{
     io::{self, Read, Write},
     thread,
+    time::Duration,
 };
 
-use r9p::blocking::ORDWR;
+use session::{Client, ConnectionConfig, ORDWR};
 
 use crate::errors::{cli_error, CliResult};
-use crate::io::open_path;
-use crate::target::{Config, Target};
+use crate::target::{split_namespace_path, target_path, Config, Target};
 use crate::usage;
 use crate::{CTRL_R, READ_CHUNK};
 
@@ -25,18 +25,18 @@ pub(crate) fn con_cmd(config: Config, mut args: Vec<String>) -> CliResult<()> {
         config,
         path: args[0].clone(),
     };
-    let writer_target = target.clone();
+    let (client, reader_fid, writer_fid) = open_stream(&target)?;
+    let writer_client = client.clone();
     thread::spawn(move || {
-        if let Err(error) = con_writer(writer_target) {
+        if let Err(error) = con_writer(writer_client, writer_fid) {
             eprintln!("write: {error}");
         }
     });
 
-    let (mut client, fid) = open_path(&target, ORDWR)?;
     let mut stdout = io::stdout().lock();
     let mut offset = 0_u64;
     loop {
-        let mut data = client.read(fid, offset, READ_CHUNK)?;
+        let mut data = client.read(reader_fid, offset, READ_CHUNK)?;
         if data.is_empty() {
             break;
         }
@@ -49,12 +49,42 @@ pub(crate) fn con_cmd(config: Config, mut args: Vec<String>) -> CliResult<()> {
         stdout.write_all(&data)?;
         stdout.flush()?;
     }
-    client.clunk(fid)?;
+    client.clunk(reader_fid)?;
+    client.shutdown()?;
     Ok(())
 }
 
-pub(crate) fn con_writer(target: Target) -> CliResult<()> {
-    let (mut client, fid) = open_path(&target, ORDWR)?;
+fn open_stream(target: &Target) -> CliResult<(Client, r9p::fid::Fid, r9p::fid::Fid)> {
+    let (address, path) = match &target.config.address {
+        Some(address) => (address.clone(), target_path(target)?),
+        None => {
+            if target.config.auth_config.is_some() {
+                return Err(cli_error(
+                    "--auth-config requires an endpoint supplied with -a or --bind",
+                ));
+            }
+            let (service, path) = split_namespace_path(&target.path)?;
+            (format!("namespace!{service}"), path)
+        }
+    };
+    let client = Client::connect_with_timeout(
+        &ConnectionConfig {
+            address,
+            uname: target.config.uname.clone(),
+            aname: target.config.aname.clone(),
+            msize: target.config.msize,
+            auth_config: target.config.auth_config.clone(),
+        },
+        target.config.request_timeout.unwrap_or(Duration::ZERO),
+    )?;
+    let reader_fid = client.walk_path(&path)?;
+    client.open(reader_fid, ORDWR)?;
+    let writer_fid = client.walk_path(&path)?;
+    client.open(writer_fid, ORDWR)?;
+    Ok((client, reader_fid, writer_fid))
+}
+
+pub(crate) fn con_writer(client: Client, fid: r9p::fid::Fid) -> CliResult<()> {
     let mut stdin = io::stdin().lock();
     let mut offset = 0_u64;
     let mut buf = [0_u8; 4096];
@@ -64,6 +94,9 @@ pub(crate) fn con_writer(target: Target) -> CliResult<()> {
             break;
         }
         let count = client.write(fid, offset, &buf[..n])?;
+        if usize::try_from(count).ok() != Some(n) {
+            return Err(cli_error("short write"));
+        }
         offset = offset.saturating_add(u64::from(count));
     }
     client.clunk(fid)?;

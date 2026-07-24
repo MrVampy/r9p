@@ -13,9 +13,11 @@ use fs::{LocalTree, LocalTreeConfig};
 use r9p::{
     codec::Variant,
     error::{Error, Result},
-    server::{serve_file_tree_connection, FileTree, ServerConfig},
+    server::{
+        serve_connection, serve_file_tree_connection, ConnectionHandler, FileTree, ServerConfig,
+    },
 };
-use r9p_auth::{authenticate_client, ClientConfig};
+use r9p_auth::{authenticate_client, ClientConfig, SecureStream};
 
 use crate::configure_transport_socket;
 
@@ -123,6 +125,27 @@ impl ReverseExport {
         T: FileTree + Send + 'static,
         F: Fn() -> Result<T> + Send + Sync + 'static,
     {
+        Self::start_server(config, move |stream, server| {
+            let tree = tree_factory()?;
+            serve_file_tree_connection(stream, server, tree)
+        })
+    }
+
+    pub fn start_handler<H, F>(config: ReverseExportConfig, handler_factory: F) -> Result<Self>
+    where
+        H: ConnectionHandler,
+        F: Fn() -> Result<H> + Send + Sync + 'static,
+    {
+        Self::start_server(config, move |stream, server| {
+            let handler = Arc::new(handler_factory()?);
+            serve_connection(stream, server, handler)
+        })
+    }
+
+    fn start_server<F>(config: ReverseExportConfig, serve: F) -> Result<Self>
+    where
+        F: Fn(SecureStream, ServerConfig) -> Result<()> + Send + Sync + 'static,
+    {
         validate_config(&config)?;
         let state = ExportState {
             shutdown: Arc::new(AtomicBool::new(false)),
@@ -136,16 +159,16 @@ impl ReverseExport {
                     .collect(),
             )),
         };
-        let tree_factory = Arc::new(tree_factory);
+        let serve = Arc::new(serve);
         let mut threads = Vec::with_capacity(config.connection_pool);
         for index in 0..config.connection_pool {
             let config = config.clone();
             let worker_state = state.clone();
-            let tree_factory = Arc::clone(&tree_factory);
+            let serve = Arc::clone(&serve);
             threads.push(
                 thread::Builder::new()
                     .name(format!("r9p-reverse-export-{index}"))
-                    .spawn(move || export_loop(config, index, worker_state, tree_factory))
+                    .spawn(move || export_loop(config, index, worker_state, serve))
                     .map_err(|error| Error::from(format!("spawn reverse export: {error}")))?,
             );
         }
@@ -204,14 +227,13 @@ fn validate_config(config: &ReverseExportConfig) -> Result<()> {
     Ok(())
 }
 
-fn export_loop<T, F>(
+fn export_loop<F>(
     config: ReverseExportConfig,
     worker_index: usize,
     state: ExportState,
-    tree_factory: Arc<F>,
+    serve: Arc<F>,
 ) where
-    T: FileTree + Send + 'static,
-    F: Fn() -> Result<T> + Send + Sync + 'static,
+    F: Fn(SecureStream, ServerConfig) -> Result<()> + Send + Sync + 'static,
 {
     let mut failed_attempts = 0_u32;
     while !state.shutdown.load(Ordering::Acquire) {
@@ -268,9 +290,7 @@ fn export_loop<T, F>(
             return;
         }
         state.connected_streams.fetch_add(1, Ordering::AcqRel);
-        if let Ok(tree) = tree_factory() {
-            let _ = serve_file_tree_connection(stream, config.server.clone(), tree);
-        }
+        let _ = serve(stream, config.server.clone());
         if let Ok(mut streams) = state.active_streams.lock() {
             streams[worker_index] = None;
         }

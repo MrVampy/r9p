@@ -1,6 +1,7 @@
 use std::{
-    io,
+    fmt, io,
     net::{Shutdown, SocketAddr, TcpListener, TcpStream},
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError},
@@ -10,15 +11,57 @@ use std::{
     time::Duration,
 };
 
+#[cfg(unix)]
+use std::os::unix::net::{UnixListener, UnixStream};
+
 use r9p::error::{Error, Result};
 use r9p_auth::{authenticate_server, SecureStream, ServerConfig};
 
 use crate::configure_transport_socket;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProxyEndpoint {
+    Tcp(SocketAddr),
+    Unix(PathBuf),
+}
+
+impl ProxyEndpoint {
+    pub const fn tcp(address: SocketAddr) -> Self {
+        Self::Tcp(address)
+    }
+
+    pub fn unix(path: impl Into<PathBuf>) -> Self {
+        Self::Unix(path.into())
+    }
+
+    pub const fn as_tcp(&self) -> Option<SocketAddr> {
+        match self {
+            Self::Tcp(address) => Some(*address),
+            Self::Unix(_) => None,
+        }
+    }
+
+    pub fn as_unix(&self) -> Option<&Path> {
+        match self {
+            Self::Tcp(_) => None,
+            Self::Unix(path) => Some(path),
+        }
+    }
+}
+
+impl fmt::Display for ProxyEndpoint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Tcp(address) => address.fmt(formatter),
+            Self::Unix(path) => write!(formatter, "unix!{}", path.display()),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct BrokerConfig {
     pub reverse_bind: SocketAddr,
-    pub proxy_bind: SocketAddr,
+    pub proxy_bind: ProxyEndpoint,
     pub auth: ServerConfig,
     pub peer_principal: String,
     pub max_waiting_streams: usize,
@@ -28,7 +71,7 @@ pub struct BrokerConfig {
 
 pub struct ReverseBroker {
     reverse_endpoint: SocketAddr,
-    proxy_endpoint: SocketAddr,
+    proxy_endpoint: ProxyEndpoint,
     counters: Arc<BrokerCounters>,
     shutdown: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
@@ -61,8 +104,7 @@ impl ReverseBroker {
         validate_config(&config)?;
         let reverse_listener = TcpListener::bind(config.reverse_bind)
             .map_err(|error| io_error("bind reverse listener", error))?;
-        let proxy_listener = TcpListener::bind(config.proxy_bind)
-            .map_err(|error| io_error("bind proxy listener", error))?;
+        let proxy_listener = ProxyListener::bind(&config.proxy_bind)?;
         reverse_listener
             .set_nonblocking(true)
             .map_err(|error| io_error("configure reverse listener", error))?;
@@ -72,9 +114,7 @@ impl ReverseBroker {
         let reverse_endpoint = reverse_listener
             .local_addr()
             .map_err(|error| io_error("inspect reverse listener", error))?;
-        let proxy_endpoint = proxy_listener
-            .local_addr()
-            .map_err(|error| io_error("inspect proxy listener", error))?;
+        let proxy_endpoint = proxy_listener.local_endpoint()?;
         let (sender, receiver) = mpsc::sync_channel(config.max_waiting_streams);
         let counters = Arc::new(BrokerCounters::default());
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -108,8 +148,8 @@ impl ReverseBroker {
         self.reverse_endpoint
     }
 
-    pub const fn proxy_endpoint(&self) -> SocketAddr {
-        self.proxy_endpoint
+    pub const fn proxy_endpoint(&self) -> &ProxyEndpoint {
+        &self.proxy_endpoint
     }
 
     pub fn waiting_streams(&self) -> usize {
@@ -146,15 +186,24 @@ impl Drop for ReverseBroker {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
         let _ = TcpStream::connect(self.reverse_endpoint);
-        let _ = TcpStream::connect(self.proxy_endpoint);
+        let _ = ProxyListener::wake(&self.proxy_endpoint);
         for thread in self.threads.drain(..) {
             let _ = thread.join();
+        }
+        if let ProxyEndpoint::Unix(path) = &self.proxy_endpoint {
+            let _ = std::fs::remove_file(path);
         }
     }
 }
 
 fn validate_config(config: &BrokerConfig) -> Result<()> {
-    if !config.proxy_bind.ip().is_loopback()
+    let proxy_is_local = match &config.proxy_bind {
+        ProxyEndpoint::Tcp(address) => address.ip().is_loopback(),
+        ProxyEndpoint::Unix(path) => {
+            path.is_absolute() && path.file_name().is_some() && path.as_os_str().len() <= 4096
+        }
+    };
+    if !proxy_is_local
         || config.peer_principal.is_empty()
         || config.peer_principal.len() > 255
         || config
@@ -167,7 +216,7 @@ fn validate_config(config: &BrokerConfig) -> Result<()> {
         || config.proxy_wait_timeout.is_zero()
     {
         return Err(Error::from(
-            "reverse broker requires a network reverse bind, loopback proxy bind, bounded queue, principal, and finite timeouts",
+            "reverse broker requires a network reverse bind, local proxy endpoint, bounded queue, principal, and finite timeouts",
         ));
     }
     Ok(())
@@ -261,7 +310,7 @@ fn spawn_reverse_acceptor(
 }
 
 fn spawn_proxy_acceptor(
-    listener: TcpListener,
+    listener: ProxyListener,
     wait_timeout: Duration,
     max_active_bridges: usize,
     receiver: Receiver<SecureStream>,
@@ -273,7 +322,7 @@ fn spawn_proxy_acceptor(
         .spawn(move || {
             while !shutdown.load(Ordering::Acquire) {
                 let local = match listener.accept() {
-                    Ok((stream, _)) => stream,
+                    Ok(stream) => stream,
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(25));
                         continue;
@@ -283,11 +332,11 @@ fn spawn_proxy_acceptor(
                 if shutdown.load(Ordering::Acquire) {
                     break;
                 }
-                if configure_transport_socket(&local).is_err() {
+                if local.configure().is_err() {
                     counters
                         .unavailable_proxy_connections
                         .fetch_add(1, Ordering::AcqRel);
-                    let _ = local.shutdown(Shutdown::Both);
+                    let _ = local.shutdown();
                     continue;
                 }
                 let Some(bridge_slot) = CounterSlot::try_acquire(
@@ -298,7 +347,7 @@ fn spawn_proxy_acceptor(
                     counters
                         .unavailable_proxy_connections
                         .fetch_add(1, Ordering::AcqRel);
-                    let _ = local.shutdown(Shutdown::Both);
+                    let _ = local.shutdown();
                     continue;
                 };
                 let Some(remote) =
@@ -307,7 +356,7 @@ fn spawn_proxy_acceptor(
                     counters
                         .unavailable_proxy_connections
                         .fetch_add(1, Ordering::AcqRel);
-                    let _ = local.shutdown(Shutdown::Both);
+                    let _ = local.shutdown();
                     continue;
                 };
                 let bridge_counters = Arc::clone(&counters);
@@ -398,7 +447,7 @@ impl Drop for CounterSlot {
     }
 }
 
-fn bridge(local: TcpStream, remote: SecureStream) -> io::Result<()> {
+fn bridge(local: LocalStream, remote: SecureStream) -> io::Result<()> {
     let mut local_reader = local.try_clone()?;
     let mut local_writer = local;
     let mut remote_reader = remote.try_clone()?;
@@ -412,7 +461,7 @@ fn bridge(local: TcpStream, remote: SecureStream) -> io::Result<()> {
         result
     });
     let downstream = io::copy(&mut remote_reader, &mut local_writer);
-    let _ = local_shutdown.shutdown(Shutdown::Both);
+    let _ = local_shutdown.shutdown();
     let _ = remote_shutdown.shutdown();
     let upstream = upstream
         .join()
@@ -423,4 +472,143 @@ fn bridge(local: TcpStream, remote: SecureStream) -> io::Result<()> {
 
 fn io_error(context: &str, error: io::Error) -> Error {
     Error::from(format!("{context}: {error}"))
+}
+
+enum ProxyListener {
+    Tcp(TcpListener),
+    #[cfg(unix)]
+    Unix {
+        listener: UnixListener,
+        path: PathBuf,
+    },
+}
+
+impl ProxyListener {
+    fn bind(endpoint: &ProxyEndpoint) -> Result<Self> {
+        match endpoint {
+            ProxyEndpoint::Tcp(address) => TcpListener::bind(address)
+                .map(Self::Tcp)
+                .map_err(|error| io_error("bind TCP proxy listener", error)),
+            ProxyEndpoint::Unix(path) => Self::bind_unix(path),
+        }
+    }
+
+    #[cfg(unix)]
+    fn bind_unix(path: &Path) -> Result<Self> {
+        UnixListener::bind(path)
+            .map(|listener| Self::Unix {
+                listener,
+                path: path.to_path_buf(),
+            })
+            .map_err(|error| io_error("bind Unix proxy listener", error))
+    }
+
+    #[cfg(not(unix))]
+    fn bind_unix(_path: &Path) -> Result<Self> {
+        Err(Error::from("Unix proxy endpoints are not supported"))
+    }
+
+    fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        match self {
+            Self::Tcp(listener) => listener.set_nonblocking(nonblocking),
+            #[cfg(unix)]
+            Self::Unix { listener, .. } => listener.set_nonblocking(nonblocking),
+        }
+    }
+
+    fn local_endpoint(&self) -> Result<ProxyEndpoint> {
+        match self {
+            Self::Tcp(listener) => listener
+                .local_addr()
+                .map(ProxyEndpoint::Tcp)
+                .map_err(|error| io_error("inspect TCP proxy listener", error)),
+            #[cfg(unix)]
+            Self::Unix { path, .. } => Ok(ProxyEndpoint::Unix(path.clone())),
+        }
+    }
+
+    fn accept(&self) -> io::Result<LocalStream> {
+        match self {
+            Self::Tcp(listener) => listener
+                .accept()
+                .map(|(stream, _)| LocalStream::Tcp(stream)),
+            #[cfg(unix)]
+            Self::Unix { listener, .. } => listener
+                .accept()
+                .map(|(stream, _)| LocalStream::Unix(stream)),
+        }
+    }
+
+    fn wake(endpoint: &ProxyEndpoint) -> io::Result<()> {
+        match endpoint {
+            ProxyEndpoint::Tcp(address) => TcpStream::connect(address).map(|_| ()),
+            #[cfg(unix)]
+            ProxyEndpoint::Unix(path) => UnixStream::connect(path).map(|_| ()),
+            #[cfg(not(unix))]
+            ProxyEndpoint::Unix(_) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Unix proxy endpoints are not supported",
+            )),
+        }
+    }
+}
+
+enum LocalStream {
+    Tcp(TcpStream),
+    #[cfg(unix)]
+    Unix(UnixStream),
+}
+
+impl LocalStream {
+    fn configure(&self) -> io::Result<()> {
+        match self {
+            Self::Tcp(stream) => configure_transport_socket(stream),
+            #[cfg(unix)]
+            Self::Unix(_) => Ok(()),
+        }
+    }
+
+    fn try_clone(&self) -> io::Result<Self> {
+        match self {
+            Self::Tcp(stream) => stream.try_clone().map(Self::Tcp),
+            #[cfg(unix)]
+            Self::Unix(stream) => stream.try_clone().map(Self::Unix),
+        }
+    }
+
+    fn shutdown(&self) -> io::Result<()> {
+        match self {
+            Self::Tcp(stream) => stream.shutdown(Shutdown::Both),
+            #[cfg(unix)]
+            Self::Unix(stream) => stream.shutdown(Shutdown::Both),
+        }
+    }
+}
+
+impl io::Read for LocalStream {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Tcp(stream) => io::Read::read(stream, buffer),
+            #[cfg(unix)]
+            Self::Unix(stream) => io::Read::read(stream, buffer),
+        }
+    }
+}
+
+impl io::Write for LocalStream {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Tcp(stream) => io::Write::write(stream, buffer),
+            #[cfg(unix)]
+            Self::Unix(stream) => io::Write::write(stream, buffer),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Tcp(stream) => io::Write::flush(stream),
+            #[cfg(unix)]
+            Self::Unix(stream) => io::Write::flush(stream),
+        }
+    }
 }

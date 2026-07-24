@@ -6,7 +6,9 @@ use std::{
 };
 
 use r9p_auth::{ClientConfig, ServerConfig};
-use r9p_reverse::{BrokerConfig, FilesystemExport, FilesystemExportConfig, ReverseBroker};
+use r9p_reverse::{
+    BrokerConfig, FilesystemExport, FilesystemExportConfig, ProxyEndpoint, ReverseBroker,
+};
 
 use crate::{
     errors::{cli_error, CliResult},
@@ -61,7 +63,7 @@ pub(crate) fn reverse_export_cmd(global: Config, args: Vec<String>) -> CliResult
 #[derive(Debug, Eq, PartialEq)]
 struct ReverseBrokerCliConfig {
     reverse_bind: SocketAddr,
-    proxy_bind: SocketAddr,
+    proxy_bind: ProxyEndpoint,
     auth_config: PathBuf,
     principal: String,
     pool: usize,
@@ -88,7 +90,7 @@ struct ReverseExportCliConfig {
 fn parse_broker_config(global: Config, args: Vec<String>) -> CliResult<ReverseBrokerCliConfig> {
     reject_client_globals(&global, "reverse-broker")?;
     let mut reverse_bind = None;
-    let mut proxy_bind = Some(loopback_ephemeral());
+    let mut proxy_bind = Some(ProxyEndpoint::tcp(loopback_ephemeral()));
     let mut auth_config = global.auth_config;
     let mut principal = None;
     let mut pool = DEFAULT_POOL;
@@ -101,7 +103,11 @@ fn parse_broker_config(global: Config, args: Vec<String>) -> CliResult<ReverseBr
                 reverse_bind = Some(parse_socket(value(&args, &mut index, "reverse bind")?)?);
             }
             "--proxy-bind" => {
-                proxy_bind = Some(parse_socket(value(&args, &mut index, "proxy bind")?)?);
+                proxy_bind = Some(parse_proxy_endpoint(value(
+                    &args,
+                    &mut index,
+                    "proxy bind",
+                )?)?);
             }
             "--auth-config" => {
                 set_auth_config(&mut auth_config, value(&args, &mut index, "auth config")?)?;
@@ -128,9 +134,6 @@ fn parse_broker_config(global: Config, args: Vec<String>) -> CliResult<ReverseBr
     }
     let reverse_bind = reverse_bind.ok_or_else(|| cli_error("missing --reverse-bind"))?;
     let proxy_bind = proxy_bind.ok_or_else(|| cli_error("missing --proxy-bind"))?;
-    if !proxy_bind.ip().is_loopback() {
-        return Err(cli_error("reverse proxy bind must be loopback"));
-    }
     Ok(ReverseBrokerCliConfig {
         reverse_bind,
         proxy_bind,
@@ -258,6 +261,24 @@ fn parse_socket(value: &str) -> CliResult<SocketAddr> {
         .ok_or_else(|| cli_error(format!("socket address {value} resolved no addresses")))
 }
 
+fn parse_proxy_endpoint(value: &str) -> CliResult<ProxyEndpoint> {
+    if let Some(path) = value
+        .strip_prefix("unix!")
+        .or_else(|| value.strip_prefix("unix:"))
+    {
+        let path = PathBuf::from(path);
+        if !path.is_absolute() || path.file_name().is_none() {
+            return Err(cli_error("reverse Unix proxy path must be absolute"));
+        }
+        return Ok(ProxyEndpoint::unix(path));
+    }
+    let endpoint = parse_socket(value)?;
+    if !endpoint.ip().is_loopback() {
+        return Err(cli_error("reverse TCP proxy bind must be loopback"));
+    }
+    Ok(ProxyEndpoint::tcp(endpoint))
+}
+
 fn parse_positive(value: &str, label: &str) -> CliResult<usize> {
     let parsed = value
         .parse::<usize>()
@@ -291,7 +312,7 @@ fn park_forever() -> ! {
 
 fn reverse_usage(code: i32) -> ! {
     eprintln!(
-        "usage: r9p reverse-broker --reverse-bind address [--proxy-bind loopback-address] --principal name --auth-config path [--pool count]"
+        "usage: r9p reverse-broker --reverse-bind address [--proxy-bind loopback-address|unix!/path] --principal name --auth-config path [--pool count]"
     );
     eprintln!(
         "       r9p reverse-export --connect address --principal name --auth-config path [--pool count] [--reconnect-min-delay seconds] [--reconnect-max-delay seconds] [--writable] root"
@@ -338,8 +359,35 @@ mod tests {
         )
         .expect("broker config");
         assert_eq!(parsed.reverse_bind, SocketAddr::from(([0, 0, 0, 0], 9640)));
-        assert_eq!(parsed.proxy_bind, SocketAddr::from(([127, 0, 0, 1], 9641)));
+        assert_eq!(
+            parsed.proxy_bind,
+            ProxyEndpoint::tcp(SocketAddr::from(([127, 0, 0, 1], 9641)))
+        );
         assert_eq!(parsed.pool, 4);
+    }
+
+    #[test]
+    fn parses_unix_reverse_proxy() {
+        let parsed = parse_broker_config(
+            global(),
+            [
+                "--reverse-bind",
+                "0.0.0.0:9640",
+                "--proxy-bind",
+                "unix!/run/r9p/operating.sock",
+                "--principal",
+                "laptop-workspace",
+                "--auth-config",
+                "/run/auth/server.conf",
+            ]
+            .map(str::to_string)
+            .to_vec(),
+        )
+        .expect("broker config");
+        assert_eq!(
+            parsed.proxy_bind,
+            ProxyEndpoint::unix("/run/r9p/operating.sock")
+        );
     }
 
     #[test]

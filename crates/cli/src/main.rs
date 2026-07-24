@@ -256,7 +256,7 @@ pub(crate) fn usage() -> ! {
         "  export [--bind address] [--max-fids count] [--writable] [--descriptor machine] root"
     );
     eprintln!(
-        "  reverse-broker --reverse-bind address [--proxy-bind loopback-address] --principal name --auth-config path [--pool count]"
+        "  reverse-broker --reverse-bind address [--proxy-bind loopback-address|unix!/path] --principal name --auth-config path [--pool count]"
     );
     eprintln!(
         "  reverse-export --connect address --principal name --auth-config path [--pool count] [--reconnect-min-delay seconds] [--reconnect-max-delay seconds] [--writable] root"

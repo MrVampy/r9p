@@ -200,14 +200,17 @@ fn validate_token(field: &str, value: &str) -> Result<()> {
 }
 
 fn validate_absolute_path(field: &str, path: &str, allow_root: bool) -> Result<()> {
-    if !path.starts_with('/')
-        || (!allow_root && path == "/")
-        || (path.len() > 1 && path.ends_with('/'))
-        || path
-            .split('/')
-            .skip(1)
-            .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
-    {
+    let valid = if path == "/" {
+        allow_root
+    } else {
+        path.starts_with('/')
+            && !path.ends_with('/')
+            && !path
+                .split('/')
+                .skip(1)
+                .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
+    };
+    if !valid {
         return Err(Error::from(format!(
             "connection descriptor {field} must be a canonical absolute path"
         )));
@@ -279,6 +282,16 @@ mod tests {
         let mut descriptor = descriptor();
         descriptor.exported_root = "agents".to_string();
         assert!(descriptor.render().is_err());
+    }
+
+    #[test]
+    fn connection_descriptor_accepts_root_exported_root() {
+        let mut expected = descriptor();
+        expected.exported_root = "/".to_string();
+        let rendered = expected.render().expect("render root export descriptor");
+        let parsed =
+            ConnectionDescriptor::parse(&rendered).expect("parse root export descriptor");
+        assert_eq!(parsed, expected);
     }
 
     #[test]

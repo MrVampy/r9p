@@ -1,5 +1,5 @@
 use r9p::blocking::Client;
-use session::{AuthorityBindings, Client as SessionClient, ConnectionConfig, OREAD, ORDWR};
+use session::{AuthorityBindings, Client as SessionClient, ConnectionConfig, ORDWR, OREAD};
 use std::{ffi::c_char, path::PathBuf, time::Duration};
 
 use super::{bytes_arg, clear_last_error, set_last_error, str_arg, FrontAbi, INVALID, OK};
@@ -385,7 +385,10 @@ fn authority_bindings(
     authority_boundary: &str,
     service_auth_config: &str,
 ) -> session::Result<AuthorityBindings> {
-    match (authority_boundary.is_empty(), service_auth_config.is_empty()) {
+    match (
+        authority_boundary.is_empty(),
+        service_auth_config.is_empty(),
+    ) {
         (true, true) => Ok(AuthorityBindings::new()),
         (false, false) => AuthorityBindings::new()
             .bind_session_auth(authority_boundary, PathBuf::from(service_auth_config)),

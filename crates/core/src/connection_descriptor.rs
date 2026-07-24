@@ -51,9 +51,7 @@ impl ConnectionDescriptor {
 
     pub fn routed_path(&self, namespace_path: &str) -> Result<String> {
         let mount_path = self.namespace_mount_path.as_deref().ok_or_else(|| {
-            Error::from(
-                "connection descriptor does not carry a resolved namespace mount path",
-            )
+            Error::from("connection descriptor does not carry a resolved namespace mount path")
         })?;
         validate_absolute_path("namespace_path", namespace_path, true)?;
         let suffix = mounted_suffix(namespace_path, mount_path).ok_or_else(|| {
@@ -299,7 +297,13 @@ mod tests {
 
     #[test]
     fn namespace_mount_path_must_be_canonical_and_non_root() {
-        for invalid in ["/", "agents", "/agents/", "/agents//status", "/agents/../status"] {
+        for invalid in [
+            "/",
+            "agents",
+            "/agents/",
+            "/agents//status",
+            "/agents/../status",
+        ] {
             let mut descriptor = descriptor();
             descriptor.namespace_mount_path = Some(invalid.to_string());
             assert!(

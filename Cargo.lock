@@ -19,6 +19,7 @@ dependencies = [
  "front",
  "r9p",
  "r9p-auth",
+ "session",
 ]
 
 [[package]]
@@ -159,7 +160,9 @@ name = "front"
 version = "0.1.0"
 dependencies = [
  "fs",
+ "libc",
  "r9p",
+ "session",
 ]
 
 [[package]]

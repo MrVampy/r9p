@@ -534,6 +534,82 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
         })
     }
 
+    /// Sends the final write chunk and the following read without waiting for
+    /// the write reply between them.
+    ///
+    /// The two requests are ordered on the wire. Callers must use this only
+    /// with a file whose server contract processes a write before the
+    /// subsequent read on the same fid. Prefix chunks still complete before
+    /// the pipelined final pair.
+    pub fn write_then_read_timeout(
+        &self,
+        fid: Fid,
+        mut write_offset: u64,
+        mut data: &[u8],
+        read_offset: u64,
+        read_count: u32,
+        timeout: Duration,
+    ) -> Result<(u32, Vec<u8>)> {
+        let max = usize::try_from(self.max_write_payload()).unwrap_or(usize::MAX);
+        let mut total = 0_u32;
+        while data.len() > max {
+            let chunk = &data[..max];
+            let count = self.write_once_timeout(fid, write_offset, chunk, timeout)?;
+            if usize::try_from(count).ok() != Some(chunk.len()) {
+                return Err(Error::from("short 9P write before pipelined read"));
+            }
+            total = total
+                .checked_add(count)
+                .ok_or_else(|| Error::from("aggregate write count overflow"))?;
+            write_offset = checked_advance_offset(write_offset, u64::from(count))?;
+            data = &data[max..];
+        }
+
+        let (count, response) = self.write_once_then_read_timeout(
+            fid,
+            write_offset,
+            data,
+            read_offset,
+            read_count,
+            timeout,
+        )?;
+        total = total
+            .checked_add(count)
+            .ok_or_else(|| Error::from("aggregate write count overflow"))?;
+        Ok((total, response))
+    }
+
+    /// Pipelined [`Self::write_then_read_timeout`] that reads one bounded
+    /// delimiter-terminated response record.
+    pub fn write_then_read_delimited_timeout(
+        &self,
+        fid: Fid,
+        write_offset: u64,
+        data: &[u8],
+        read_offset: u64,
+        read_count: u32,
+        delimiter: u8,
+        timeout: Duration,
+    ) -> Result<(u32, Vec<u8>)> {
+        let (written, first) = self.write_then_read_timeout(
+            fid,
+            write_offset,
+            data,
+            read_offset,
+            read_count,
+            timeout,
+        )?;
+        let mut first = Some(first);
+        let response =
+            read_delimited_with(read_offset, read_count, delimiter, |offset, remaining| {
+                match first.take() {
+                    Some(bytes) => Ok(bytes),
+                    None => self.read_timeout(fid, offset, remaining, timeout),
+                }
+            })?;
+        Ok((written, response))
+    }
+
     pub fn write_once(&self, fid: Fid, offset: u64, data: &[u8]) -> Result<u32> {
         let op = {
             let mut protocol = lock(&self.inner.protocol, "lock 9P protocol client")?;
@@ -545,6 +621,66 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
             Completion::Write { count } => checked_write_count(count, data.len()),
             other => Err(unexpected("Rwrite", other)),
         }
+    }
+
+    fn write_once_then_read_timeout(
+        &self,
+        fid: Fid,
+        write_offset: u64,
+        data: &[u8],
+        read_offset: u64,
+        read_count: u32,
+        timeout: Duration,
+    ) -> Result<(u32, Vec<u8>)> {
+        let read_count = codec::clamp_read_count(self.msize(), read_count);
+        let (write, read) = {
+            let mut protocol = lock(&self.inner.protocol, "lock 9P protocol client")?;
+            let write = protocol
+                .write(fid, write_offset, data.to_vec())
+                .map_err(protocol_error)?;
+            let read = match protocol.read(fid, read_offset, read_count) {
+                Ok(read) => read,
+                Err(error) => {
+                    protocol.abandon(write.tag);
+                    return Err(protocol_error(error));
+                }
+            };
+            (write, read)
+        };
+        let write_tag = write.tag;
+        let read_tag = read.tag;
+        let write_pending = match self.submit_op(write) {
+            Ok(pending) => pending,
+            Err(error) => {
+                let _ = lock(&self.inner.protocol, "lock 9P protocol client")
+                    .map(|mut protocol| protocol.abandon(read_tag));
+                return Err(error);
+            }
+        };
+        let read_pending = match self.submit_op(read) {
+            Ok(pending) => pending,
+            Err(error) => {
+                self.cancel_waiter(
+                    write_tag,
+                    Error::from("pipelined 9P read could not be submitted"),
+                );
+                return Err(error);
+            }
+        };
+        let _write_guard = self.observe_call(write_tag);
+        let _read_guard = self.observe_call(read_tag);
+
+        let write_result = self.wait_pending_timeout(write_pending, timeout, true);
+        let read_result = self.wait_pending_timeout(read_pending, timeout, true);
+        let written = match write_result? {
+            Completion::Write { count } => checked_write_count(count, data.len())?,
+            other => return Err(unexpected("Rwrite", other)),
+        };
+        let response = match read_result? {
+            Completion::Read { data } => checked_read_data(data, read_count)?,
+            other => return Err(unexpected("Rread", other)),
+        };
+        Ok((written, response))
     }
 
     pub fn write_once_timeout(
@@ -701,6 +837,16 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
         let expected_tag = op.tag;
         let pending = self.submit_op(op)?;
         let _guard = observe(expected_tag);
+        self.wait_pending_timeout(pending, timeout, flush_on_timeout)
+    }
+
+    fn wait_pending_timeout(
+        &self,
+        pending: PendingCall,
+        timeout: Duration,
+        flush_on_timeout: bool,
+    ) -> Result<Completion> {
+        let expected_tag = pending.tag;
         let response = match pending.receiver.recv_timeout(timeout) {
             Ok(response) => response?,
             Err(RecvTimeoutError::Timeout) => {

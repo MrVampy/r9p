@@ -113,6 +113,84 @@ mod tests {
     }
 
     #[test]
+    fn dependent_write_and_read_are_sent_before_either_reply() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .map_err(|error| io_error("bind test listener", error))?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| io_error("read listener address", error))?;
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener
+                .accept()
+                .map_err(|error| io_error("accept test connection", error))?;
+            handshake(&mut stream)?;
+            let write_tag = match read_tmessage(&mut stream)? {
+                TMessage::Write {
+                    tag,
+                    offset,
+                    data,
+                    ..
+                } if offset == 0 && data == b"ping\n" => tag,
+                other => {
+                    return Err(Error::from(format!(
+                        "expected pipelined Twrite, got {other:?}"
+                    )))
+                }
+            };
+            let read_tag = match read_tmessage(&mut stream)? {
+                TMessage::Read {
+                    tag,
+                    offset,
+                    count,
+                    ..
+                } if offset == 0 && count == 64 => tag,
+                other => {
+                    return Err(Error::from(format!(
+                        "expected pipelined Tread before Rwrite, got {other:?}"
+                    )))
+                }
+            };
+            write_response(
+                &mut stream,
+                &RMessage::Read {
+                    tag: read_tag,
+                    data: b"pong\n".to_vec(),
+                },
+            )?;
+            write_response(
+                &mut stream,
+                &RMessage::Write {
+                    tag: write_tag,
+                    count: 5,
+                },
+            )
+        });
+        let client = MultiplexedClient::connect(
+            TcpStream::connect(address).map_err(|error| io_error("connect test client", error))?,
+            "glenda",
+            "",
+            8192,
+        )?;
+
+        let (written, response) = client.write_then_read_delimited_timeout(
+            client.root_fid(),
+            0,
+            b"ping\n",
+            0,
+            64,
+            b'\n',
+            Duration::from_secs(1),
+        )?;
+        assert_eq!(written, 5);
+        assert_eq!(response, b"pong\n");
+
+        server
+            .join()
+            .map_err(|_| Error::from("server worker panicked"))??;
+        Ok(())
+    }
+
+    #[test]
     fn explicit_shutdown_interrupts_a_pending_call() -> Result<()> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .map_err(|error| io_error("bind test listener", error))?;

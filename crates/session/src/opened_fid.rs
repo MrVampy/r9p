@@ -86,6 +86,28 @@ impl OpenedFid {
             .write_timeout(self.required_fid()?, offset, data, timeout)
     }
 
+    /// Pipelines the final request write with the first response read on this
+    /// retained fid and returns one bounded delimiter-terminated record.
+    pub fn write_then_read_delimited_timeout(
+        &mut self,
+        write_offset: u64,
+        data: &[u8],
+        read_offset: u64,
+        read_count: u32,
+        delimiter: u8,
+        timeout: Duration,
+    ) -> Result<(u32, Vec<u8>)> {
+        self.client.write_then_read_delimited_timeout(
+            self.required_fid()?,
+            write_offset,
+            data,
+            read_offset,
+            read_count,
+            delimiter,
+            timeout,
+        )
+    }
+
     pub fn close(mut self) -> Result<()> {
         self.clunk()
     }

@@ -200,6 +200,29 @@ impl Client {
             .map_err(client_error)
     }
 
+    pub fn write_then_read_delimited_timeout(
+        &self,
+        fid: Fid,
+        write_offset: u64,
+        data: &[u8],
+        read_offset: u64,
+        read_count: u32,
+        delimiter: u8,
+        timeout: Duration,
+    ) -> Result<(u32, Vec<u8>)> {
+        self.inner
+            .write_then_read_delimited_timeout(
+                fid,
+                write_offset,
+                data,
+                read_offset,
+                read_count,
+                delimiter,
+                timeout,
+            )
+            .map_err(client_error)
+    }
+
     pub fn clunk_timeout(&self, fid: Fid, timeout: Duration) -> Result<()> {
         self.inner.clunk_timeout(fid, timeout).map_err(client_error)
     }

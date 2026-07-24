@@ -41,13 +41,16 @@ This map defines the local sources agents should inspect before making source-sp
   - Generic authenticated reverse-connect runtime adapter.
   - An application-owned tree or filesystem owner connects outward and serves
     ordinary 9P over a bounded pool; the broker pairs those streams with a
-    loopback client endpoint without interpreting 9P or owning namespace
-    policy.
+    local TCP or Unix client endpoint without interpreting 9P or owning
+    namespace policy.
   - `ReverseExport` owns the generic outbound lifecycle and accepts a fresh
-    `FileTree` factory per session. `FilesystemExport` is the local-tree
-    specialization used by the CLI.
+    `FileTree` or asynchronous `ConnectionHandler` factory per session.
+    `FilesystemExport` is the local-tree specialization used by the CLI.
 - `crates/core/src/multiplex/`
   - Layered blocking transport facade for concurrent tagged client calls.
+- `crates/session/src/`
+  - Multiplexed session client, retained-fid operations, shared connection
+    shutdown, reconnect classification, and namespace-resolution facade.
 - `crates/core/src/stat.rs`
   - 9P stat record shape and mode helpers.
 - `crates/core/tests/memory_tree.rs`
@@ -57,6 +60,8 @@ This map defines the local sources agents should inspect before making source-sp
     bound regressions.
 - `crates/cli/src/`
   - The `r9p` binary and one-shot client command dispatch.
+  - `r9p con` retains two fids on one multiplexed 9P connection so stdin and
+    stdout remain one logical application session.
 - `crates/cli/tests/cli_machine.rs`
   - Machine-output and streaming command regression tests.
 - `crates/fuse/src/`

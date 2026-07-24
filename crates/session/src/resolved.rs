@@ -80,6 +80,13 @@ pub struct ResolvedTarget {
     resolved_at: Instant,
 }
 
+#[derive(Clone, Debug)]
+pub struct ResolvedPath {
+    target: ResolvedTarget,
+    namespace_path: String,
+    service_path: String,
+}
+
 impl ResolvedTarget {
     pub fn descriptor(&self) -> &ConnectionDescriptor {
         &self.descriptor
@@ -106,6 +113,28 @@ impl ResolvedTarget {
             ));
         }
         Client::connect_with_timeout(&self.connection, timeout.min(remaining))
+    }
+}
+
+impl ResolvedPath {
+    pub fn target(&self) -> &ResolvedTarget {
+        &self.target
+    }
+
+    pub fn namespace_path(&self) -> &str {
+        &self.namespace_path
+    }
+
+    pub fn service_path(&self) -> &str {
+        &self.service_path
+    }
+
+    pub fn connect(&self, timeout: Duration) -> Result<Client> {
+        self.target.connect(timeout)
+    }
+
+    pub fn into_parts(self) -> (ResolvedTarget, String) {
+        (self.target, self.service_path)
     }
 }
 
@@ -245,6 +274,62 @@ impl Client {
         timeout: Duration,
     ) -> Result<ResolvedTarget> {
         validate_service_name(service)?;
+        let target =
+            self.resolve_connection_timeout(service, service_msize, authorities, timeout)?;
+        if target.descriptor.service != service {
+            return Err(Error::new(
+                libc::EPROTO,
+                format!(
+                    "connection server resolved service {} for request {service}",
+                    target.descriptor.service
+                ),
+            ));
+        }
+        Ok(target)
+    }
+
+    pub fn resolve_namespace_path_timeout(
+        &self,
+        namespace_path: &str,
+        service_msize: u32,
+        authorities: &AuthorityBindings,
+        timeout: Duration,
+    ) -> Result<ResolvedPath> {
+        validate_namespace_path(namespace_path)?;
+        if namespace_path == "/" {
+            return Err(Error::new(
+                libc::EINVAL,
+                "connection server cannot resolve the namespace root",
+            ));
+        }
+        let target =
+            self.resolve_connection_timeout(namespace_path, service_msize, authorities, timeout)?;
+        let service_path = target
+            .descriptor
+            .routed_path(namespace_path)
+            .map_err(|error| {
+                Error::new(
+                    libc::EPROTO,
+                    format!(
+                        "connection server returned an invalid namespace route: {}",
+                        error.display_lossy()
+                    ),
+                )
+            })?;
+        Ok(ResolvedPath {
+            target,
+            namespace_path: namespace_path.to_string(),
+            service_path,
+        })
+    }
+
+    fn resolve_connection_timeout(
+        &self,
+        request_value: &str,
+        service_msize: u32,
+        authorities: &AuthorityBindings,
+        timeout: Duration,
+    ) -> Result<ResolvedTarget> {
         if service_msize < 1024 {
             return Err(Error::new(
                 libc::EINVAL,
@@ -259,8 +344,8 @@ impl Client {
         }
 
         let mut fid = self.open_path_timeout(CONNECTION_SERVER_PATH, ORDWR, timeout)?;
-        let mut request = Vec::with_capacity(service.len() + 1);
-        request.extend_from_slice(service.as_bytes());
+        let mut request = Vec::with_capacity(request_value.len() + 1);
+        request.extend_from_slice(request_value.as_bytes());
         request.push(b'\n');
         let written = fid.write_timeout(0, &request, timeout)?;
         if usize::try_from(written).ok() != Some(request.len()) {
@@ -282,15 +367,6 @@ impl Client {
         })?;
         let descriptor = ConnectionDescriptor::parse(rendered)
             .map_err(|error| Error::new(libc::EPROTO, error.display_lossy().to_string()))?;
-        if descriptor.service != service {
-            return Err(Error::new(
-                libc::EPROTO,
-                format!(
-                    "connection server resolved service {} for request {service}",
-                    descriptor.service
-                ),
-            ));
-        }
         let auth_config =
             authorities.session_auth_config(descriptor.authority_boundary.as_str())?;
         let connection = ConnectionConfig {
@@ -491,6 +567,28 @@ mod tests {
         assert_eq!(
             join_namespace_path("/exported", "/terminals/a"),
             "/exported/terminals/a"
+        );
+    }
+
+    #[test]
+    fn connection_descriptor_routes_resolved_namespace_path() {
+        let descriptor = ConnectionDescriptor {
+            service: "infra/agents".to_string(),
+            channel_id: "r9p-export:infra/agents".to_string(),
+            endpoint_bind: "127.0.0.1:19640".to_string(),
+            uname: "codex".to_string(),
+            aname: "/".to_string(),
+            exported_root: "/".to_string(),
+            namespace_mount_path: Some("/agents".to_string()),
+            authority_boundary: "loopback".to_string(),
+            generation: 1,
+            valid_for_ms: 10_000,
+        };
+        assert_eq!(
+            descriptor
+                .routed_path("/agents/runs/run-1")
+                .expect("route should be valid"),
+            "/runs/run-1"
         );
     }
 

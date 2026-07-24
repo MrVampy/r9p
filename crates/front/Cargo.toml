@@ -13,7 +13,9 @@ workspace = true
 crate-type = ["lib", "cdylib"]
 
 [dependencies]
+libc.workspace = true
 r9p.workspace = true
+session.workspace = true
 
 [dev-dependencies]
 fs.workspace = true

@@ -23,6 +23,7 @@ pub use opened_fid::OpenedFid;
 pub use r9p::{ORDWR, OREAD, OTRUNC, OWRITE};
 pub use request::{with_fuse_unique, RequestTracker};
 pub use resolved::{
-    AuthorityBindings, NamespaceClient, ResolvedNamespace, ResolvedNamespaceConfig, ResolvedTarget,
+    AuthorityBindings, NamespaceClient, ResolvedNamespace, ResolvedNamespaceConfig, ResolvedPath,
+    ResolvedTarget,
 };
 pub use slot::ClientSlot;

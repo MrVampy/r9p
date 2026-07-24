@@ -17,3 +17,4 @@ path = "src/main.rs"
 front.workspace = true
 r9p.workspace = true
 r9p-auth.workspace = true
+session.workspace = true

@@ -9,6 +9,9 @@ use r9p::{
     qid::Qid,
     stat::Stat,
 };
+use session::{
+    AuthorityBindings, Client as SessionClient, ConnectionConfig as SessionConnectionConfig,
+};
 use std::{
     collections::HashMap,
     io::{self, BufRead, Write},
@@ -26,6 +29,13 @@ struct TargetKey {
     aname: String,
     msize: u32,
     auth_config: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedTargetKey {
+    resolver: TargetKey,
+    service_msize: u32,
+    authorities: AuthorityBindings,
 }
 
 const AUTH_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -69,6 +79,10 @@ impl PeerClientServer {
         let Some((operation, fields)) = fields.split_first() else {
             return Err("invalid_r9p_beam_port_request".to_string());
         };
+        if operation.starts_with("resolved-") {
+            let (target, args) = resolved_target_and_args(fields)?;
+            return self.handle_resolved(operation, target, args);
+        }
         let (key, args) = target_and_args(fields)?;
         match (*operation, args) {
             ("version", []) => version_probe_output(&key).map_err(|error| error.to_string()),
@@ -140,6 +154,38 @@ impl PeerClientServer {
                 self.with_client(&key, |client| remove_output(client, &path))
             }
             _ => Err("invalid_r9p_beam_port_request".to_string()),
+        }
+    }
+
+    fn handle_resolved(
+        &mut self,
+        operation: &str,
+        target: ResolvedTargetKey,
+        args: &[&str],
+    ) -> Result<String, String> {
+        match (operation, args) {
+            ("resolved-stat", [path]) => {
+                let path = hex::decode_text(path)?;
+                let (key, service_path) = resolve_namespace_target(&target, &path)?;
+                self.with_client_retry(&key, |client| stat_output(client, &service_path))
+            }
+            ("resolved-list", [path]) => {
+                let path = hex::decode_text(path)?;
+                let (key, service_path) = resolve_namespace_target(&target, &path)?;
+                self.with_client_retry(&key, |client| list_output(client, &service_path))
+            }
+            ("resolved-read", [path]) => {
+                let path = hex::decode_text(path)?;
+                let (key, service_path) = resolve_namespace_target(&target, &path)?;
+                self.with_client_retry(&key, |client| read_output(client, &service_path))
+            }
+            ("resolved-rpc", [path, data]) => {
+                let path = hex::decode_text(path)?;
+                let data = hex::decode(data)?;
+                let (key, service_path) = resolve_namespace_target(&target, &path)?;
+                self.with_client_retry(&key, |client| rpc_output(client, &service_path, &data))
+            }
+            _ => Err("invalid_r9p_beam_port_resolved_request".to_string()),
         }
     }
 
@@ -344,6 +390,81 @@ fn target_and_args<'a>(fields: &'a [&'a str]) -> Result<(TargetKey, &'a [&'a str
         return Err("invalid_r9p_beam_port_target".to_string());
     };
     target_key(bind, uname, aname, msize, auth_config).map(|key| (key, args))
+}
+
+fn resolved_target_and_args<'a>(
+    fields: &'a [&'a str],
+) -> Result<(ResolvedTargetKey, &'a [&'a str]), String> {
+    let [bind, uname, aname, msize, auth_config, service_msize, binding_count, rest @ ..] = fields
+    else {
+        return Err("invalid_r9p_beam_port_resolved_target".to_string());
+    };
+    let resolver = target_key(bind, uname, aname, msize, auth_config)?;
+    let service_msize = parse_u32("service_msize", service_msize)?;
+    let binding_count = binding_count
+        .parse::<usize>()
+        .map_err(|_| format!("invalid_authority_binding_count:{binding_count}"))?;
+    let binding_fields = binding_count
+        .checked_mul(2)
+        .ok_or_else(|| "authority_binding_count_overflow".to_string())?;
+    if rest.len() < binding_fields {
+        return Err("incomplete_r9p_beam_port_authority_bindings".to_string());
+    }
+    let (raw_bindings, args) = rest.split_at(binding_fields);
+    let mut authorities = AuthorityBindings::new();
+    for pair in raw_bindings.chunks_exact(2) {
+        let boundary = hex::decode_text(pair[0])?;
+        let config_path = PathBuf::from(hex::decode_text(pair[1])?);
+        authorities = authorities
+            .bind_session_auth(boundary, config_path)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok((
+        ResolvedTargetKey {
+            resolver,
+            service_msize,
+            authorities,
+        },
+        args,
+    ))
+}
+
+fn resolve_namespace_target(
+    target: &ResolvedTargetKey,
+    namespace_path: &str,
+) -> Result<(TargetKey, String), String> {
+    let resolver = SessionClient::connect_with_timeout(
+        &SessionConnectionConfig {
+            address: target.resolver.bind.clone(),
+            uname: target.resolver.uname.clone(),
+            aname: target.resolver.aname.clone(),
+            msize: target.resolver.msize,
+            auth_config: target.resolver.auth_config.clone(),
+        },
+        AUTH_HANDSHAKE_TIMEOUT,
+    )
+    .map_err(|error| format!("r9p_beam_resolver_connect_failed:{error}"))?;
+    let resolved = resolver
+        .resolve_namespace_path_timeout(
+            namespace_path,
+            target.service_msize,
+            &target.authorities,
+            AUTH_HANDSHAKE_TIMEOUT,
+        )
+        .map_err(|error| format!("r9p_beam_namespace_resolve_failed:{error}"))?;
+    let connection = resolved.target().connection();
+    let key = TargetKey {
+        bind: connection.address.clone(),
+        uname: connection.uname.clone(),
+        aname: connection.aname.clone(),
+        msize: connection.msize,
+        auth_config: connection.auth_config.clone(),
+    };
+    let service_path = resolved.service_path().to_string();
+    resolver
+        .shutdown()
+        .map_err(|error| format!("r9p_beam_resolver_shutdown_failed:{error}"))?;
+    Ok((key, service_path))
 }
 
 fn target_key(

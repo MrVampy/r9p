@@ -119,6 +119,13 @@
  *   native mutation helpers. create_write_at keeps the created fid open for
  *   its initial write; the other operations create, replace, and remove.
  *   They carry no service-registration or namespace policy.
+ * - r9p_front_client_resolved_rpc and r9p_front_client_resolved_read ask the
+ *   resolver's /cs file for the service owning namespace_path, connect
+ *   directly to the returned finite-lived endpoint, rebase the logical path
+ *   through namespace_mount_path/exported_root, and perform the operation
+ *   against that service. Empty auth-config strings select an unauthenticated
+ *   contained transport. A non-empty service auth config must be paired with
+ *   the exact portable authority boundary named by the descriptor.
  */
 
 #include <stddef.h>
@@ -131,6 +138,7 @@
 #define R9P_FRONT_CAP_NATIVE_CLIENT_MUTATIONS (UINT64_C(1) << 3)
 #define R9P_FRONT_CAP_ATOMIC_CREATE_WRITE (UINT64_C(1) << 4)
 #define R9P_FRONT_CAP_NAMESPACE_MUTATION_RELAYS (UINT64_C(1) << 5)
+#define R9P_FRONT_CAP_RESOLVED_NAMESPACE_CLIENT (UINT64_C(1) << 6)
 
 typedef struct r9p_front r9p_front;
 
@@ -230,6 +238,27 @@ int32_t r9p_front_client_read(
     r9p_front *front, const char *endpoint_bind, size_t endpoint_bind_len,
     const char *uname, size_t uname_len, const char *aname, size_t aname_len,
     const char *path, size_t path_len, uint32_t msize, uint8_t *response_out,
+    size_t response_cap, size_t *response_len_out);
+int32_t r9p_front_client_resolved_rpc(
+    r9p_front *front, const char *resolver_bind, size_t resolver_bind_len,
+    const char *resolver_uname, size_t resolver_uname_len,
+    const char *resolver_aname, size_t resolver_aname_len,
+    const char *resolver_auth_config, size_t resolver_auth_config_len,
+    const char *namespace_path, size_t namespace_path_len,
+    const char *authority_boundary, size_t authority_boundary_len,
+    const char *service_auth_config, size_t service_auth_config_len,
+    const uint8_t *request, size_t request_len, uint32_t msize,
+    uint64_t timeout_ms, uint8_t *response_out, size_t response_cap,
+    size_t *response_len_out);
+int32_t r9p_front_client_resolved_read(
+    r9p_front *front, const char *resolver_bind, size_t resolver_bind_len,
+    const char *resolver_uname, size_t resolver_uname_len,
+    const char *resolver_aname, size_t resolver_aname_len,
+    const char *resolver_auth_config, size_t resolver_auth_config_len,
+    const char *namespace_path, size_t namespace_path_len,
+    const char *authority_boundary, size_t authority_boundary_len,
+    const char *service_auth_config, size_t service_auth_config_len,
+    uint32_t msize, uint64_t timeout_ms, uint8_t *response_out,
     size_t response_cap, size_t *response_len_out);
 int32_t r9p_front_client_create_at(
     r9p_front *front, const char *endpoint_bind, size_t endpoint_bind_len,

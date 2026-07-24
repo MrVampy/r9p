@@ -11,7 +11,8 @@ mod request;
 
 pub use client::{
     r9p_front_client_create_at, r9p_front_client_create_write_at, r9p_front_client_read,
-    r9p_front_client_remove, r9p_front_client_rpc, r9p_front_client_write_file,
+    r9p_front_client_remove, r9p_front_client_resolved_read, r9p_front_client_resolved_rpc,
+    r9p_front_client_rpc, r9p_front_client_write_file,
 };
 pub use request::{
     r9p_front_complete_remove, r9p_front_complete_request, r9p_front_complete_write,
@@ -26,12 +27,14 @@ pub const CAPABILITY_SYNTHETIC_READ_RELAY: u64 = 1 << 2;
 pub const CAPABILITY_NATIVE_CLIENT_MUTATIONS: u64 = 1 << 3;
 pub const CAPABILITY_ATOMIC_CREATE_WRITE: u64 = 1 << 4;
 pub const CAPABILITY_NAMESPACE_MUTATION_RELAYS: u64 = 1 << 5;
+pub const CAPABILITY_RESOLVED_NAMESPACE_CLIENT: u64 = 1 << 6;
 pub const CAPABILITIES: u64 = CAPABILITY_PUSHED_NAMESPACE_METADATA
     | CAPABILITY_REQUEST_CONTEXT_V2
     | CAPABILITY_SYNTHETIC_READ_RELAY
     | CAPABILITY_NATIVE_CLIENT_MUTATIONS
     | CAPABILITY_ATOMIC_CREATE_WRITE
-    | CAPABILITY_NAMESPACE_MUTATION_RELAYS;
+    | CAPABILITY_NAMESPACE_MUTATION_RELAYS
+    | CAPABILITY_RESOLVED_NAMESPACE_CLIENT;
 
 const OK: i32 = 0;
 const TIMEOUT: i32 = 1;

@@ -124,8 +124,9 @@
  *   directly to the returned finite-lived endpoint, rebase the logical path
  *   through namespace_mount_path/exported_root, and perform the operation
  *   against that service. Empty auth-config strings select an unauthenticated
- *   contained transport. A non-empty service auth config must be paired with
- *   the exact portable authority boundary named by the descriptor.
+ *   contained transport; a null pointer is valid for any zero-length string
+ *   argument. A non-empty service auth config must be paired with the exact
+ *   portable authority boundary named by the descriptor.
  */
 
 #include <stddef.h>

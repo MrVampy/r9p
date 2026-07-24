@@ -55,8 +55,11 @@ struct StagedRequest {
 }
 
 unsafe fn str_arg<'a>(ptr: *const c_char, len: usize) -> Option<&'a str> {
-    if ptr.is_null() {
+    if ptr.is_null() && len > 0 {
         return None;
+    }
+    if len == 0 {
+        return Some("");
     }
     let bytes = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), len) };
     std::str::from_utf8(bytes).ok()
@@ -593,4 +596,16 @@ pub unsafe extern "C" fn r9p_front_last_error(
         }
     }
     last_error.len() as isize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::str_arg;
+    use std::{ffi::c_char, ptr};
+
+    #[test]
+    fn null_string_pointer_is_valid_only_for_an_empty_argument() {
+        assert_eq!(unsafe { str_arg(ptr::null::<c_char>(), 0) }, Some(""));
+        assert_eq!(unsafe { str_arg(ptr::null::<c_char>(), 1) }, None);
+    }
 }

@@ -14,6 +14,8 @@ How should a client reach a registered service without making the Coordinator a
 
 - `crates/core/src/connection_descriptor.rs`
 - `crates/session/src/resolved.rs`
+- `crates/session/src/client.rs`
+- `crates/session/src/opened_fid.rs`
 - `crates/front/src/abi/client.rs`
 - `crates/beam-port/src/lib.rs`
 - `bindings/gleam/src/r9p.gleam`
@@ -43,6 +45,13 @@ namespace path to `/cs`; the latter resolves the longest registered mount.
 `r9p-session` rebases the requested path locally and connects directly to the
 service. The front C ABI and BEAM adapter expose this as ordinary resolved
 read/RPC/list/stat operations.
+
+`ResolvedPath` also owns the generic one-shot direct read and same-fid RPC
+lifecycle. Those helpers connect to the resolved service, enforce bounded
+timeouts and response size, reject a short request write, and close only the
+direct service connection. Language bindings and Rust applications therefore
+share the same transport-neutral operation rather than reproducing that
+lifecycle locally.
 
 Coordinator remains responsible for registration, policy, and address
 selection. It does not carry the service operation's 9P frames.

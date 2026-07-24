@@ -6,7 +6,7 @@ use std::{
 
 use r9p::connection_descriptor::ConnectionDescriptor;
 
-use crate::{Client, ConnectionConfig, Error, Result, ORDWR};
+use crate::{Client, ConnectionConfig, Error, Result, ORDWR, OREAD};
 
 const CONNECTION_SERVER_PATH: &str = "/cs";
 const MAX_CONNECTION_DESCRIPTOR_BYTES: u32 = 64 * 1024;
@@ -133,8 +133,102 @@ impl ResolvedPath {
         self.target.connect(timeout)
     }
 
+    /// Reads the resolved file over one direct service session.
+    ///
+    /// Resolution and service traffic remain separate: the caller retains the
+    /// resolver client, while this method owns and closes only the direct
+    /// service connection.
+    pub fn read_timeout(
+        &self,
+        connect_timeout: Duration,
+        request_timeout: Duration,
+        max_response_bytes: u32,
+    ) -> Result<Vec<u8>> {
+        validate_direct_operation(connect_timeout, request_timeout, max_response_bytes)?;
+        let client = self.connect(connect_timeout)?;
+        let result = (|| {
+            let mut fid = client.open_path_timeout(self.service_path(), OREAD, request_timeout)?;
+            let response = fid.read_full_timeout(0, max_response_bytes, request_timeout)?;
+            fid.close()?;
+            Ok(response)
+        })();
+        finish_direct_operation(client, result)
+    }
+
+    /// Performs one same-fid RPC over one direct service session.
+    ///
+    /// The request must be accepted in full. The returned response is bounded
+    /// by `max_response_bytes`, and the direct service session is closed before
+    /// this method returns.
+    pub fn rpc_timeout(
+        &self,
+        request: &[u8],
+        connect_timeout: Duration,
+        request_timeout: Duration,
+        max_response_bytes: u32,
+    ) -> Result<Vec<u8>> {
+        validate_direct_operation(connect_timeout, request_timeout, max_response_bytes)?;
+        let client = self.connect(connect_timeout)?;
+        let result = (|| {
+            let mut fid = client.open_path_timeout(self.service_path(), ORDWR, request_timeout)?;
+            let written = fid.write_timeout(0, request, request_timeout)?;
+            if usize::try_from(written).ok() != Some(request.len()) {
+                return Err(Error::new(
+                    libc::EIO,
+                    format!(
+                        "resolved rpc accepted {written} of {} request bytes",
+                        request.len()
+                    ),
+                ));
+            }
+            let response = fid.read_full_timeout(0, max_response_bytes, request_timeout)?;
+            fid.close()?;
+            Ok(response)
+        })();
+        finish_direct_operation(client, result)
+    }
+
     pub fn into_parts(self) -> (ResolvedTarget, String) {
         (self.target, self.service_path)
+    }
+}
+
+fn validate_direct_operation(
+    connect_timeout: Duration,
+    request_timeout: Duration,
+    max_response_bytes: u32,
+) -> Result<()> {
+    if connect_timeout.is_zero() {
+        return Err(Error::new(
+            libc::EINVAL,
+            "resolved service connect timeout must be nonzero",
+        ));
+    }
+    if request_timeout.is_zero() {
+        return Err(Error::new(
+            libc::EINVAL,
+            "resolved service request timeout must be nonzero",
+        ));
+    }
+    if max_response_bytes == 0 {
+        return Err(Error::new(
+            libc::EINVAL,
+            "resolved service response bound must be nonzero",
+        ));
+    }
+    Ok(())
+}
+
+fn finish_direct_operation(client: Client, result: Result<Vec<u8>>) -> Result<Vec<u8>> {
+    match result {
+        Ok(response) => {
+            client.shutdown()?;
+            Ok(response)
+        }
+        Err(error) => {
+            let _ = client.shutdown();
+            Err(error)
+        }
     }
 }
 

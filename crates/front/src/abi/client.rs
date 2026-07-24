@@ -1,5 +1,5 @@
 use r9p::blocking::Client;
-use session::{AuthorityBindings, Client as SessionClient, ConnectionConfig, ORDWR, OREAD};
+use session::{AuthorityBindings, Client as SessionClient, ConnectionConfig};
 use std::{ffi::c_char, path::PathBuf, time::Duration};
 
 use super::{bytes_arg, clear_last_error, set_last_error, str_arg, FrontAbi, INVALID, OK};
@@ -311,21 +311,7 @@ fn resolved_rpc(
     let authorities = authority_bindings(authority_boundary, service_auth_config)?;
     let resolved =
         resolver.resolve_namespace_path_timeout(namespace_path, msize, &authorities, timeout)?;
-    let client = resolved.connect(timeout)?;
-    let mut fid = client.open_path_timeout(resolved.service_path(), ORDWR, timeout)?;
-    let written = fid.write_timeout(0, request, timeout)?;
-    if usize::try_from(written).ok() != Some(request.len()) {
-        return Err(session::Error::new(
-            libc::EIO,
-            format!(
-                "resolved rpc accepted {written} of {} request bytes",
-                request.len()
-            ),
-        ));
-    }
-    let response = fid.read_full_timeout(0, MAX_RESOLVED_RESPONSE_BYTES, timeout)?;
-    fid.close()?;
-    client.shutdown()?;
+    let response = resolved.rpc_timeout(request, timeout, timeout, MAX_RESOLVED_RESPONSE_BYTES)?;
     resolver.shutdown()?;
     Ok(response)
 }
@@ -356,11 +342,7 @@ fn resolved_read(
     let authorities = authority_bindings(authority_boundary, service_auth_config)?;
     let resolved =
         resolver.resolve_namespace_path_timeout(namespace_path, msize, &authorities, timeout)?;
-    let client = resolved.connect(timeout)?;
-    let mut fid = client.open_path_timeout(resolved.service_path(), OREAD, timeout)?;
-    let response = fid.read_full_timeout(0, MAX_RESOLVED_RESPONSE_BYTES, timeout)?;
-    fid.close()?;
-    client.shutdown()?;
+    let response = resolved.read_timeout(timeout, timeout, MAX_RESOLVED_RESPONSE_BYTES)?;
     resolver.shutdown()?;
     Ok(response)
 }

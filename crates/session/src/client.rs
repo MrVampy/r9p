@@ -152,12 +152,39 @@ impl Client {
             .map_err(client_error)
     }
 
+    pub fn read_delimited_timeout(
+        &self,
+        fid: Fid,
+        offset: u64,
+        count: u32,
+        delimiter: u8,
+        timeout: Duration,
+    ) -> Result<Vec<u8>> {
+        self.inner
+            .read_delimited_timeout(fid, offset, count, delimiter, timeout)
+            .map_err(client_error)
+    }
+
     /// Reads until the requested byte bound, EOF, or transport failure without
     /// imposing a response deadline. This is intended for namespace files
     /// whose read itself is the blocking subscription contract.
     pub fn read_full(&self, fid: Fid, offset: u64, count: u32) -> Result<Vec<u8>> {
         self.inner
             .read_full(fid, offset, count)
+            .map_err(client_error)
+    }
+
+    /// Reads one bounded delimiter-terminated record without imposing a
+    /// response deadline or issuing an EOF probe after the delimiter.
+    pub fn read_delimited(
+        &self,
+        fid: Fid,
+        offset: u64,
+        count: u32,
+        delimiter: u8,
+    ) -> Result<Vec<u8>> {
+        self.inner
+            .read_delimited(fid, offset, count, delimiter)
             .map_err(client_error)
     }
 

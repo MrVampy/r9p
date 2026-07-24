@@ -51,8 +51,34 @@ impl OpenedFid {
             .read_full_timeout(self.required_fid()?, offset, count, timeout)
     }
 
+    pub fn read_delimited_timeout(
+        &mut self,
+        offset: u64,
+        count: u32,
+        delimiter: u8,
+        timeout: Duration,
+    ) -> Result<Vec<u8>> {
+        self.client.read_delimited_timeout(
+            self.required_fid()?,
+            offset,
+            count,
+            delimiter,
+            timeout,
+        )
+    }
+
     pub fn read_full(&mut self, offset: u64, count: u32) -> Result<Vec<u8>> {
         self.client.read_full(self.required_fid()?, offset, count)
+    }
+
+    pub fn read_delimited(
+        &mut self,
+        offset: u64,
+        count: u32,
+        delimiter: u8,
+    ) -> Result<Vec<u8>> {
+        self.client
+            .read_delimited(self.required_fid()?, offset, count, delimiter)
     }
 
     pub fn write_timeout(&mut self, offset: u64, data: &[u8], timeout: Duration) -> Result<u32> {

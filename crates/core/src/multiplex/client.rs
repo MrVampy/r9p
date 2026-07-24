@@ -3,7 +3,7 @@ use crate::{
     client::{Client as ProtocolClient, ClientResponse, Completion, Op},
     client_support::{
         checked_advance_offset, checked_read_data, checked_write_count, io_error, op_fid,
-        protocol_error, unexpected, write_in_chunks,
+        protocol_error, read_delimited_with, unexpected, write_in_chunks,
     },
     codec,
     error::{Error, Result},
@@ -481,6 +481,39 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
             remaining = remaining.saturating_sub(n);
         }
         Ok(out)
+    }
+
+    /// Reads one bounded delimiter-terminated record without probing for EOF
+    /// after the delimiter has arrived.
+    ///
+    /// The delimiter is included in the returned bytes. A response chunk that
+    /// contains bytes after the first delimiter is rejected because this
+    /// stateless operation cannot retain them for a later record.
+    pub fn read_delimited(
+        &self,
+        fid: Fid,
+        offset: u64,
+        count: u32,
+        delimiter: u8,
+    ) -> Result<Vec<u8>> {
+        read_delimited_with(offset, count, delimiter, |offset, remaining| {
+            self.read(fid, offset, remaining)
+        })
+    }
+
+    /// Bounded variant of [`Self::read_delimited`] with a deadline for each
+    /// underlying 9P read.
+    pub fn read_delimited_timeout(
+        &self,
+        fid: Fid,
+        offset: u64,
+        count: u32,
+        delimiter: u8,
+        timeout: Duration,
+    ) -> Result<Vec<u8>> {
+        read_delimited_with(offset, count, delimiter, |offset, remaining| {
+            self.read_timeout(fid, offset, remaining, timeout)
+        })
     }
 
     pub fn write(&self, fid: Fid, offset: u64, data: &[u8]) -> Result<u32> {

@@ -330,9 +330,7 @@ fn address(ip: Ipv4Addr, port: u16) -> SocketAddr {
     SocketAddr::new(IpAddr::V4(ip), port)
 }
 
-fn tcp_proxy_endpoint(
-    broker: &ReverseBroker,
-) -> Result<SocketAddr, Box<dyn std::error::Error>> {
+fn tcp_proxy_endpoint(broker: &ReverseBroker) -> Result<SocketAddr, Box<dyn std::error::Error>> {
     broker
         .proxy_endpoint()
         .as_tcp()
@@ -388,9 +386,10 @@ impl ConnectionHandler for IdentityHandler {
                 }
                 Ok(ServerCompletion::Walk { qids })
             }
-            ServerRequestKind::Open { qid, .. } => {
-                Ok(ServerCompletion::Open(OpenFile { qid: *qid, iounit: 0 }))
-            }
+            ServerRequestKind::Open { qid, .. } => Ok(ServerCompletion::Open(OpenFile {
+                qid: *qid,
+                iounit: 0,
+            })),
             ServerRequestKind::Read {
                 qid, offset, count, ..
             } if *qid == identity => {
@@ -406,16 +405,12 @@ impl ConnectionHandler for IdentityHandler {
                 )))
             }
             ServerRequestKind::Clunk { .. } => Ok(ServerCompletion::Clunk),
-            ServerRequestKind::Stat { qid, .. } if *qid == root => {
-                Ok(ServerCompletion::Stat {
-                    stat: Stat::new(".", *qid, r9p::qid::DMDIR | 0o500),
-                })
-            }
-            ServerRequestKind::Stat { qid, .. } if *qid == identity => {
-                Ok(ServerCompletion::Stat {
-                    stat: Stat::new("identity", *qid, 0o400),
-                })
-            }
+            ServerRequestKind::Stat { qid, .. } if *qid == root => Ok(ServerCompletion::Stat {
+                stat: Stat::new(".", *qid, r9p::qid::DMDIR | 0o500),
+            }),
+            ServerRequestKind::Stat { qid, .. } if *qid == identity => Ok(ServerCompletion::Stat {
+                stat: Stat::new("identity", *qid, 0o400),
+            }),
             _ => Err(r9p::Error::from_static(EPERM)),
         }
     }

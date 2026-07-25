@@ -2,9 +2,8 @@ use crate::{
     error::{Error, Result},
     message::{
         RMessage, TMessage, MAXWELEM, RATTACH, RAUTH, RCLUNK, RCREATE, RERROR, RFLUSH, ROPEN,
-        RREAD, RREFERRALS, RREMOVE, RSTAT, RVERSION, RWALK, RWRITE, RWSTAT, TATTACH, TAUTH,
-        TCLUNK, TCREATE, TFLUSH, TOPEN, TREAD, TREFERRALS, TREMOVE, TSTAT, TVERSION, TWALK,
-        TWRITE, TWSTAT,
+        RREAD, RREFERRALS, RREMOVE, RSTAT, RVERSION, RWALK, RWRITE, RWSTAT, TATTACH, TAUTH, TCLUNK,
+        TCREATE, TFLUSH, TOPEN, TREAD, TREFERRALS, TREMOVE, TSTAT, TVERSION, TWALK, TWRITE, TWSTAT,
     },
     referral::NamespaceReferral,
     stat::{push_qid, push_string, push_u16, push_u32, push_u64, Cursor, Stat},

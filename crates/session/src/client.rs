@@ -3,8 +3,8 @@ use crate::{
     Error, Result,
 };
 use r9p::{
-    codec::Variant, fid::Fid, multiplex::MultiplexedClient, qid::Qid,
-    referral::NamespaceReferral, stat::Stat,
+    codec::Variant, fid::Fid, multiplex::MultiplexedClient, qid::Qid, referral::NamespaceReferral,
+    stat::Stat,
 };
 use std::{
     thread,

@@ -572,10 +572,9 @@ pub unsafe extern "C" fn r9p_front_serve_tcp_authenticated(
     let Some(abi) = (unsafe { handle.as_ref() }) else {
         return INVALID;
     };
-    let (Some(bind), Some(auth_config_path)) = (
-        unsafe { str_arg(bind, bind_len) },
-        unsafe { str_arg(auth_config_path, auth_config_path_len) },
-    ) else {
+    let (Some(bind), Some(auth_config_path)) = (unsafe { str_arg(bind, bind_len) }, unsafe {
+        str_arg(auth_config_path, auth_config_path_len)
+    }) else {
         return INVALID;
     };
     if auth_config_path.is_empty() {

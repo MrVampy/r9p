@@ -209,10 +209,7 @@ fn plain_version_accepts_period_extensions_not_prefix_collisions() {
 
 #[test]
 fn r9p_extension_is_negotiated_explicitly_and_can_downgrade() {
-    assert_eq!(
-        Variant::R9p.accept(b"9P2000.r9p"),
-        Some(Variant::R9p)
-    );
+    assert_eq!(Variant::R9p.accept(b"9P2000.r9p"), Some(Variant::R9p));
     assert_eq!(Variant::R9p.accept(b"9P2000"), Some(Variant::Plain));
     assert_eq!(
         Variant::R9p.accept_response(b"9P2000"),

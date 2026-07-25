@@ -18,8 +18,8 @@ use r9p::qid::DMDIR;
 use r9p::stat::decode_dir_entries;
 use r9p::{codec, Error};
 use r9p_auth::{authenticate_client, generate_key_pair, write_key_pair, ClientConfig};
-use std::fs;
 use std::ffi::c_char;
+use std::fs;
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -100,13 +100,8 @@ fn abi_authenticated_serve_binds_transport_principal_to_attach_uname() {
 
     let address = format!("127.0.0.1:{port}");
     let stream = TcpStream::connect(address).expect("connect authenticated front");
-    let stream = authenticate_client(
-        stream,
-        &client_config,
-        "codex",
-        Duration::from_secs(2),
-    )
-    .expect("authenticate front client");
+    let stream = authenticate_client(stream, &client_config, "codex", Duration::from_secs(2))
+        .expect("authenticate front client");
     let mut client =
         Client::connect(stream, "codex", "/", 65_536).expect("attach authenticated front");
     let fid = client.walk_path("/status").expect("walk status");

@@ -305,15 +305,9 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
         self.walk_timeout(fid, &[name.to_vec()], timeout)
     }
 
-    pub fn referrals_timeout(
-        &self,
-        fid: Fid,
-        timeout: Duration,
-    ) -> Result<Vec<NamespaceReferral>> {
+    pub fn referrals_timeout(&self, fid: Fid, timeout: Duration) -> Result<Vec<NamespaceReferral>> {
         if !self.variant().supports_referrals() {
-            return Err(Error::from(
-                "server did not negotiate namespace referrals",
-            ));
+            return Err(Error::from("server did not negotiate namespace referrals"));
         }
         let op = {
             let mut protocol = lock(&self.inner.protocol, "lock 9P protocol client")?;

@@ -1,5 +1,5 @@
-use crate::{fid::Fid, qid::Qid, stat::Stat};
 use crate::referral::NamespaceReferral;
+use crate::{fid::Fid, qid::Qid, stat::Stat};
 
 pub type Tag = u16;
 

@@ -461,10 +461,7 @@ impl<T> Server<T> {
             (ServerRequestKind::Wstat { .. }, ServerCompletion::Wstat) => {
                 Ok(RMessage::Wstat { tag })
             }
-            (
-                ServerRequestKind::Referrals { .. },
-                ServerCompletion::Referrals { referrals },
-            ) => {
+            (ServerRequestKind::Referrals { .. }, ServerCompletion::Referrals { referrals }) => {
                 for referral in &referrals {
                     referral.validate()?;
                 }

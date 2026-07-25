@@ -27,7 +27,10 @@ impl NamespaceReferral {
             ("authority_boundary", self.authority_boundary.as_slice()),
         ] {
             validate_nonempty(field, value)?;
-            if value.iter().any(|byte| *byte == 0 || byte.is_ascii_control()) {
+            if value
+                .iter()
+                .any(|byte| *byte == 0 || byte.is_ascii_control())
+            {
                 return Err(Error::from(format!(
                     "namespace referral {field} contains a control byte"
                 )));
@@ -78,7 +81,9 @@ fn validate_absolute_path(field: &str, path: &[u8], allow_root: bool) -> Result<
                 .split(|byte| *byte == b'/')
                 .skip(1)
                 .all(|segment| !segment.is_empty() && segment != b"." && segment != b"..")
-            && !path.iter().any(|byte| *byte == 0 || byte.is_ascii_control())
+            && !path
+                .iter()
+                .any(|byte| *byte == 0 || byte.is_ascii_control())
     };
     if valid {
         Ok(())

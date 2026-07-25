@@ -92,29 +92,26 @@ impl Front {
                 let connection_front = front.clone();
                 let connection_stop = Arc::clone(&accept_stop);
                 let connection_auth = auth.clone();
-                thread::spawn(move || {
-                    match connection_auth {
-                        Some(auth) => {
-                            let Ok(session) =
-                                authenticate_server(stream, &auth, AUTH_HANDSHAKE_TIMEOUT)
-                            else {
-                                return;
-                            };
-                            let session_uname =
-                                Some(session.peer.principal().as_bytes().to_vec());
-                            let _ = serve_front_connection(
-                                &connection_front,
-                                StoppableStream::new(session.stream, connection_stop),
-                                session_uname,
-                            );
-                        }
-                        None => {
-                            let _ = serve_front_connection(
-                                &connection_front,
-                                StoppableStream::new(stream, connection_stop),
-                                None,
-                            );
-                        }
+                thread::spawn(move || match connection_auth {
+                    Some(auth) => {
+                        let Ok(session) =
+                            authenticate_server(stream, &auth, AUTH_HANDSHAKE_TIMEOUT)
+                        else {
+                            return;
+                        };
+                        let session_uname = Some(session.peer.principal().as_bytes().to_vec());
+                        let _ = serve_front_connection(
+                            &connection_front,
+                            StoppableStream::new(session.stream, connection_stop),
+                            session_uname,
+                        );
+                    }
+                    None => {
+                        let _ = serve_front_connection(
+                            &connection_front,
+                            StoppableStream::new(stream, connection_stop),
+                            None,
+                        );
                     }
                 });
             }
@@ -167,11 +164,7 @@ impl<S: FrontServeStream> FrontServeStream for StoppableStream<S> {
     }
 }
 
-fn serve_front_connection<S>(
-    front: &Front,
-    stream: S,
-    session_uname: Option<Vec<u8>>,
-) -> Result<()>
+fn serve_front_connection<S>(front: &Front, stream: S, session_uname: Option<Vec<u8>>) -> Result<()>
 where
     S: FrontServeStream,
 {

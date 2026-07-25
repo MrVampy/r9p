@@ -2,7 +2,7 @@ mod client;
 mod reader;
 mod util;
 
-pub use client::{MultiplexedClient, PendingCall};
+pub use client::{DelimitedRead, MultiplexedClient, PendingCall};
 
 use std::{
     io::{self, Read, Write},
@@ -170,9 +170,7 @@ mod tests {
             client.root_fid(),
             0,
             b"ping\n",
-            0,
-            64,
-            b'\n',
+            DelimitedRead::new(0, 64, b'\n'),
             Duration::from_secs(1),
         )?;
         assert_eq!(written, 5);

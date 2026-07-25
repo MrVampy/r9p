@@ -65,6 +65,23 @@ pub struct PendingCall {
     receiver: Receiver<ReplyResult>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DelimitedRead {
+    offset: u64,
+    count: u32,
+    delimiter: u8,
+}
+
+impl DelimitedRead {
+    pub const fn new(offset: u64, count: u32, delimiter: u8) -> Self {
+        Self {
+            offset,
+            count,
+            delimiter,
+        }
+    }
+}
+
 impl PendingCall {
     pub fn tag(&self) -> Tag {
         self.tag
@@ -601,24 +618,22 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
         fid: Fid,
         write_offset: u64,
         data: &[u8],
-        read_offset: u64,
-        read_count: u32,
-        delimiter: u8,
+        read: DelimitedRead,
         timeout: Duration,
     ) -> Result<(u32, Vec<u8>)> {
         let (written, first) = self.write_then_read_timeout(
             fid,
             write_offset,
             data,
-            read_offset,
-            read_count,
+            read.offset,
+            read.count,
             timeout,
         )?;
         let mut first = Some(first);
         let response = read_delimited_with(
-            read_offset,
-            read_count,
-            delimiter,
+            read.offset,
+            read.count,
+            read.delimiter,
             |offset, remaining| match first.take() {
                 Some(bytes) => Ok(bytes),
                 None => self.read_timeout(fid, offset, remaining, timeout),

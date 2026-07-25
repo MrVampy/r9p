@@ -1,6 +1,9 @@
 use super::direct::DirectClient;
 use crate::{AuthorityBindings, ConnectionConfig, Error, RequestTracker, Result};
-use r9p::{fid::Fid, qid::Qid, referral::NamespaceReferral, stat::Stat, Variant, NOFID};
+use r9p::{
+    fid::Fid, multiplex::DelimitedRead, qid::Qid, referral::NamespaceReferral, stat::Stat, Variant,
+    NOFID,
+};
 use std::{
     collections::BTreeMap,
     str,
@@ -359,9 +362,7 @@ impl Client {
         fid: Fid,
         write_offset: u64,
         data: &[u8],
-        read_offset: u64,
-        read_count: u32,
-        delimiter: u8,
+        read: DelimitedRead,
         timeout: Duration,
     ) -> Result<(u32, Vec<u8>)> {
         let binding = self.binding(fid)?;
@@ -369,9 +370,7 @@ impl Client {
             binding.remote_fid,
             write_offset,
             data,
-            read_offset,
-            read_count,
-            delimiter,
+            read,
             timeout,
         )
     }

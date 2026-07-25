@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use r9p::Fid;
+use r9p::{multiplex::DelimitedRead, Fid};
 
 use crate::{Client, Error, Result};
 
@@ -82,18 +82,14 @@ impl OpenedFid {
         &mut self,
         write_offset: u64,
         data: &[u8],
-        read_offset: u64,
-        read_count: u32,
-        delimiter: u8,
+        read: DelimitedRead,
         timeout: Duration,
     ) -> Result<(u32, Vec<u8>)> {
         self.client.write_then_read_delimited_timeout(
             self.required_fid()?,
             write_offset,
             data,
-            read_offset,
-            read_count,
-            delimiter,
+            read,
             timeout,
         )
     }

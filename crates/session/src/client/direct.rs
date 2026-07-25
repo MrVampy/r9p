@@ -3,7 +3,11 @@ use crate::{
     Error, Result,
 };
 use r9p::{
-    codec::Variant, fid::Fid, multiplex::MultiplexedClient, qid::Qid, referral::NamespaceReferral,
+    codec::Variant,
+    fid::Fid,
+    multiplex::{DelimitedRead, MultiplexedClient},
+    qid::Qid,
+    referral::NamespaceReferral,
     stat::Stat,
 };
 use std::{
@@ -240,9 +244,7 @@ impl DirectClient {
         fid: Fid,
         write_offset: u64,
         data: &[u8],
-        read_offset: u64,
-        read_count: u32,
-        delimiter: u8,
+        read: DelimitedRead,
         timeout: Duration,
     ) -> Result<(u32, Vec<u8>)> {
         self.inner
@@ -250,9 +252,7 @@ impl DirectClient {
                 fid,
                 write_offset,
                 data,
-                read_offset,
-                read_count,
-                delimiter,
+                read,
                 timeout,
             )
             .map_err(client_error)

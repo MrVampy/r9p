@@ -192,6 +192,18 @@ impl Client {
         })
     }
 
+    pub fn walk_path_timeout(&self, path: &str, timeout: Duration) -> Result<Fid> {
+        let namespace_path = parse_namespace_path(path.as_bytes())?;
+        let target = self.routed_target(&namespace_path, timeout)?;
+        let remote_fid = walk_remote_timeout(&target, timeout)?;
+        self.allocate_binding(FidBinding {
+            client: target.client,
+            remote_fid,
+            namespace_path,
+            route_mount: target.route_mount,
+        })
+    }
+
     pub fn open(&self, fid: Fid, mode: u8) -> Result<Qid> {
         let binding = self.binding(fid)?;
         binding.client.open(binding.remote_fid, mode)

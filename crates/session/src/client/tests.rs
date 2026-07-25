@@ -219,19 +219,20 @@ fn ordinary_namespace_operations_cross_referrals_transparently() {
     .expect("namespace client should connect");
     assert_eq!(client.variant(), Variant::R);
 
-    let fid = client
-        .walk_path("/sources/x/value")
-        .expect("walk should route directly to the referred service");
-    client
-        .open(fid, r9p::OREAD)
-        .expect("referred file should open");
     assert_eq!(
         client
-            .read_full(fid, 0, 8192)
-            .expect("referred file should read"),
+            .read_path_timeout(
+                "/sources/x/value",
+                8192,
+                Duration::from_secs(1)
+            )
+            .expect("bounded path read should route directly to the referred service"),
         b"direct-service-value"
     );
-    client.clunk(fid).expect("referred fid should clunk");
+    let stat = client
+        .stat_path_timeout("/sources/x/value", Duration::from_secs(1))
+        .expect("bounded path stat should reuse the direct service");
+    assert_eq!(stat.name, b"value");
     client.shutdown().expect("namespace should shut down");
 
     drop(client);

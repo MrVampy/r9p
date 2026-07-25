@@ -5,5 +5,6 @@ mod paths;
 mod tests;
 
 pub use namespace::Client;
+pub(crate) use namespace::parse_namespace_path;
 
 mod namespace;

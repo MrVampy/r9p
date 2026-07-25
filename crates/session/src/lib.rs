@@ -24,3 +24,11 @@ pub use opened_fid::OpenedFid;
 pub use r9p::{ORDWR, OREAD, OTRUNC, OWRITE};
 pub use request::{with_fuse_unique, RequestTracker};
 pub use slot::ClientSlot;
+
+/// Parses a canonical namespace path into 9P path elements.
+///
+/// Both absolute and root-relative spellings are accepted. Empty elements,
+/// trailing slashes, NUL bytes, and `.` or `..` elements are rejected.
+pub fn parse_namespace_path(path: &[u8]) -> Result<Vec<Vec<u8>>> {
+    client::parse_namespace_path(path)
+}

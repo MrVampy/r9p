@@ -76,6 +76,8 @@ fn parses_final_mount_options() {
             "--entry-timeout".to_string(),
             "2".to_string(),
             "--allow-other".to_string(),
+            "--source".to_string(),
+            "/hosts/tuxedo/projects".to_string(),
             "--msize".to_string(),
             "8192".to_string(),
             "127.0.0.1:564".to_string(),
@@ -87,6 +89,7 @@ fn parses_final_mount_options() {
     assert_eq!(config.uname, "glenda");
     assert_eq!(config.aname, "/");
     assert_eq!(config.address, "127.0.0.1:564");
+    assert_eq!(config.source_path, "/hosts/tuxedo/projects");
     assert_eq!(config.mountpoint, "/tmp/r9p-mount");
     assert_eq!(config.request_timeout, Duration::from_millis(250));
     assert_eq!(config.lookup_timeout, Duration::from_millis(500));
@@ -154,6 +157,7 @@ fn mount_defaults_use_short_positive_kernel_cache() {
     assert_eq!(config.attr_timeout, fuse::DEFAULT_ATTR_TIMEOUT);
     assert_eq!(config.entry_timeout, fuse::DEFAULT_ENTRY_TIMEOUT);
     assert_eq!(config.connect_timeout, Duration::from_secs(30));
+    assert_eq!(config.source_path, "/");
     assert!(!config.allow_other);
 }
 

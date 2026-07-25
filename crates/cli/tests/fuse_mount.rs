@@ -100,6 +100,60 @@ fn fuse_mount_handles_parallel_recursive_reads() -> io::Result<()> {
 
 #[test]
 #[ignore = "host-gated: requires /dev/fuse, fusermount, and user mount permission"]
+fn fuse_mount_selects_namespace_subtree_as_its_root() -> io::Result<()> {
+    if !host_can_run_fuse() {
+        return Ok(());
+    }
+
+    let root = unique_temp_dir("r9p-fuse-source-export")?;
+    let mountpoint = unique_temp_dir("r9p-fuse-source-mount")?;
+    let descriptor = root.with_extension("desc");
+    seed_tree(&root)?;
+
+    let mut export = ChildGuard::spawn(
+        Command::new(r9p_bin())
+            .arg("export")
+            .arg("--bind")
+            .arg("127.0.0.1:0")
+            .arg("--descriptor-file")
+            .arg(&descriptor)
+            .arg(&root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )?;
+    let endpoint = wait_for_descriptor_endpoint(&descriptor)?;
+
+    let mut mount = ChildGuard::spawn(
+        Command::new(r9p_bin())
+            .arg("mount")
+            .arg("--source")
+            .arg("/dir-0")
+            .arg("--request-timeout")
+            .arg("1")
+            .arg(endpoint)
+            .arg(&mountpoint)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )?;
+    wait_for_mounted_file(&mountpoint.join("file-0.txt"))?;
+    if mountpoint.join("dir-1").exists() {
+        return Err(io::Error::other(
+            "mount exposed a sibling outside the selected source subtree",
+        ));
+    }
+
+    unmount(&mountpoint);
+    mount.wait_or_kill()?;
+    export.kill();
+    export.wait_or_kill()?;
+    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(&mountpoint);
+    let _ = fs::remove_file(descriptor);
+    Ok(())
+}
+
+#[test]
+#[ignore = "host-gated: requires /dev/fuse, fusermount, and user mount permission"]
 fn fuse_mount_supports_create_truncate_and_offset_writes() -> io::Result<()> {
     if !host_can_run_fuse() {
         return Ok(());

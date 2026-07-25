@@ -7,8 +7,8 @@ use super::util::{
 };
 use super::wire::{FOPEN_CACHE_DIR, FOPEN_DIRECT_IO, FOPEN_KEEP_CACHE};
 use super::{
-    change_feed, default_congestion_threshold, normalize_config, Config, DEFAULT_MAX_BACKGROUND,
-    DEFAULT_MAX_WORKERS,
+    change_feed, default_congestion_threshold, normalize_config, parse_source_path, Config,
+    DEFAULT_MAX_BACKGROUND, DEFAULT_MAX_WORKERS,
 };
 use crate::error::Error;
 use crate::node::DirEntry;
@@ -178,6 +178,32 @@ fn default_congestion_threshold_matches_kernel_ratio() {
 }
 
 #[test]
+fn mount_source_path_is_absolute_and_canonical() {
+    assert_eq!(
+        parse_source_path("/hosts/tuxedo/projects").expect("canonical source path"),
+        vec![
+            b"hosts".to_vec(),
+            b"tuxedo".to_vec(),
+            b"projects".to_vec()
+        ]
+    );
+    assert!(parse_source_path("/").expect("root source path").is_empty());
+    for invalid in [
+        "hosts/tuxedo",
+        "",
+        "/hosts//tuxedo",
+        "/hosts/./tuxedo",
+        "/hosts/../tuxedo",
+        "/hosts/tuxedo/",
+    ] {
+        assert!(
+            parse_source_path(invalid).is_err(),
+            "{invalid:?} should be rejected"
+        );
+    }
+}
+
+#[test]
 fn init_does_not_claim_exportfs_stale_handle_support() {
     const FUSE_EXPORT_SUPPORT_BIT: u32 = 1 << 4;
 
@@ -197,6 +223,7 @@ fn mount_config_normalization_keeps_worker_and_background_limits_nonzero() {
         address: "127.0.0.1:564".to_string(),
         auth_config: None,
         authorities: session::AuthorityBindings::new(),
+        source_path: "/".to_string(),
         mountpoint: "/tmp/r9p-mount".to_string(),
         uname: "codex".to_string(),
         aname: "/".to_string(),

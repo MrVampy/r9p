@@ -22,6 +22,7 @@ pub(super) fn parse_mount_config(global: Config, args: Vec<String>) -> CliResult
         address: String::new(),
         auth_config: global.auth_config,
         authorities: global.authorities,
+        source_path: "/".to_string(),
         mountpoint: String::new(),
         uname: global.uname,
         aname: global.aname,
@@ -63,6 +64,13 @@ pub(super) fn parse_mount_config(global: Config, args: Vec<String>) -> CliResult
         match args[index].as_str() {
             "-D" | "--debug" => config.debug = true,
             "--allow-other" => config.allow_other = true,
+            "--source" => {
+                index += 1;
+                config.source_path = args
+                    .get(index)
+                    .ok_or_else(|| cli_error("missing mount source path"))?
+                    .clone();
+            }
             "--attr-timeout" => {
                 index += 1;
                 config.attr_timeout = parse_duration(args.get(index), "missing attr timeout")?;
@@ -310,7 +318,7 @@ fn parse_u16_limit(
 
 fn mount_usage(code: i32) -> ! {
     eprintln!(
-        "usage: r9p mount [--aname aname] [--uname uname] [--msize msize] [--allow-other] [--attr-timeout seconds] [--entry-timeout seconds] [--request-timeout seconds] [--connect-timeout seconds] [--lookup-timeout seconds] [--read-timeout seconds] [--write-timeout seconds] [--mutation-timeout seconds] [--control-timeout seconds] [--interrupt-timeout seconds] [--max-workers count] [--max-background count] [--congestion-threshold count] [--diagnostics-file path] [--diagnostics-capacity count] [--status-file path] [--change-feed namespace-path] [--change-feed-stream namespace-path] [--change-feed-cursor-template path-with-{{event_id}}] [--change-feed-scope scope] [--change-feed-poll-interval seconds] [--change-feed-backpressure count] endpoint mountpoint\nusage: r9p mount ensure|status|stop --mountpoint path [--unit name --unit-scope user|system] [--status-file path] [--expect-endpoint endpoint] [--expect-change-feed path] [--expect-status-file path] [--attempts count] [-- mount args...]"
+        "usage: r9p mount [--source namespace-path] [--aname aname] [--uname uname] [--msize msize] [--allow-other] [--attr-timeout seconds] [--entry-timeout seconds] [--request-timeout seconds] [--connect-timeout seconds] [--lookup-timeout seconds] [--read-timeout seconds] [--write-timeout seconds] [--mutation-timeout seconds] [--control-timeout seconds] [--interrupt-timeout seconds] [--max-workers count] [--max-background count] [--congestion-threshold count] [--diagnostics-file path] [--diagnostics-capacity count] [--status-file path] [--change-feed namespace-path] [--change-feed-stream namespace-path] [--change-feed-cursor-template path-with-{{event_id}}] [--change-feed-scope scope] [--change-feed-poll-interval seconds] [--change-feed-backpressure count] endpoint mountpoint\nusage: r9p mount ensure|status|stop --mountpoint path [--unit name --unit-scope user|system] [--status-file path] [--expect-endpoint endpoint] [--expect-change-feed path] [--expect-status-file path] [--attempts count] [-- mount args...]"
     );
     std::process::exit(code);
 }

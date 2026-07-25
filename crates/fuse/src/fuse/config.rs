@@ -1,4 +1,7 @@
-use crate::diagnostics::DEFAULT_DIAGNOSTICS_CAPACITY;
+use crate::{
+    diagnostics::DEFAULT_DIAGNOSTICS_CAPACITY,
+    error::{Error, Result},
+};
 use std::{path::PathBuf, time::Duration};
 
 use super::change_feed;
@@ -18,6 +21,7 @@ pub struct Config {
     pub address: String,
     pub auth_config: Option<PathBuf>,
     pub authorities: session::AuthorityBindings,
+    pub source_path: String,
     pub mountpoint: String,
     pub uname: String,
     pub aname: String,
@@ -59,6 +63,16 @@ impl Config {
             authorities: self.authorities.clone(),
         }
     }
+}
+
+pub(super) fn parse_source_path(path: &str) -> Result<Vec<Vec<u8>>> {
+    if !path.starts_with('/') {
+        return Err(Error::new(
+            libc::EINVAL,
+            format!("mount source path must be absolute: {path}"),
+        ));
+    }
+    Ok(session::parse_namespace_path(path.as_bytes())?)
 }
 
 pub(super) fn normalize_config(config: &mut Config) {

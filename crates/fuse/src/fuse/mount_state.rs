@@ -19,7 +19,56 @@ use super::{
     wire, R9pFuse,
 };
 
+pub(super) fn source_binding(
+    client: &Client,
+    source_path: &[Vec<u8>],
+    timeout: Duration,
+) -> Result<(r9p::fid::Fid, Stat)> {
+    let fid = if source_path.is_empty() {
+        client.root_fid()
+    } else {
+        client.walk_timeout(client.root_fid(), source_path, timeout)?
+    };
+    match client.stat_timeout(fid, timeout) {
+        Ok(stat) => Ok((fid, stat)),
+        Err(error) => {
+            if !source_path.is_empty() {
+                let _ = client.clunk_timeout(fid, timeout);
+            }
+            Err(error.into())
+        }
+    }
+}
+
 impl R9pFuse {
+    pub(in crate::fuse) fn path_from_source(&self, relative: &[Vec<u8>]) -> Vec<Vec<u8>> {
+        let mut path = Vec::with_capacity(self.source_path.len() + relative.len());
+        path.extend(self.source_path.iter().cloned());
+        path.extend(relative.iter().cloned());
+        path
+    }
+
+    pub(in crate::fuse) fn source_binding(
+        &self,
+        client: &Client,
+        timeout: Duration,
+    ) -> Result<(r9p::fid::Fid, Stat)> {
+        source_binding(client, &self.source_path, timeout)
+    }
+
+    pub(in crate::fuse) fn walk_from_source(
+        &self,
+        client: &Client,
+        relative: &[Vec<u8>],
+        timeout: Duration,
+    ) -> Result<r9p::fid::Fid> {
+        let path = self.path_from_source(relative);
+        if path.is_empty() {
+            return Ok(client.clone_fid_timeout(client.root_fid(), timeout)?);
+        }
+        Ok(client.walk_timeout(client.root_fid(), &path, timeout)?)
+    }
+
     pub(in crate::fuse) fn entry_out(
         &self,
         nodeid: u64,
@@ -67,7 +116,7 @@ impl R9pFuse {
                 Ok((client, fid))
             }
             _ => {
-                let fid = client.walk_timeout(client.root_fid(), &path, self.lookup_timeout())?;
+                let fid = self.walk_from_source(&client, &path, self.lookup_timeout())?;
                 let stat = client.stat_timeout(fid, self.lookup_timeout())?;
                 let old_fid = self.nodes()?.replace_binding(nodeid, fid, stat)?;
                 if self.config.debug {
@@ -91,7 +140,7 @@ impl R9pFuse {
             let nodes = self.nodes()?;
             nodes.node(nodeid)?.path.clone()
         };
-        Ok(client.walk_timeout(client.root_fid(), &path, timeout)?)
+        self.walk_from_source(client, &path, timeout)
     }
 
     pub(in crate::fuse) fn fresh_child_fid(
@@ -105,7 +154,7 @@ impl R9pFuse {
             let nodes = self.nodes()?;
             nodes.child_path(parent_nodeid, name)?
         };
-        Ok(client.walk_timeout(client.root_fid(), &path, timeout)?)
+        self.walk_from_source(client, &path, timeout)
     }
 
     pub(in crate::fuse) fn cached_node_stat_if_fresh(&self, nodeid: u64) -> Result<Option<Stat>> {

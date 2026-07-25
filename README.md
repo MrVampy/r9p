@@ -112,7 +112,7 @@ r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] rm path...
 r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] create path...
 r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] mkdir path...
 r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] con [-r] path
-r9p mount [--uname uname] [--aname aname] [--attr-timeout seconds] [--entry-timeout seconds] [--request-timeout seconds] [--lookup-timeout seconds] [--read-timeout seconds] [--write-timeout seconds] [--mutation-timeout seconds] [--control-timeout seconds] [--interrupt-timeout seconds] [--max-workers count] [--max-background count] [--congestion-threshold count] [--diagnostics-file path] [--diagnostics-capacity count] endpoint mountpoint
+r9p mount [--source namespace-path] [--uname uname] [--aname aname] [--attr-timeout seconds] [--entry-timeout seconds] [--request-timeout seconds] [--lookup-timeout seconds] [--read-timeout seconds] [--write-timeout seconds] [--mutation-timeout seconds] [--control-timeout seconds] [--interrupt-timeout seconds] [--max-workers count] [--max-background count] [--congestion-threshold count] [--diagnostics-file path] [--diagnostics-capacity count] endpoint mountpoint
 r9p mount ensure|status|stop --mountpoint path [--unit name --unit-scope user|system] [--status-file path] [--expect-endpoint endpoint] [--expect-change-feed path] [--expect-status-file path] [--attempts count] [-- mount args...]
 r9p serve [--bind address] [--max-fids count] [--writable] root
 r9p export [--bind address] [--max-fids count] [--writable] [--descriptor machine] [--descriptor-file path] [--auth-config path] [--descriptor-field key=value] root
@@ -239,6 +239,11 @@ reused; expired unconnected referrals are refreshed through the root. Ordinary
 client, CLI, FUSE, front ABI, and BEAM operations continue to use namespace
 paths and fids. They do not resolve a public control path or relay service bytes
 through the root.
+
+`r9p mount --source /namespace/subtree ENDPOINT MOUNTPOINT` presents the
+selected ordinary namespace subtree as the local FUSE root. Referral selection,
+direct connection establishment, reconnect, and path rebinding remain internal
+to the r9p client. Omitting `--source` selects `/`.
 
 Referrals carry portable authority names, never local credential paths. The
 caller binds an authenticated boundary such as `p9any:noise-ik@agents` to an

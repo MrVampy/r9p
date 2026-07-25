@@ -714,7 +714,7 @@ fn apply_walk(start: &[Vec<u8>], names: &[Vec<u8>]) -> Result<Vec<Vec<u8>>> {
     Ok(path)
 }
 
-fn parse_namespace_path(path: &[u8]) -> Result<Vec<Vec<u8>>> {
+pub(crate) fn parse_namespace_path(path: &[u8]) -> Result<Vec<Vec<u8>>> {
     if path == b"/" {
         return Ok(Vec::new());
     }

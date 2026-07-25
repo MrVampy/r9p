@@ -11,6 +11,7 @@ use session::control::{ControlConfig, ControlRuntime};
 #[derive(Debug, Clone)]
 pub(crate) struct SessionMountConfig {
     mountpoint: Option<PathBuf>,
+    source_path: String,
     status_path: Option<PathBuf>,
     diagnostics_path: Option<PathBuf>,
     attr_timeout: Duration,
@@ -19,6 +20,8 @@ pub(crate) struct SessionMountConfig {
 
 pub(crate) fn take_session_mount_config(args: &mut Vec<String>) -> CliResult<SessionMountConfig> {
     let mountpoint = take_optional_value(args, "--mount")?.map(PathBuf::from);
+    let source_path =
+        take_optional_value(args, "--mount-source")?.unwrap_or_else(|| "/".to_string());
     let status_path = take_optional_value(args, "--mount-status-file")?.map(PathBuf::from);
     let diagnostics_path =
         take_optional_value(args, "--mount-diagnostics-file")?.map(PathBuf::from);
@@ -32,6 +35,7 @@ pub(crate) fn take_session_mount_config(args: &mut Vec<String>) -> CliResult<Ses
         .unwrap_or(fuse::DEFAULT_ENTRY_TIMEOUT);
     Ok(SessionMountConfig {
         mountpoint,
+        source_path,
         status_path,
         diagnostics_path,
         attr_timeout,
@@ -74,6 +78,7 @@ fn mount_config(
         address: control.address.clone(),
         auth_config: control.auth_config.clone(),
         authorities: control.authorities.clone(),
+        source_path: mount.source_path.clone(),
         mountpoint: mountpoint.to_string_lossy().into_owned(),
         uname: control.uname.clone(),
         aname: control.aname.clone(),

@@ -255,8 +255,8 @@ impl R9pFuse {
             tracker,
             self.config.connect_timeout,
         )?;
-        let root_fid = client.root_fid();
-        let root_stat = client.stat_timeout(root_fid, self.config.lookup_timeout)?;
+        let (root_fid, root_stat) =
+            self.source_binding(&client, self.config.lookup_timeout)?;
         let lazy_rebind_count = {
             let mut nodes = self.nodes()?;
             let stale = nodes
@@ -320,8 +320,8 @@ impl R9pFuse {
         }
         if nodeid == ROOT_NODEID {
             let client = self.client.snapshot()?;
-            let root_fid = client.root_fid();
-            let stat = client.stat_timeout(root_fid, self.config.lookup_timeout)?;
+            let (root_fid, stat) =
+                self.source_binding(&client, self.config.lookup_timeout)?;
             let old_fid = self.nodes()?.replace_binding(nodeid, root_fid, stat)?;
             if let Some(old_fid) = old_fid {
                 let _ = client.clunk_timeout(old_fid, self.config.control_timeout);
@@ -333,7 +333,7 @@ impl R9pFuse {
             nodes.node(nodeid)?.path.clone()
         };
         let client = self.client.snapshot()?;
-        let fid = client.walk_timeout(client.root_fid(), &path, self.config.lookup_timeout)?;
+        let fid = self.walk_from_source(&client, &path, self.config.lookup_timeout)?;
         let stat = client.stat_timeout(fid, self.config.lookup_timeout)?;
         let old_fid = self.nodes()?.replace_binding(nodeid, fid, stat)?;
         if let Some(old_fid) = old_fid {

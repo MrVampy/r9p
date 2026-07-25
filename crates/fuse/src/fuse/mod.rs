@@ -25,7 +25,7 @@ mod wire;
 mod tests;
 
 use crate::{diagnostics::Diagnostics, error::Result, node::NodeTable};
-use config::normalize_config;
+use config::{normalize_config, parse_source_path};
 use mount::{block_termination_signals, mount_fuse};
 use recovery::ShapeRecovery;
 use session::{feed::FeedEventReceiver, Client, ClientSlot};
@@ -44,6 +44,7 @@ pub use config::{
 pub struct R9pFuse {
     client: ClientSlot,
     nodes: Arc<Mutex<NodeTable>>,
+    source_path: Vec<Vec<u8>>,
     config: Config,
     diagnostics: Diagnostics,
     status: MountStatus,
@@ -76,6 +77,7 @@ impl R9pFuse {
         client: ClientSlot,
         feed_events: Option<FeedEventReceiver>,
     ) -> Result<()> {
+        let source_path = parse_source_path(&config.source_path)?;
         let diagnostics =
             Diagnostics::new(config.diagnostics_capacity, config.diagnostics_path.clone());
         let status = MountStatus::new(config.status_path.clone());
@@ -87,24 +89,23 @@ impl R9pFuse {
             0,
             0,
             format!(
-                "msize={} max_write_payload={} fuse_max_write={}",
+                "source={} msize={} max_write_payload={} fuse_max_write={}",
+                config.source_path,
                 client_snapshot.msize(),
                 client_snapshot.max_write_payload(),
                 wire::DEFAULT_MAX_WRITE
             ),
         );
-        let root_stat =
-            client_snapshot.stat_timeout(client_snapshot.root_fid(), config.lookup_timeout)?;
-        let nodes = Arc::new(Mutex::new(NodeTable::new(
-            client_snapshot.root_fid(),
-            root_stat,
-        )));
+        let (root_fid, root_stat) =
+            mount_state::source_binding(&client_snapshot, &source_path, config.lookup_timeout)?;
+        let nodes = Arc::new(Mutex::new(NodeTable::new(root_fid, root_stat)));
         let uid = unsafe { libc::getuid() };
         let gid = unsafe { libc::getgid() };
         let mut mount = mount_fuse(Path::new(&config.mountpoint), config.allow_other)?;
         let fs = Self {
             client,
             nodes,
+            source_path,
             config,
             diagnostics,
             status,

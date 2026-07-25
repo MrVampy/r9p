@@ -32,30 +32,6 @@ struct SnapshotWalk<'a> {
     cache_reads_enabled: bool,
 }
 
-pub fn snapshot_json(
-    client: &Client,
-    cache: &NamespaceCache,
-    path: &str,
-    depth: usize,
-    timeout: Duration,
-    cache_reads_enabled: bool,
-    response_freshness: &ResponseFreshness,
-) -> Result<String> {
-    let options = SnapshotOptions::default();
-    snapshot_json_with_options(
-        client,
-        cache,
-        SnapshotRequest {
-            path,
-            depth,
-            timeout,
-            options: &options,
-            cache_reads_enabled,
-            response_freshness,
-        },
-    )
-}
-
 pub(super) fn snapshot_json_with_options(
     client: &Client,
     cache: &NamespaceCache,
@@ -98,7 +74,7 @@ pub(super) fn snapshot_json_with_options(
     Ok(out)
 }
 
-pub fn stat_json(
+pub(super) fn stat_json(
     client: &Client,
     cache: &NamespaceCache,
     path: &str,
@@ -130,7 +106,7 @@ pub fn stat_json(
     Ok(out)
 }
 
-pub fn list_json(
+pub(super) fn list_json(
     client: &Client,
     cache: &NamespaceCache,
     path: &str,
@@ -185,7 +161,7 @@ pub fn list_json(
     Ok(out)
 }
 
-pub fn read_json(
+pub(super) fn read_json(
     client: &Client,
     path: &str,
     timeout: Duration,

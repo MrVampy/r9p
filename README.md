@@ -3,7 +3,7 @@
 `r9p` is the reusable Rust 9P library. It owns
 9P2000 wire types, encoding/decoding, fid/tag/session mechanics, and generic
 client/server protocol state. It does not own any particular filesystem,
-editor, Vault, FUSE, socket, async runtime, or transport policy.
+editor, coordinator, FUSE, socket, async runtime, or transport policy.
 
 Current surfaces and consumers:
 
@@ -17,12 +17,12 @@ Current surfaces and consumers:
 - `r9p reverse-broker` and `r9p reverse-export`, an authenticated outbound
   publication posture for a filesystem owner that cannot accept inbound
   connections.
-- `r9p-connection.v1`, the transport-posture-neutral handoff from a service
-  resolver to an ordinary 9P client.
+- `9P2000.R` namespace referrals, which let one caller-local client compose
+  admitted direct service sessions behind ordinary namespace paths.
 - `r9p auth-keygen`, key creation for authenticated remote 9P sessions.
 - Racme serves an Acme-compatible 9P namespace through `r9p`.
-- Vault consumes `r9p` for its runtime listener, one-shot client operations,
-  local FUSE mounts, and peer export descriptors.
+- coordinator consumes `r9p` for its listener, one-shot client operations,
+  local FUSE mounts, and admitted service referrals.
 
 The architectural boundary is deliberately small:
 
@@ -67,19 +67,24 @@ explicit "don't touch" values.
 
 ## Protocol Variants
 
-Plain clients and servers negotiate `9P2000`. The filesystem exporter and
-FUSE session can additionally negotiate `9P2000.r9p-symlink`, a deliberately
-narrow r9p extension. It adds only these semantics:
+Plain clients and servers negotiate `9P2000`. Extension-aware peers negotiate
+`9P2000.R`, the r9p dialect. It adds only these semantics:
 
 - `QTSYMLINK` and `DMSYMLINK` identify symbolic links.
 - Opening and reading a symbolic link returns its target bytes.
+- `Treferrals` and `Rreferrals` return finite admitted direct targets for
+  mounted logical prefixes.
+- The caller-local session client establishes and reuses those direct sessions
+  while callers continue to use ordinary walks, fids, reads, writes, and RPCs.
 - A peer that negotiates plain `9P2000` must not receive symlink qids or stat
   bits.
 
-This is not 9P2000.u. r9p does not claim the 9P2000.u stat extension, numeric
+This is not 9P2000.u or 9P2000.L. r9p does not claim their stat fields, numeric
 identity fields, or error semantics. An extension-capable client accepts a
-server downgrade to plain `9P2000`; symlink metadata after such a downgrade is
-a protocol error. `r9p export` advertises the exact extension in its descriptor.
+server downgrade to plain `9P2000`; symlink metadata and referrals after such a
+downgrade are protocol errors. P9any and Noise authenticate the byte stream
+before version negotiation and are not part of the dialect. `r9p export`
+advertises the exact protocol in its descriptor.
 
 Blocking consumers that require finite transport calls can use
 `r9p::blocking::connect_endpoint_with_timeouts` with `ConnectionTimeouts` for
@@ -119,8 +124,10 @@ r9p auth-keygen --private path --public path
 `-a` accepts `host:port`, `tcp!host!port`, bare hosts defaulting to port 564,
 and `unix!/path/to/socket`. Without `-a`, paths use the plan9port namespace
 shape: `service/subpath` connects to `$NAMESPACE/service` and walks `subpath`.
-`-n` and `-D` are accepted for plan9port command-line compatibility; `r9p`
-uses `NOFID` attach because remote authentication is completed before the 9P
+Repeat `--authority-auth AUTHORITY=ABSOLUTE_CONFIG_PATH` to bind the portable
+authority names in referrals to credentials on the caller's host. `-n` and
+`-D` are accepted for plan9port command-line compatibility; `r9p` uses
+`NOFID` attach because remote authentication is completed before the 9P
 version and attach exchange.
 
 The CLI is a blocking client facade over the reusable library. It is not the
@@ -152,11 +159,11 @@ verification without host-specific scripts. After importing the module, declare
 each key pair and its owner:
 
 ```nix
-services.r9p-session-auth.keys.vault = {
-  privateKeyFile = "/var/lib/r9p-session-auth/vault.key";
-  publicKeyFile = "/var/lib/r9p-session-auth/vault.key.pub";
-  user = "vault-runtime";
-  group = "vault-runtime";
+services.r9p-session-auth.keys.namespace = {
+  privateKeyFile = "/var/lib/r9p-session-auth/namespace.key";
+  publicKeyFile = "/var/lib/r9p-session-auth/namespace.key.pub";
+  user = "namespace-runtime";
+  group = "namespace-runtime";
 };
 ```
 
@@ -165,7 +172,7 @@ A server config maps public keys to the exact 9P usernames they may claim:
 ```text
 format r9p-session-auth.v1
 role server
-domain vault
+domain namespace
 private-key /var/lib/r9p/auth/private
 peer 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef codex
 ```
@@ -175,7 +182,7 @@ A client config pins the server public key:
 ```text
 format r9p-session-auth.v1
 role client
-domain vault
+domain namespace
 private-key /var/lib/r9p/auth/private
 server-key fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
 ```
@@ -201,7 +208,7 @@ exported tree. The filesystem-owning host authenticates outward to a
 `reverse-broker` and serves an ordinary 9P session on every connected stream.
 The broker exposes a loopback-only proxy endpoint and copies bytes between one
 local client and one authenticated reverse stream. It does not parse 9P,
-resolve service names, admit Vault capabilities, or own the exported files.
+resolve service names, admit capabilities, or own the exported files.
 
 The pool and all listener work are bounded. Failed exporter connections use a
 capped exponential retry delay with deterministic worker phasing; successful
@@ -217,17 +224,28 @@ responsibility of the governing namespace. The loopback proxy restriction is
 intentional: exposing another network listener without its own end-to-end
 admission boundary would turn a placement mechanism into an ambient proxy.
 
-### Resolved connections
+### Transparent namespace referrals
 
-`r9p-connection.v1` is the generic machine handoff after a resolver has selected
-a service channel. It carries the service and channel identities, endpoint,
-attach identity, exported root, authority boundary, generation, and finite
-relative validity. Relative validity avoids exporting a resolver's local
-monotonic-clock origin across processes or hosts. It deliberately does not
-carry registry policy or whether the provider reached the endpoint by
-listening or reverse-connecting. Callers must still satisfy the declared
-data-plane authority boundary; receiving a descriptor is not transport
-authentication.
+An admitted root may answer `Treferrals` with `NamespaceReferral` records. Each
+record carries a mounted logical prefix, endpoint, attach identity, exported
+root, portable authority boundary, generation, and finite relative validity.
+These records are protocol mechanism and never appear as files in the logical
+namespace.
+
+`session::Client` asks for referrals after attaching to a `9P2000.R` root,
+selects the longest matching mounted prefix, and lazily establishes the direct
+service session in the caller process. Established sessions are retained and
+reused; expired unconnected referrals are refreshed through the root. Ordinary
+client, CLI, FUSE, front ABI, and BEAM operations continue to use namespace
+paths and fids. They do not resolve a public control path or relay service bytes
+through the root.
+
+Referrals carry portable authority names, never local credential paths. The
+caller binds an authenticated boundary such as `p9any:noise-ik@agents` to an
+absolute local client configuration. Contained boundaries such as loopback,
+Unix sockets, and admitted network classes need no credential file. Receiving
+a referral is not transport authentication, and moving the client to the
+service host does not prove the original caller can reach the endpoint.
 
 `r9p mount` runs a bounded worker pool rather than spawning one OS thread per
 FUSE request. The defaults follow the conservative libfuse/Linux shape:

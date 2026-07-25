@@ -119,9 +119,9 @@ without adding registry semantics.
 
 - A future need for long-lived multi-session stream multiplexing should be
   justified by measurements before adding a framing layer.
-- Generic namespace addressing should resolve listen-backed and reverse-backed
-  services to the same connection descriptor. Admission, lease, revocation,
-  and relay selection belong to that namespace authority; the r9p transport
-  must not absorb them. Descriptor validity must be relative because a
-  resolver's monotonic-clock origin is neither portable nor comparable across
-  processes or hosts.
+- Generic namespace addressing should advertise listen-backed and
+  reverse-backed services through the same `9P2000.R` referral. Admission,
+  lease, revocation, and endpoint selection belong to the namespace authority;
+  the r9p transport must not absorb them. Referral validity is relative because
+  an authority's monotonic-clock origin is neither portable nor comparable
+  across processes or hosts.

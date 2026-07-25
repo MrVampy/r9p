@@ -18,24 +18,24 @@
 - Prefer `crates/fuse/src/` for current Rust FUSE bridge requirements, and use
   retired `r9pfuse` references only as bounded historical comparison when a
   plan explicitly needs lineage.
-- Prefer Vault references for namespace endpoint expectations and operational interop.
+- Prefer coordinator references for governed namespace expectations and operational interop.
 - Treat FUSE sources as bridge references; they do not define 9P semantics.
 
 ## r9p Invariants
 
 - `r9p` owns 9P wire bytes, message types, qids, fids, tags, version negotiation, flush semantics, stat encoding, dirread chunking, and generic client/server protocol state.
-- `r9p` must remain backend-neutral. No Racme, Vault, FUSE, editor, plumber, or host-filesystem semantics belong in the core crate.
+- `r9p` must remain backend-neutral. No Racme, coordinator, FUSE, editor, plumber, or host-filesystem semantics belong in the core crate.
 - `r9p` must remain runtime-neutral at the core. No socket ownership, tokio requirement, thread policy, BEAM port loop, TLS policy, or FUSE lifecycle belongs in the reusable protocol core.
 - Runtime adapters and convenience facades are allowed only when they are clearly layered above the protocol core.
 - Acme-specific behavior belongs in Racme's Acme adapter, not in `r9p`.
 - FUSE/POSIX translation belongs in `crates/fuse`, not in the reusable
   `crates/core` protocol crate.
-- Vault namespace policy, provenance, and admission belong in Vault, not in `r9p`.
+- Namespace policy, provenance, and admission belong in coordinator, not in `r9p`.
 - Do not add compatibility or legacy layers for old extraction paths. Update callers to the intended boundary instead.
 
 ## Boundary Test
 
-For any proposed core feature, ask: would removing Racme, Vault, the FUSE
+For any proposed core feature, ask: would removing Racme, coordinator, the FUSE
 bridge, and the local filesystem exporter still leave this useful to another 9P
 client or server? If yes, it probably belongs in `crates/core`. If no, it
 belongs in the backend, bridge, CLI, exporter, or runtime adapter that needs it.

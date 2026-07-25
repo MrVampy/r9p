@@ -9,7 +9,7 @@ This map defines the local sources agents should inspect before making source-sp
   - Message-size math, read/write payload limits, stat-entry chunking.
 - `crates/core/src/message.rs`
   - T-message and R-message shape.
-  - Tags, `NOTAG`, and protocol variants.
+  - Tags, `NOTAG`, and `Treferrals` or `Rreferrals` message identities.
 - `crates/core/src/fid.rs`
   - Fid lifecycle state, open mode, directory offset, and `NOFID`.
 - `crates/core/src/mode.rs`
@@ -28,10 +28,10 @@ This map defines the local sources agents should inspect before making source-sp
 - `crates/core/src/export_descriptor.rs`
   - Generic `r9p-export.v1` descriptor parsing, validation, and encoding.
   - It carries no service-registration lifecycle or runtime namespace policy.
-- `crates/core/src/connection_descriptor.rs`
-  - Generic `r9p-connection.v1` resolver-to-client handoff.
-  - It records dial facts plus generation and finite validity without owning
-    service registration, admission policy, or connection posture.
+- `crates/core/src/referral.rs`
+  - Generic finite `9P2000.R` namespace referral shape and path rebasing.
+  - Referrals carry admitted dial facts and a portable authority boundary
+    without becoming files in the composed namespace.
 - `crates/auth/src/`
   - P9any provider negotiation, Noise IK authentication, authenticated record
     framing, key material, and typed client/server session configuration.
@@ -48,9 +48,16 @@ This map defines the local sources agents should inspect before making source-sp
     `FilesystemExport` is the local-tree specialization used by the CLI.
 - `crates/core/src/multiplex/`
   - Layered blocking transport facade for concurrent tagged client calls.
-- `crates/session/src/`
-  - Multiplexed session client, retained-fid operations, shared connection
-    shutdown, reconnect classification, and namespace-resolution facade.
+- `crates/session/src/client/`
+  - One logical namespace client over a root session and lazily established
+    direct referral sessions.
+  - Longest-prefix routing, logical-to-remote fid binding, referral refresh,
+    shared request tracking, and caller-local path operations.
+- `crates/session/src/authority.rs`
+  - Caller-local bindings from portable authority boundaries to absolute
+    session authentication configuration paths.
+- `crates/session/src/opened_fid.rs`
+  - Retained-fid operations over the same transparent namespace client.
 - `crates/core/src/stat.rs`
   - 9P stat record shape and mode helpers.
 - `crates/core/tests/memory_tree.rs`
@@ -62,6 +69,8 @@ This map defines the local sources agents should inspect before making source-sp
   - The `r9p` binary and one-shot client command dispatch.
   - `r9p con` retains two fids on one multiplexed 9P connection so stdin and
     stdout remain one logical application session.
+  - Ordinary path commands use the transparent namespace client;
+    `--authority-auth` supplies caller-local authority bindings.
 - `crates/cli/tests/cli_machine.rs`
   - Machine-output and streaming command regression tests.
 - `crates/fuse/src/`
@@ -70,6 +79,11 @@ This map defines the local sources agents should inspect before making source-sp
 - `crates/fs/src/`
   - Local filesystem-backed 9P server adapter used by `r9p serve` and
     `r9p export`; read-only by default with an explicit writable mode.
+- `crates/front/src/abi/client.rs`
+  - Generic front ABI operations over the transparent namespace client.
+- `crates/beam-port/src/lib.rs` and `bindings/gleam/`
+  - BEAM target encoding and caller-local authority bindings for the same
+    namespace client.
 
 Use these when the question is "what does `r9p` do now?"
 
@@ -124,29 +138,30 @@ Use `crates/fuse/src/` for all current mount-client work. Use `refs/r9pfuse`
 only as optional bounded historical comparison when the retired source checkout
 is present locally and a plan explicitly needs lineage.
 
-## Vault
+## coordinator
 
-- `refs/vault/docs/operations/9p-endpoint.md`
-  - Vault 9P listener policy and backend contract.
-- `refs/vault/docs/operations/plan9port-client.md`
+- `refs/coordinator/docs/operations/9p-endpoint.md`
+  - coordinator 9P listener policy and backend contract.
+- `refs/coordinator/docs/operations/plan9port-client.md`
   - Current operator workflows for `r9p`, `r9p mount`, plan9port `9p`, and
     kernel `v9fs`.
-- `refs/vault/docs/source-map.md`
-  - Vault source-grounding map.
+- `refs/coordinator/docs/source-map.md`
+  - coordinator source-grounding map.
 
-Use Vault when validating namespace endpoint expectations, attach policy, or mount-client behavior.
+Use coordinator when validating governed namespace expectations, admission, or
+service-addressing behavior.
 
 ## FUSE References
 
-- `refs/vault/refs/linux-fuse/include/uapi/linux/fuse.h`
+- `refs/coordinator/refs/linux-fuse/include/uapi/linux/fuse.h`
   - Linux FUSE protocol ABI.
-- `refs/vault/refs/linux-fuse/fs/fuse/`
+- `refs/coordinator/refs/linux-fuse/fs/fuse/`
   - Linux kernel FUSE implementation.
-- `refs/vault/refs/libfuse/include/`
+- `refs/coordinator/refs/libfuse/include/`
   - libfuse userspace API headers.
-- `refs/vault/refs/libfuse/example/`
+- `refs/coordinator/refs/libfuse/example/`
   - Mature FUSE filesystem examples.
-- `refs/vault/refs/9pfuse/`
+- `refs/coordinator/refs/9pfuse/`
   - Current C `9pfuse` bridge behavior.
 
 Use FUSE sources only for bridge behavior. They do not define 9P semantics.

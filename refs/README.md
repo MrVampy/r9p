@@ -9,8 +9,7 @@ Expected local references:
 - `r9pfuse` - optional retired Rust FUSE-to-9P bridge, used only for
   historical comparison when present. Current mount-client source lives in
   `crates/fuse`.
-- `vault` - Vault runtime and 9P endpoint sources.
+- `coordinator` - governed namespace and 9P endpoint sources.
 - `9pfuse` - patched C `9pfuse` bridge reference.
-- `plan9port-vault` - deployed Vault-local plan9port fork when available.
 
 If a symlink is missing on a machine, either create it locally or use the closest available local source. Prefer local references over web search.

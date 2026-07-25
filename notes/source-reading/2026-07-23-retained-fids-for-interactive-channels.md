@@ -42,7 +42,7 @@ The session crate now owns a generic `OpenedFid` facade and
 `Client::open_path_timeout`. Interactive consumers can retain one opened file
 per hot logical channel while continuing to use ordinary 9P messages.
 
-This utility has no Vault, Agents, terminal, or application policy. The
+This utility has no coordinator, agents, terminal, or application policy. The
 application still chooses which files are channels, how messages are framed,
 and when a fid should be replaced.
 
@@ -51,6 +51,6 @@ and when a fid should be replaced.
 - A future asynchronous session facade may need an owned channel abstraction,
   but it should preserve the same fid lifecycle and avoid imposing an async
   runtime on the reusable protocol core.
-- Resolver-aware connection refresh is separate from retained-fid lifetime. A
-  finite connection descriptor governs when a new session may be established;
-  it does not require reopening a fid for every message.
+- Referral refresh is separate from retained-fid lifetime. A finite referral
+  governs when a new session may be established; it does not require reopening
+  a fid for every message.

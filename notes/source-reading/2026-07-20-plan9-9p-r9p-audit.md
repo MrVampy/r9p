@@ -142,10 +142,10 @@ applying the caller's umask. Capability regressions cover both decisions.
 - Tags, generation-checked flush handling, multi-element walks, large
   negotiated messages, multiplexed clients, reconnectable sessions, namespace
   change feeds, and targeted FUSE invalidation are already strong r9p features.
-- Vault governance remains above r9p. Attach identity, namespace admission,
-  `/srv` policy, service meaning, and observable reads and writes continue to
-  belong to Vault.
-- Vault's front intentionally permits a slash-containing `Tcreate` name for
+- coordinator governance remains above r9p. Attach identity, namespace
+  admission, service meaning, and observable reads and writes continue to
+  belong to coordinator.
+- The governing front intentionally permits a slash-containing `Tcreate` name for
   service-registration bootstrap before the grouping directories exist. The
   generic core therefore validates walk components but does not impose a
   single-component create-name policy on every backend.
@@ -162,11 +162,11 @@ stat, error, and operation semantics would create a false contract. Direct
 Linux v9fs serving or a named external 9P2000.L consumer would justify a
 complete dialect slice.
 
-The internal symlink behavior is now the explicitly negotiated
-`9P2000.r9p-symlink` extension. It carries only `QTSYMLINK`, `DMSYMLINK`, and
-read-target semantics. It is not described as 9P2000.u, and plain sessions are
-prevented from receiving the extension bits. The FUSE session requests the
-extension and accepts an honest downgrade when a server has no symlinks.
+The internal extension is now the explicitly negotiated `9P2000.R` dialect.
+It carries `QTSYMLINK`, `DMSYMLINK`, read-target semantics, and namespace
+referrals. It is not described as 9P2000.u, and plain sessions are prevented
+from receiving extension metadata or messages. The FUSE session requests the
+dialect and accepts an honest downgrade when extended behavior is unnecessary.
 
 ### LisaFS-style local descriptors
 
@@ -174,7 +174,7 @@ gVisor replaced 9P for its high-throughput local host/guest path because
 round-trip count, descriptor donation, batching, and multiple communicators
 matter more there than adding more 9P opcodes. r9p already has concurrent tags,
 multi-walk, large `msize`, `READDIRPLUS`, reconnect, and invalidation for the
-Vault namespace workload. Local descriptor donation or a second transport
+governed namespace workload. Local descriptor donation or a second transport
 protocol should wait for a benchmark that identifies data-plane copying or
 round trips as the actual limit.
 

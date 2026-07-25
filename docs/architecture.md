@@ -6,7 +6,7 @@
 
 ```text
 backend
-  Racme Acme tree, Vault namespace adapter, exportfs-style host tree, memory fixture
+  Racme Acme tree, coordinator adapter, exportfs-style host tree, memory fixture
 
 r9p server core
   9P messages, qids, fids, tags, stat records, version negotiation,
@@ -19,7 +19,7 @@ transport adapter
   Unix socket, TCP, stdio, BEAM port, virtio transport
 
 r9p client core
-  9P operation builders and response admission
+  9P operation builders, response admission, transparent referral routing
 
 consumer
   Rust program, FUSE bridge, export helper, test harness, namespace service
@@ -61,32 +61,51 @@ must provide all-or-none completion. A backend that cannot make a requested
 combination atomic rejects it; it must not apply a prefix of the request.
 
 Variant negotiation is capability negotiation, not a label. Plain `9P2000`
-never exposes symlink qids or stat bits. `9P2000.r9p-symlink` is the one narrow
-r9p extension: it admits `QTSYMLINK` and `DMSYMLINK` and the existing
-read-target representation used by the filesystem exporter and FUSE bridge.
-It deliberately does not claim 9P2000.u. Servers configured for the extension
-can downgrade a plain requester, while extension-aware clients reject symlink
-metadata after a downgrade.
+never exposes symlink qids, symlink stat bits, or namespace referrals.
+`9P2000.R` is the r9p dialect. It admits `QTSYMLINK` and `DMSYMLINK`, the
+existing read-target representation used by the filesystem exporter and FUSE
+bridge, and the `Treferrals` and `Rreferrals` messages used for transparent
+namespace composition. It deliberately does not claim 9P2000.u or 9P2000.L.
+Servers configured for the dialect can downgrade a plain requester, while
+extension-aware clients reject extended metadata after a downgrade. P9any and
+Noise authenticate the stream before version negotiation and are not part of
+the dialect.
 
 `r9p` provides generic client create, write, remove, read, and RPC operations,
 plus language bindings that encode the transport-neutral `r9p-export.v1`
 descriptor. An application that registers with a runtime owns the lifecycle
 that writes that descriptor through the runtime's ordinary namespace. The
-runtime owns `/srv` admission, lease interpretation, and projection. Neither
-side gives `r9p` Vault-specific registration policy or a privileged runtime
-control path.
+governing application owns service admission, lease interpretation, and
+projection. Neither side gives `r9p` coordinator-specific registration policy
+or a privileged runtime control path.
 
 The blocking TCP client has an opt-in bounded connection seam:
 `Client::connect_tcp_with_timeouts` takes independent connect, read, and write
 timeouts. It resolves the endpoint, uses `TcpStream::connect_timeout` for each
 resolved address, and installs the read and write timeouts before 9P version
-negotiation and attach. The existing `Client::connect_tcp` API remains the
-unbounded compatibility surface. Endpoint selection, retry policy, and service
-registration meaning remain application responsibilities.
+negotiation and attach. `Client::connect_tcp` is the unbounded convenience
+surface. Endpoint selection, retry policy, and service registration meaning
+remain application responsibilities.
 
 ## Client And Server
 
 `r9p` owns both reusable protocol sides. The server side is the generic session plus backend boundary. The client side is the runtime-neutral operation builder plus response admission boundary. Keeping both sides in one crate is deliberate: tags, fids, stat records, message limits, flush handling, and wire encoding are shared protocol concerns, not application concerns.
+
+The client runs on the host of the process that consumes the namespace. After
+attaching to a `9P2000.R` root, it requests finite admitted referrals, selects
+the longest matching mounted prefix, and establishes direct service sessions
+inside the same caller process. Referrals are 9P messages, not public namespace
+files. Callers continue to walk, open, read, write, and issue RPCs against one
+logical namespace.
+
+A referral is interpreted in the caller's network and authority context.
+Moving the client onto the service host changes the caller and does not prove
+that the original host can resolve, authenticate, or connect. In particular, a
+loopback endpoint is valid only for a caller on that same host. If a remote
+caller receives one, the composition is incomplete and must be fixed through
+reachable authenticated publication, reverse attachment, or an explicit
+caller-local authority binding. SSH remains a host-administration mechanism;
+it is never a substitute transport for an r9p namespace client.
 
 The plan9port `9p` command is the client UX target for the one-shot `r9p`
 operations. The installed `r9p` binary now also exposes the generic local
@@ -108,7 +127,7 @@ and it leaves umask application to Linux rather than claiming `DONT_MASK`.
 ## Non-Goals
 
 - No Racme editor semantics.
-- No Vault namespace policy.
+- No coordinator namespace policy.
 - No FUSE/POSIX translation in the protocol core. The workspace's `crates/fuse`
   owns that bridge as an adapter above the core.
 - No mandatory async runtime.
@@ -123,6 +142,6 @@ server first. The extraction trigger was a second real consumer: the FUSE
 bridge that is now `crates/fuse` and exposed by `r9p mount`.
 
 `r9p` is one installable communication suite with internal crates for protocol
-core, CLI, FUSE bridge, and filesystem-backed serving. Vault-specific
+core, CLI, FUSE bridge, and filesystem-backed serving. coordinator-specific
 registration lifecycles, listener glue, editor participants, plumbers, and
 domain policy remain outside this repository.

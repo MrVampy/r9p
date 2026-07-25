@@ -47,8 +47,8 @@ downgrade that request.
 - The local filesystem backend rejects unsupported fields and combined
   rename-plus-truncate requests before mutation, and rename uses no-replace
   semantics.
-- `9P2000.r9p-symlink` is negotiated by the local exporter and FUSE session;
-  plain sessions cannot receive symlink qids or stat bits.
+- `9P2000.R` is negotiated by the local exporter and FUSE session; plain
+  sessions cannot receive symlink qids, symlink stat bits, or referrals.
 - Export descriptors advertise the exact extension instead of plain 9P2000.
 
 ## Open Questions

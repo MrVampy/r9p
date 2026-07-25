@@ -236,6 +236,64 @@ fn ordinary_namespace_operations_cross_referrals_transparently() {
     service.join().expect("service server should not panic");
 }
 
+#[test]
+fn walk_miss_refreshes_referrals_added_after_attach() {
+    let service_listener = TcpListener::bind("127.0.0.1:0").expect("service listener");
+    let service_address = service_listener.local_addr().expect("service address");
+    let service = thread::spawn(move || {
+        let (stream, _) = service_listener.accept().expect("service accept");
+        handle_configured_connection(stream, ValueTree, ServerConfig::default())
+            .expect("service connection");
+    });
+
+    let root_listener = TcpListener::bind("127.0.0.1:0").expect("root listener");
+    let root_address = root_listener.local_addr().expect("root address");
+    let root = thread::spawn(move || {
+        let (stream, _) = root_listener.accept().expect("root accept");
+        handle_configured_connection(
+            stream,
+            AppearingReferralRoot {
+                endpoint: service_address.to_string().into_bytes(),
+                referral_reads: 0,
+            },
+            ServerConfig {
+                variant: Variant::R,
+                ..ServerConfig::default()
+            },
+        )
+        .expect("root connection");
+    });
+
+    let client = Client::connect_with_timeout(
+        &connection(root_address.to_string()),
+        Duration::from_secs(1),
+    )
+    .expect("namespace client should attach before the referral exists");
+    let sources = client
+        .walk_one_timeout(client.root_fid(), b"sources", Duration::from_secs(1))
+        .expect("local sources directory should resolve");
+    let x = client
+        .walk_one_timeout(sources, b"x", Duration::from_secs(1))
+        .expect("walk miss should refresh and route the newly admitted service");
+    let value = client
+        .walk_one_timeout(x, b"value", Duration::from_secs(1))
+        .expect("referred service child should resolve");
+    client
+        .open_timeout(value, r9p::blocking::OREAD, Duration::from_secs(1))
+        .expect("referred value should open");
+    assert_eq!(
+        client
+            .read_full_timeout(value, 0, 8192, Duration::from_secs(1))
+            .expect("referred value should read"),
+        b"direct-service-value"
+    );
+    client.shutdown().expect("namespace should shut down");
+
+    drop(client);
+    root.join().expect("root server should not panic");
+    service.join().expect("service server should not panic");
+}
+
 struct RootOnly;
 
 impl FileTree for RootOnly {
@@ -308,6 +366,66 @@ impl FileTree for ReferralRoot {
     }
 
     fn referrals(&mut self, _fid: Fid, _qid: Qid) -> P9Result<Vec<NamespaceReferral>> {
+        Ok(vec![NamespaceReferral {
+            mount_path: b"/sources/x".to_vec(),
+            endpoint: self.endpoint.clone(),
+            uname: b"codex".to_vec(),
+            aname: b"/".to_vec(),
+            exported_root: b"/".to_vec(),
+            authority_boundary: b"loopback".to_vec(),
+            generation: 1,
+            valid_for_ms: 10_000,
+        }])
+    }
+}
+
+struct AppearingReferralRoot {
+    endpoint: Vec<u8>,
+    referral_reads: u8,
+}
+
+impl FileTree for AppearingReferralRoot {
+    fn attach(&mut self, _fid: Fid, _uname: &[u8], _aname: &[u8]) -> P9Result<Qid> {
+        Ok(ROOT_QID)
+    }
+
+    fn walk(
+        &mut self,
+        _fid: Fid,
+        _newfid: Fid,
+        _start: Qid,
+        names: &[Vec<u8>],
+    ) -> P9Result<Vec<Qid>> {
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+        if names[0].as_slice() == b"sources" {
+            return Ok(vec![Qid::dir(2)]);
+        }
+        Ok(Vec::new())
+    }
+
+    fn open(&mut self, _fid: Fid, qid: Qid, _mode: u8) -> P9Result<OpenFile> {
+        Ok(OpenFile { qid, iounit: 0 })
+    }
+
+    fn read(&mut self, _fid: Fid, _qid: Qid, _offset: u64, _count: u32) -> P9Result<ReadData> {
+        Ok(ReadData::Directory(Vec::new()))
+    }
+
+    fn stat(&mut self, qid: Qid) -> P9Result<Stat> {
+        if qid == Qid::dir(2) {
+            Ok(Stat::new(b"sources".to_vec(), qid, DMDIR | 0o555))
+        } else {
+            Ok(root_stat())
+        }
+    }
+
+    fn referrals(&mut self, _fid: Fid, _qid: Qid) -> P9Result<Vec<NamespaceReferral>> {
+        self.referral_reads = self.referral_reads.saturating_add(1);
+        if self.referral_reads == 1 {
+            return Ok(Vec::new());
+        }
         Ok(vec![NamespaceReferral {
             mount_path: b"/sources/x".to_vec(),
             endpoint: self.endpoint.clone(),

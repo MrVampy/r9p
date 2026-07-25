@@ -170,8 +170,8 @@ impl Client {
     pub fn walk_timeout(&self, fid: Fid, names: &[Vec<u8>], timeout: Duration) -> Result<Fid> {
         let binding = self.binding(fid)?;
         let namespace_path = apply_walk(&binding.namespace_path, names)?;
-        let target = self.routed_target(&namespace_path, timeout)?;
-        let remote_fid = walk_remote_timeout(&target, timeout)?;
+        let (target, remote_fid) =
+            self.walk_namespace_path_timeout(&namespace_path, timeout)?;
         self.allocate_binding(FidBinding {
             client: target.client,
             remote_fid,
@@ -182,8 +182,7 @@ impl Client {
 
     pub fn walk_path(&self, path: &str) -> Result<Fid> {
         let namespace_path = parse_namespace_path(path.as_bytes())?;
-        let target = self.routed_target(&namespace_path, self.state.connect_timeout)?;
-        let remote_fid = walk_remote(&target)?;
+        let (target, remote_fid) = self.walk_namespace_path(&namespace_path)?;
         self.allocate_binding(FidBinding {
             client: target.client,
             remote_fid,
@@ -194,8 +193,8 @@ impl Client {
 
     pub fn walk_path_timeout(&self, path: &str, timeout: Duration) -> Result<Fid> {
         let namespace_path = parse_namespace_path(path.as_bytes())?;
-        let target = self.routed_target(&namespace_path, timeout)?;
-        let remote_fid = walk_remote_timeout(&target, timeout)?;
+        let (target, remote_fid) =
+            self.walk_namespace_path_timeout(&namespace_path, timeout)?;
         self.allocate_binding(FidBinding {
             client: target.client,
             remote_fid,
@@ -519,6 +518,55 @@ impl Client {
             .remove(&fid)
             .map(|_| ())
             .ok_or_else(|| Error::new(libc::EBADF, format!("unknown namespace fid {fid}")))
+    }
+
+    fn walk_namespace_path(
+        &self,
+        namespace_path: &[Vec<u8>],
+    ) -> Result<(RoutedTarget, Fid)> {
+        let target = self.routed_target(namespace_path, self.state.connect_timeout)?;
+        match walk_remote(&target) {
+            Ok(fid) => Ok((target, fid)),
+            Err(error) if self.should_refresh_routes_after(&error) => {
+                self.refresh_routes(self.state.connect_timeout)?;
+                let target =
+                    self.routed_target(namespace_path, self.state.connect_timeout)?;
+                let fid = walk_remote(&target)?;
+                Ok((target, fid))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn walk_namespace_path_timeout(
+        &self,
+        namespace_path: &[Vec<u8>],
+        timeout: Duration,
+    ) -> Result<(RoutedTarget, Fid)> {
+        let target = self.routed_target(namespace_path, timeout)?;
+        match walk_remote_timeout(&target, timeout) {
+            Ok(fid) => Ok((target, fid)),
+            Err(error) if self.should_refresh_routes_after(&error) => {
+                self.refresh_routes(timeout)?;
+                let target = self.routed_target(namespace_path, timeout)?;
+                let fid = walk_remote_timeout(&target, timeout)?;
+                Ok((target, fid))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn should_refresh_routes_after(&self, error: &Error) -> bool {
+        self.variant().supports_referrals()
+            && matches!(
+                error.errno,
+                libc::ENOENT
+                    | libc::ESTALE
+                    | libc::ENOTCONN
+                    | libc::ECONNABORTED
+                    | libc::ECONNRESET
+                    | libc::EPIPE
+            )
     }
 
     fn routed_target(&self, namespace_path: &[Vec<u8>], timeout: Duration) -> Result<RoutedTarget> {

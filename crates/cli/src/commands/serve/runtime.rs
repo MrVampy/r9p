@@ -259,7 +259,7 @@ fn export_descriptor(config: &ExportConfig, bound: &BoundListener) -> CliResult<
         },
         auth: config.auth.clone(),
         pid: std::process::id(),
-        protocol: Protocol::P9_2000R,
+        protocol: Protocol::_9P2000R,
         msize: config.serve.msize,
         expires_at: None,
         local_root_label: Some(config.serve.root.display().to_string()),

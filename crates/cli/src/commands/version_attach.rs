@@ -19,7 +19,7 @@ pub(crate) fn version_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
     }
     let target = connection_target(config, args)?;
     let (client, _) = connect_path(&target)?;
-    println!("{}", format_version(client.msize(), client.version()));
+    println!("{}", format_version(client.msize(), &client.version()));
     Ok(())
 }
 

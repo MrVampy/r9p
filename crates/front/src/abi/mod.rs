@@ -11,9 +11,9 @@ mod client;
 mod request;
 
 pub use client::{
-    r9p_front_bind_client_authority,
-    r9p_front_client_create_at, r9p_front_client_create_write_at, r9p_front_client_read,
-    r9p_front_client_remove, r9p_front_client_rpc, r9p_front_client_write_file,
+    r9p_front_bind_client_authority, r9p_front_client_create_at, r9p_front_client_create_write_at,
+    r9p_front_client_read, r9p_front_client_remove, r9p_front_client_rpc,
+    r9p_front_client_write_file,
 };
 pub use request::{
     r9p_front_complete_remove, r9p_front_complete_request, r9p_front_complete_write,

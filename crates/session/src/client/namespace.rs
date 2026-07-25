@@ -1,7 +1,5 @@
 use super::direct::DirectClient;
-use crate::{
-    AuthorityBindings, ConnectionConfig, Error, RequestTracker, Result,
-};
+use crate::{AuthorityBindings, ConnectionConfig, Error, RequestTracker, Result};
 use r9p::{fid::Fid, qid::Qid, referral::NamespaceReferral, stat::Stat, Variant, NOFID};
 use std::{
     collections::BTreeMap,
@@ -77,8 +75,7 @@ impl Client {
         tracker: RequestTracker,
         timeout: Duration,
     ) -> Result<Self> {
-        let root =
-            DirectClient::connect_with_tracker_timeout(config, tracker.clone(), timeout)?;
+        let root = DirectClient::connect_with_tracker_timeout(config, tracker.clone(), timeout)?;
         let referral_timeout = bounded_referral_timeout(timeout);
         let referrals = if root.variant().supports_referrals() {
             root.referrals_timeout(referral_timeout)?
@@ -223,13 +220,10 @@ impl Client {
                 "create cannot cross a namespace referral boundary",
             ));
         }
-        let (remote_fid, qid) = parent.client.create_timeout(
-            parent.remote_fid,
-            name,
-            perm,
-            mode,
-            timeout,
-        )?;
+        let (remote_fid, qid) =
+            parent
+                .client
+                .create_timeout(parent.remote_fid, name, perm, mode, timeout)?;
         let fid = self.allocate_binding(FidBinding {
             client: parent.client,
             remote_fid,
@@ -239,13 +233,7 @@ impl Client {
         Ok((fid, qid))
     }
 
-    pub fn create(
-        &self,
-        parent_fid: Fid,
-        name: &[u8],
-        perm: u32,
-        mode: u8,
-    ) -> Result<(Fid, Qid)> {
+    pub fn create(&self, parent_fid: Fid, name: &[u8], perm: u32, mode: u8) -> Result<(Fid, Qid)> {
         validate_path_element(name)?;
         let parent = self.binding(parent_fid)?;
         let mut namespace_path = parent.namespace_path.clone();
@@ -257,10 +245,7 @@ impl Client {
                 "create cannot cross a namespace referral boundary",
             ));
         }
-        let (remote_fid, qid) =
-            parent
-                .client
-                .create(parent.remote_fid, name, perm, mode)?;
+        let (remote_fid, qid) = parent.client.create(parent.remote_fid, name, perm, mode)?;
         let fid = self.allocate_binding(FidBinding {
             client: parent.client,
             remote_fid,
@@ -310,13 +295,9 @@ impl Client {
         timeout: Duration,
     ) -> Result<Vec<u8>> {
         let binding = self.binding(fid)?;
-        binding.client.read_delimited_timeout(
-            binding.remote_fid,
-            offset,
-            count,
-            delimiter,
-            timeout,
-        )
+        binding
+            .client
+            .read_delimited_timeout(binding.remote_fid, offset, count, delimiter, timeout)
     }
 
     pub fn read_full(&self, fid: Fid, offset: u64, count: u32) -> Result<Vec<u8>> {
@@ -357,9 +338,7 @@ impl Client {
 
     pub fn write_once(&self, fid: Fid, offset: u64, data: &[u8]) -> Result<u32> {
         let binding = self.binding(fid)?;
-        binding
-            .client
-            .write_once(binding.remote_fid, offset, data)
+        binding.client.write_once(binding.remote_fid, offset, data)
     }
 
     pub fn write_once_timeout(
@@ -442,9 +421,7 @@ impl Client {
             return Err(Error::new(libc::EBUSY, "cannot remove the namespace root"));
         }
         let binding = self.binding(fid)?;
-        binding
-            .client
-            .remove_timeout(binding.remote_fid, timeout)?;
+        binding.client.remove_timeout(binding.remote_fid, timeout)?;
         self.remove_binding(fid)
     }
 
@@ -533,11 +510,7 @@ impl Client {
             .ok_or_else(|| Error::new(libc::EBADF, format!("unknown namespace fid {fid}")))
     }
 
-    fn routed_target(
-        &self,
-        namespace_path: &[Vec<u8>],
-        timeout: Duration,
-    ) -> Result<RoutedTarget> {
+    fn routed_target(&self, namespace_path: &[Vec<u8>], timeout: Duration) -> Result<RoutedTarget> {
         let path = render_namespace_path(namespace_path);
         let mut route = self.find_route(&path)?;
         if route
@@ -616,19 +589,13 @@ impl Client {
                 ),
             ));
         }
-        let authority = text_field(
-            "authority_boundary",
-            &route.referral.authority_boundary,
-        )?;
+        let authority = text_field("authority_boundary", &route.referral.authority_boundary)?;
         let config = ConnectionConfig {
             address: text_field("endpoint", &route.referral.endpoint)?,
             uname: text_field("uname", &route.referral.uname)?,
             aname: text_field("aname", &route.referral.aname)?,
             msize: self.state.service_msize,
-            auth_config: self
-                .state
-                .authorities
-                .session_auth_config(&authority)?,
+            auth_config: self.state.authorities.session_auth_config(&authority)?,
             authorities: AuthorityBindings::new(),
         };
         let connect_timeout = route_connect_timeout(timeout, self.state.connect_timeout);
@@ -668,9 +635,10 @@ fn build_routes(
     let mut routes = Vec::with_capacity(referrals.len());
     for referral in referrals {
         referral.validate().map_err(protocol_error)?;
-        if routes.iter().any(|route: &Arc<Route>| {
-            route.referral.mount_path == referral.mount_path
-        }) {
+        if routes
+            .iter()
+            .any(|route: &Arc<Route>| route.referral.mount_path == referral.mount_path)
+        {
             return Err(Error::new(
                 libc::EPROTO,
                 format!(
@@ -759,10 +727,7 @@ fn parse_namespace_path(path: &[u8]) -> Result<Vec<Vec<u8>>> {
         .map(|name| {
             validate_path_element(name)?;
             if matches!(name, b"." | b"..") {
-                return Err(Error::new(
-                    libc::EINVAL,
-                    "namespace path must be canonical",
-                ));
+                return Err(Error::new(libc::EINVAL, "namespace path must be canonical"));
             }
             Ok(name.to_vec())
         })
@@ -784,9 +749,7 @@ fn render_namespace_path(path: &[Vec<u8>]) -> Vec<u8> {
     if path.is_empty() {
         return b"/".to_vec();
     }
-    let mut rendered = Vec::with_capacity(
-        path.iter().map(Vec::len).sum::<usize>() + path.len(),
-    );
+    let mut rendered = Vec::with_capacity(path.iter().map(Vec::len).sum::<usize>() + path.len());
     for name in path {
         rendered.push(b'/');
         rendered.extend_from_slice(name);
@@ -803,9 +766,12 @@ fn mounted_suffix<'a>(path: &'a [u8], mount_path: &[u8]) -> Option<&'a [u8]> {
 }
 
 fn text_field(field: &str, value: &[u8]) -> Result<String> {
-    str::from_utf8(value)
-        .map(str::to_owned)
-        .map_err(|_| Error::new(libc::EPROTO, format!("namespace referral {field} is not UTF-8")))
+    str::from_utf8(value).map(str::to_owned).map_err(|_| {
+        Error::new(
+            libc::EPROTO,
+            format!("namespace referral {field} is not UTF-8"),
+        )
+    })
 }
 
 fn next_fid(fid: Fid) -> Fid {
@@ -840,8 +806,7 @@ mod unit_tests {
     #[test]
     fn walk_normalization_cannot_escape_the_root() {
         assert_eq!(
-            apply_walk(&[b"sources".to_vec()], &[b"..".to_vec(), b"..".to_vec()])
-                .expect("walk"),
+            apply_walk(&[b"sources".to_vec()], &[b"..".to_vec(), b"..".to_vec()]).expect("walk"),
             Vec::<Vec<u8>>::new()
         );
     }

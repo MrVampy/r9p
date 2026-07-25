@@ -10,8 +10,8 @@ use r9p::{
     stat::Stat,
 };
 use session::{
-    AuthorityBindings, Client as NamespaceClient, ConnectionConfig,
-    Error as SessionError, Result as SessionResult,
+    AuthorityBindings, Client as NamespaceClient, ConnectionConfig, Error as SessionError,
+    Result as SessionResult,
 };
 use std::{
     collections::HashMap,
@@ -304,11 +304,7 @@ fn write_output(
         .map(|count| format!("write\t{count}"))
 }
 
-fn write_file_output(
-    client: &NamespaceClient,
-    path: &str,
-    data: &[u8],
-) -> SessionResult<String> {
+fn write_file_output(client: &NamespaceClient, path: &str, data: &[u8]) -> SessionResult<String> {
     client
         .write_file(path, data)
         .map(|count| format!("write-file\t{count}"))
@@ -387,15 +383,8 @@ fn target_and_args<'a>(fields: &'a [&'a str]) -> Result<(TargetKey, &'a [&'a str
             .insert_session_auth(boundary, config_path)
             .map_err(|error| error.to_string())?;
     }
-    target_key(bind, uname, aname, msize, auth_config).map(|key| {
-        (
-            TargetKey {
-                authorities,
-                ..key
-            },
-            args,
-        )
-    })
+    target_key(bind, uname, aname, msize, auth_config)
+        .map(|key| (TargetKey { authorities, ..key }, args))
 }
 
 fn target_key(

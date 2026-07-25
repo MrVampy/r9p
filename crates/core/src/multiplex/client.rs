@@ -615,13 +615,15 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
             timeout,
         )?;
         let mut first = Some(first);
-        let response =
-            read_delimited_with(read_offset, read_count, delimiter, |offset, remaining| {
-                match first.take() {
-                    Some(bytes) => Ok(bytes),
-                    None => self.read_timeout(fid, offset, remaining, timeout),
-                }
-            })?;
+        let response = read_delimited_with(
+            read_offset,
+            read_count,
+            delimiter,
+            |offset, remaining| match first.take() {
+                Some(bytes) => Ok(bytes),
+                None => self.read_timeout(fid, offset, remaining, timeout),
+            },
+        )?;
         Ok((written, response))
     }
 

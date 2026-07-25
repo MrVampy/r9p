@@ -49,10 +49,7 @@ impl AuthorityBindings {
         Ok(self)
     }
 
-    pub(crate) fn session_auth_config(
-        &self,
-        authority_boundary: &str,
-    ) -> Result<Option<PathBuf>> {
+    pub(crate) fn session_auth_config(&self, authority_boundary: &str) -> Result<Option<PathBuf>> {
         if let Some(path) = self.session_auth.get(authority_boundary) {
             return Ok(Some(path.clone()));
         }

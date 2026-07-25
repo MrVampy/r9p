@@ -126,10 +126,7 @@ mod tests {
             handshake(&mut stream)?;
             let write_tag = match read_tmessage(&mut stream)? {
                 TMessage::Write {
-                    tag,
-                    offset,
-                    data,
-                    ..
+                    tag, offset, data, ..
                 } if offset == 0 && data == b"ping\n" => tag,
                 other => {
                     return Err(Error::from(format!(
@@ -139,10 +136,7 @@ mod tests {
             };
             let read_tag = match read_tmessage(&mut stream)? {
                 TMessage::Read {
-                    tag,
-                    offset,
-                    count,
-                    ..
+                    tag, offset, count, ..
                 } if offset == 0 && count == 64 => tag,
                 other => {
                     return Err(Error::from(format!(

@@ -11,11 +11,11 @@ mod request;
 mod slot;
 mod transport;
 
+pub use authority::AuthorityBindings;
 pub use cache::{
     decode_dir_entries, is_dir, is_symlink, read_open_directory_entries, same_qid, DirCache,
     DirEntry, Freshness, NamespaceCache, NamespaceCacheStats, StaleReason,
 };
-pub use authority::AuthorityBindings;
 pub use client::Client;
 pub use connection_config::ConnectionConfig;
 pub use epoch::SessionEpoch;

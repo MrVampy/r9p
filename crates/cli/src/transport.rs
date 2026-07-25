@@ -1,7 +1,4 @@
-use std::{
-    path::Path,
-    time::Duration,
-};
+use std::{path::Path, time::Duration};
 
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;

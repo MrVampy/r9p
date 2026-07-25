@@ -211,10 +211,7 @@ fn plain_version_accepts_period_extensions_not_prefix_collisions() {
 fn r_extension_is_negotiated_explicitly_and_can_downgrade() {
     assert_eq!(Variant::R.accept(b"9P2000.R"), Some(Variant::R));
     assert_eq!(Variant::R.accept(b"9P2000"), Some(Variant::Plain));
-    assert_eq!(
-        Variant::R.accept_response(b"9P2000"),
-        Some(Variant::Plain)
-    );
+    assert_eq!(Variant::R.accept_response(b"9P2000"), Some(Variant::Plain));
     assert_eq!(Variant::Plain.accept_response(b"9P2000.R"), None);
 
     let mut server = Server::with_config(

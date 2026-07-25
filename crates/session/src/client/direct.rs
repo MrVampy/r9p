@@ -131,13 +131,7 @@ impl DirectClient {
             .map_err(client_error)
     }
 
-    pub fn create(
-        &self,
-        parent_fid: Fid,
-        name: &[u8],
-        perm: u32,
-        mode: u8,
-    ) -> Result<(Fid, Qid)> {
+    pub fn create(&self, parent_fid: Fid, name: &[u8], perm: u32, mode: u8) -> Result<(Fid, Qid)> {
         self.inner
             .create(parent_fid, name, perm, mode)
             .map_err(client_error)

@@ -189,23 +189,16 @@ mod tests {
 
     #[test]
     fn delimited_read_rejects_ambiguous_record_framing() {
-        let trailing = read_delimited_with(0, 32, b'\n', |_, _| {
-            Ok(b"first\nsecond\n".to_vec())
-        })
-        .expect_err("trailing record must fail");
-        assert!(
-            trailing
-                .display_lossy()
-                .contains("bytes after the record delimiter")
-        );
+        let trailing = read_delimited_with(0, 32, b'\n', |_, _| Ok(b"first\nsecond\n".to_vec()))
+            .expect_err("trailing record must fail");
+        assert!(trailing
+            .display_lossy()
+            .contains("bytes after the record delimiter"));
 
-        let missing =
-            read_delimited_with(0, 5, b'\n', |_, _| Ok(b"12345".to_vec()))
-                .expect_err("missing delimiter must fail");
-        assert!(
-            missing
-                .display_lossy()
-                .contains("byte bound before the record delimiter")
-        );
+        let missing = read_delimited_with(0, 5, b'\n', |_, _| Ok(b"12345".to_vec()))
+            .expect_err("missing delimiter must fail");
+        assert!(missing
+            .display_lossy()
+            .contains("byte bound before the record delimiter"));
     }
 }

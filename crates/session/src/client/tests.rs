@@ -352,9 +352,14 @@ impl FileTree for ValueTree {
         Ok(OpenFile { qid, iounit: 0 })
     }
 
-    fn read(&mut self, _fid: Fid, qid: Qid, _offset: u64, _count: u32) -> P9Result<ReadData> {
+    fn read(&mut self, _fid: Fid, qid: Qid, offset: u64, count: u32) -> P9Result<ReadData> {
         if qid == Qid::file(2) {
-            Ok(ReadData::Bytes(b"direct-service-value".to_vec()))
+            let value = b"direct-service-value";
+            let start = usize::try_from(offset).unwrap_or(usize::MAX).min(value.len());
+            let end = start
+                .saturating_add(usize::try_from(count).unwrap_or(usize::MAX))
+                .min(value.len());
+            Ok(ReadData::Bytes(value[start..end].to_vec()))
         } else {
             Ok(ReadData::Directory(Vec::new()))
         }
@@ -362,7 +367,10 @@ impl FileTree for ValueTree {
 
     fn stat(&mut self, qid: Qid) -> P9Result<Stat> {
         if qid == Qid::file(2) {
-            Ok(Stat::new("value", qid, 0o444))
+            let mut stat = Stat::new("value", qid, 0o444);
+            stat.length =
+                u64::try_from(b"direct-service-value".len()).unwrap_or(u64::MAX);
+            Ok(stat)
         } else {
             Ok(root_stat())
         }

@@ -221,11 +221,7 @@ fn ordinary_namespace_operations_cross_referrals_transparently() {
 
     assert_eq!(
         client
-            .read_path_timeout(
-                "/sources/x/value",
-                8192,
-                Duration::from_secs(1)
-            )
+            .read_path_timeout("/sources/x/value", 8192, Duration::from_secs(1))
             .expect("bounded path read should route directly to the referred service"),
         b"direct-service-value"
     );

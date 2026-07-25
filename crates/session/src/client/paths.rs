@@ -122,8 +122,13 @@ impl Client {
         Ok(response)
     }
 
+    /// Creates a child below `parent`.
+    ///
+    /// `name` may be one canonical relative path. The namespace client walks
+    /// every parent component and sends only the final element in `Tcreate`.
     pub fn create_at(&self, parent: &str, name: &str, perm: u32, mode: u8) -> Result<Qid> {
-        let parent_fid = self.walk_path(parent)?;
+        let (parent, name) = create_target(parent, name)?;
+        let parent_fid = self.walk_path(&parent)?;
         let result = self
             .create(parent_fid, name.as_bytes(), perm, mode)
             .and_then(|(fid, qid)| {
@@ -133,6 +138,9 @@ impl Client {
         finish_fid(self, parent_fid, result)
     }
 
+    /// Creates a child below `parent` and writes its initial contents.
+    ///
+    /// `name` has the same canonical relative-path behavior as [`Self::create_at`].
     pub fn create_write_at(
         &self,
         parent: &str,
@@ -142,7 +150,8 @@ impl Client {
         offset: u64,
         data: &[u8],
     ) -> Result<u32> {
-        let parent_fid = self.walk_path(parent)?;
+        let (parent, name) = create_target(parent, name)?;
+        let parent_fid = self.walk_path(&parent)?;
         let result = self
             .create(parent_fid, name.as_bytes(), perm, mode)
             .and_then(|(fid, _)| {
@@ -156,6 +165,26 @@ impl Client {
         let fid = self.walk_path(path)?;
         self.remove(fid)
     }
+}
+
+fn create_target<'a>(parent: &str, name: &'a str) -> Result<(String, &'a str)> {
+    let _ = super::parse_namespace_path(parent.as_bytes())?;
+    let Some((relative_parent, leaf)) = name.rsplit_once('/') else {
+        return Ok((parent.to_string(), name));
+    };
+    if name.starts_with('/') {
+        return Err(Error::new(
+            libc::EINVAL,
+            "create path must be relative to its parent",
+        ));
+    }
+    let _ = super::parse_namespace_path(name.as_bytes())?;
+    let target_parent = if parent == "/" {
+        format!("/{relative_parent}")
+    } else {
+        format!("{parent}/{relative_parent}")
+    };
+    Ok((target_parent, leaf))
 }
 
 fn validate_response_bound(max_response_bytes: u32) -> Result<()> {

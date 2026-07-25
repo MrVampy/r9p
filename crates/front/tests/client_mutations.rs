@@ -22,11 +22,12 @@ fn cstr(value: &str) -> (*const c_char, usize) {
 #[test]
 fn client_mutations_use_native_9p_operations() -> TestResult<()> {
     let root = fixture_root("client-mutations")?;
+    std_fs::create_dir_all(root.join("srv/sources"))?;
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let address = listener.local_addr()?.to_string();
     let server_root = root.clone();
     let server = thread::spawn(move || -> TestResult<()> {
-        for _ in 0..4 {
+        for _ in 0..5 {
             let (stream, _) = listener.accept()?;
             let tree =
                 LocalTree::open_with_config(&server_root, LocalTreeConfig { writable: true })?;
@@ -119,6 +120,36 @@ fn client_mutations_use_native_9p_operations() -> TestResult<()> {
     assert_status(handle, atomic_status);
     assert_eq!(atomic_count as usize, atomic_body.len());
     assert_eq!(std_fs::read(root.join("atomic"))?, atomic_body);
+
+    let (nested_parent, nested_parent_len) = cstr("/srv");
+    let (nested_name, nested_name_len) = cstr("sources/x");
+    let nested_body = b"hierarchical registration\n";
+    let mut nested_count = 0_u32;
+    let nested_status = unsafe {
+        r9p_front_client_create_write_at(
+            handle,
+            target.endpoint,
+            target.endpoint_len,
+            target.uname,
+            target.uname_len,
+            target.aname,
+            target.aname_len,
+            nested_parent,
+            nested_parent_len,
+            nested_name,
+            nested_name_len,
+            0o600,
+            1,
+            0,
+            nested_body.as_ptr(),
+            nested_body.len(),
+            65_536,
+            &mut nested_count,
+        )
+    };
+    assert_status(handle, nested_status);
+    assert_eq!(nested_count as usize, nested_body.len());
+    assert_eq!(std_fs::read(root.join("srv/sources/x"))?, nested_body);
 
     let remove_status = unsafe {
         r9p_front_client_remove(

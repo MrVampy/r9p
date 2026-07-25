@@ -341,7 +341,7 @@ impl FileTree for ValueTree {
         if names.is_empty() {
             return Ok(Vec::new());
         }
-        if start == ROOT_QID && names.as_slice() == [b"value".as_slice()] {
+        if start == ROOT_QID && names.len() == 1 && names[0].as_slice() == b"value" {
             Ok(vec![Qid::file(2)])
         } else {
             Err(P9Error::from("file does not exist"))
@@ -385,7 +385,7 @@ fn spawn_unix_root_server(socket_path: &Path) -> thread::JoinHandle<()> {
     })
 }
 
-fn handle_connection(mut stream: impl Read + Write) -> io::Result<()> {
+fn handle_connection(stream: impl Read + Write) -> io::Result<()> {
     handle_configured_connection(stream, RootOnly, ServerConfig::default())
 }
 

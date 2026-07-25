@@ -248,13 +248,7 @@ impl DirectClient {
         timeout: Duration,
     ) -> Result<(u32, Vec<u8>)> {
         self.inner
-            .write_then_read_delimited_timeout(
-                fid,
-                write_offset,
-                data,
-                read,
-                timeout,
-            )
+            .write_then_read_delimited_timeout(fid, write_offset, data, read, timeout)
             .map_err(client_error)
     }
 

@@ -255,8 +255,7 @@ impl R9pFuse {
             tracker,
             self.config.connect_timeout,
         )?;
-        let (root_fid, root_stat) =
-            self.source_binding(&client, self.config.lookup_timeout)?;
+        let (root_fid, root_stat) = self.source_binding(&client, self.config.lookup_timeout)?;
         let lazy_rebind_count = {
             let mut nodes = self.nodes()?;
             let stale = nodes
@@ -320,8 +319,7 @@ impl R9pFuse {
         }
         if nodeid == ROOT_NODEID {
             let client = self.client.snapshot()?;
-            let (root_fid, stat) =
-                self.source_binding(&client, self.config.lookup_timeout)?;
+            let (root_fid, stat) = self.source_binding(&client, self.config.lookup_timeout)?;
             let old_fid = self.nodes()?.replace_binding(nodeid, root_fid, stat)?;
             if let Some(old_fid) = old_fid {
                 let _ = client.clunk_timeout(old_fid, self.config.control_timeout);

@@ -181,11 +181,7 @@ fn default_congestion_threshold_matches_kernel_ratio() {
 fn mount_source_path_is_absolute_and_canonical() {
     assert_eq!(
         parse_source_path("/hosts/tuxedo/projects").expect("canonical source path"),
-        vec![
-            b"hosts".to_vec(),
-            b"tuxedo".to_vec(),
-            b"projects".to_vec()
-        ]
+        vec![b"hosts".to_vec(), b"tuxedo".to_vec(), b"projects".to_vec()]
     );
     assert!(parse_source_path("/").expect("root source path").is_empty());
     for invalid in [

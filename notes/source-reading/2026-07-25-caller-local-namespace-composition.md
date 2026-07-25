@@ -16,8 +16,12 @@ how can direct service sessions remain hidden behind one logical namespace?
 - `crates/session/src/authority.rs`
 - `crates/fuse/src/fuse/mod.rs`
 - `crates/fuse/src/fuse/dispatch.rs`
+- `crates/fuse/src/fuse/mount_state.rs`
+- `crates/fuse/src/node.rs`
 - `crates/front/src/abi/client.rs`
 - `crates/beam-port/src/lib.rs`
+- `refs/coordinator/refs/9pfuse/main.c`
+- `refs/plan9port/src/lib9pclient/fs.c`
 - `refs/coordinator/docs/operations/9p-endpoint.md`
 - `refs/coordinator/docs/architecture/63-governed-service-addressing.md`
 
@@ -43,17 +47,25 @@ how can direct service sessions remain hidden behind one logical namespace?
 - Moving the client onto the service host changes the caller and can conceal a
   broken composition. SSH remains valid for host administration, but it cannot
   stand in for the caller's r9p session.
+- plan9port's `9pfuse` assigns the attached fid as its filesystem root and
+  resolves later FUSE node operations relative to that selected fid. The FUSE
+  root is therefore a client-side fid boundary, not a second namespace.
+- An r9p FUSE client can apply the same model after walking an ordinary
+  namespace path. If that walk crosses a referral, the transparent session
+  client selects and retains the direct service connection before the selected
+  fid becomes FUSE node 1.
 
 ## Effect
 
 The public resolution namespace and its descriptor facade were removed. One
 `9P2000.R` client now composes the admitted root and direct services
 transparently, and every caller surface carries the same optional local
-authority bindings.
+authority bindings. `r9p mount --source /path` can present any admitted
+namespace subtree as the local FUSE root, including across reconnect and lazy
+node rebinding.
 
 ## Open Questions
 
-- coordinator still needs to generate referrals directly from admitted service
-  registration state.
-- Registered services still need reachable authenticated endpoints or reverse
-  attachment for each intended caller host.
+- No protocol question remains for selecting a mounted subtree.
+- Deployment still must provide a reachable authenticated endpoint or reverse
+  attachment for every intended caller host.

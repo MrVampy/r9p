@@ -12,7 +12,7 @@ mod tree;
 use crate::feed::{start_feed_worker, FeedEventBus, FeedState, FeedWorkerConfig, FeedWorkerHandle};
 use crate::{
     AuthorityBindings, Client, ClientSlot, ConnectionConfig, Error, NamespaceCache, Result,
-    SessionEpoch,
+    SessionEpoch, ORDWR, OREAD,
 };
 pub use request::{parse_request, ControlRequest};
 use std::{
@@ -248,22 +248,63 @@ pub fn request_control_socket(
         },
         timeout,
     )?;
-    let path = control_path_for_request(&request);
-    let segments = snapshot::parse_namespace_path(&path);
-    let fid = if segments.is_empty() {
-        client.clone_fid_timeout(client.root_fid(), timeout)?
-    } else {
-        client.walk_timeout(client.root_fid(), &segments, timeout)?
-    };
-    if let Err(error) = client.open_timeout(fid, crate::OREAD, timeout) {
+    match request {
+        ControlRequest::Status => read_control_file(&client, b"status", timeout),
+        request => rpc_control_request(&client, &request, timeout),
+    }
+}
+
+#[cfg(unix)]
+fn read_control_file(client: &Client, name: &[u8], timeout: Duration) -> Result<String> {
+    let fid = client.walk_timeout(client.root_fid(), &[name.to_vec()], timeout)?;
+    if let Err(error) = client.open_timeout(fid, OREAD, timeout) {
         let _ = client.clunk_timeout(fid, timeout);
         return Err(error);
     }
-    let read = snapshot::read_all(&client, fid, timeout);
+    let read = snapshot::read_all(client, fid, timeout);
     let clunk = client.clunk_timeout(fid, timeout);
     let bytes = read?;
     clunk?;
     Ok(String::from_utf8_lossy(&bytes).to_string())
+}
+
+#[cfg(unix)]
+fn rpc_control_request(
+    client: &Client,
+    request: &ControlRequest,
+    timeout: Duration,
+) -> Result<String> {
+    let fid = client.walk_timeout(client.root_fid(), &[b"query".to_vec()], timeout)?;
+    if let Err(error) = client.open_timeout(fid, ORDWR, timeout) {
+        let _ = client.clunk_timeout(fid, timeout);
+        return Err(error);
+    }
+    let request = control_request_json(request);
+    let response = (|| {
+        let written = client.write_timeout(fid, 0, &request, timeout)?;
+        if usize::try_from(written).ok() != Some(request.len()) {
+            return Err(Error::new(libc::EIO, "short session query write"));
+        }
+        snapshot::read_all(client, fid, timeout)
+    })();
+    let clunk = client.clunk_timeout(fid, timeout);
+    let bytes = response?;
+    clunk?;
+    Ok(String::from_utf8_lossy(&bytes).to_string())
+}
+
+#[cfg(unix)]
+fn control_request_json(request: &ControlRequest) -> Vec<u8> {
+    let request = match request {
+        ControlRequest::Status => serde_json::json!({"op": "status"}),
+        ControlRequest::Snapshot { path, depth } => {
+            serde_json::json!({"op": "snapshot", "path": path, "depth": depth})
+        }
+        ControlRequest::Stat { path } => serde_json::json!({"op": "stat", "path": path}),
+        ControlRequest::List { path } => serde_json::json!({"op": "list", "path": path}),
+        ControlRequest::Read { path } => serde_json::json!({"op": "read", "path": path}),
+    };
+    request.to_string().into_bytes()
 }
 
 #[cfg(not(unix))]
@@ -276,25 +317,4 @@ pub fn request_control_socket(
         libc::ENOTSUP,
         "session control sockets require Unix sockets",
     ))
-}
-
-fn control_path_for_request(request: &ControlRequest) -> String {
-    match request {
-        ControlRequest::Status => "/status".to_string(),
-        ControlRequest::Snapshot { path, depth } => {
-            format!("/snapshot/{depth}{}", control_path_suffix(path))
-        }
-        ControlRequest::Stat { path } => format!("/stat{}", control_path_suffix(path)),
-        ControlRequest::List { path } => format!("/list{}", control_path_suffix(path)),
-        ControlRequest::Read { path } => format!("/read{}", control_path_suffix(path)),
-    }
-}
-
-fn control_path_suffix(path: &str) -> String {
-    let segments = snapshot::parse_namespace_path(path);
-    if segments.is_empty() {
-        "/.".to_string()
-    } else {
-        format!("/{}", path.trim_matches('/'))
-    }
 }

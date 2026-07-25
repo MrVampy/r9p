@@ -1,4 +1,4 @@
-use super::{freshness::ResponseFreshness, json, query, snapshot, status_json, ControlConfig};
+use super::{json, query, status_json, ControlConfig};
 use crate::{feed::FeedState, ClientSlot, NamespaceCache, SessionEpoch, ORDWR, OREAD};
 use r9p::{
     error::{Error as P9Error, ENOENT, EPERM},
@@ -16,11 +16,10 @@ const USAGE: &str = concat!(
     "files:\n",
     "  status             session attachment status JSON\n",
     "  usage              this text\n",
-    "  query              JSON RPC file: write {\"op\":\"stat\",\"path\":\"/\"}, read response\n",
-    "  stat/<path>        stat JSON for namespace path; use stat/. for root\n",
-    "  list/<path>        directory listing JSON; use list/. for root\n",
-    "  read/<path>        file content report JSON; use read/. for root\n",
-    "  snapshot/<depth>/<path> subtree snapshot JSON; use snapshot/<depth>/. for root\n",
+    "  query              JSON RPC file for status, snapshot, stat, list, and read\n",
+    "\n",
+    "example:\n",
+    "  write {\"op\":\"stat\",\"path\":\"/\"} to query, then read the same fid\n",
 );
 
 #[derive(Clone)]
@@ -42,15 +41,6 @@ enum ControlNode {
     Usage,
     Status,
     Query,
-    StatRoot,
-    Stat(Vec<String>),
-    ListRoot,
-    List(Vec<String>),
-    ReadRoot,
-    Read(Vec<String>),
-    SnapshotRoot,
-    SnapshotDepth(usize),
-    Snapshot { depth: usize, path: Vec<String> },
 }
 
 impl ControlTree {
@@ -104,10 +94,6 @@ impl ControlTree {
             self.stat_for(ControlNode::Status),
             self.stat_for(ControlNode::Usage),
             self.stat_for(ControlNode::Query),
-            self.stat_for(ControlNode::StatRoot),
-            self.stat_for(ControlNode::ListRoot),
-            self.stat_for(ControlNode::ReadRoot),
-            self.stat_for(ControlNode::SnapshotRoot),
         ]
     }
 }
@@ -158,11 +144,6 @@ impl FileTree for ControlTree {
     fn read(&mut self, fid: Fid, qid: Qid, offset: u64, count: u32) -> r9p::Result<ReadData> {
         match self.node_for(qid)? {
             ControlNode::Root => Ok(ReadData::Directory(self.root_entries())),
-            ControlNode::StatRoot
-            | ControlNode::ListRoot
-            | ControlNode::ReadRoot
-            | ControlNode::SnapshotRoot
-            | ControlNode::SnapshotDepth(_) => Ok(ReadData::Directory(Vec::new())),
             ControlNode::Usage => read_bytes(USAGE.as_bytes(), offset, count),
             ControlNode::Status => {
                 let client = self.client.snapshot().map_err(p9_error)?;
@@ -181,57 +162,6 @@ impl FileTree for ControlTree {
                     json::error_response("query_required", "write query JSON first").into_bytes()
                 });
                 read_bytes(&response, offset, count)
-            }
-            ControlNode::Stat(path) => {
-                let client = self.client.snapshot().map_err(p9_error)?;
-                let response = snapshot::stat_json(
-                    &client,
-                    &self.cache,
-                    &namespace_path(&path),
-                    self.config.request_timeout,
-                    self.cache_reads_enabled(),
-                    &self.response_freshness().map_err(p9_error)?,
-                )
-                .map_err(p9_error)?;
-                read_bytes(response.as_bytes(), offset, count)
-            }
-            ControlNode::List(path) => {
-                let client = self.client.snapshot().map_err(p9_error)?;
-                let response = snapshot::list_json(
-                    &client,
-                    &self.cache,
-                    &namespace_path(&path),
-                    self.config.request_timeout,
-                    self.cache_reads_enabled(),
-                    &self.response_freshness().map_err(p9_error)?,
-                )
-                .map_err(p9_error)?;
-                read_bytes(response.as_bytes(), offset, count)
-            }
-            ControlNode::Read(path) => {
-                let client = self.client.snapshot().map_err(p9_error)?;
-                let response = snapshot::read_json(
-                    &client,
-                    &namespace_path(&path),
-                    self.config.request_timeout,
-                    &self.response_freshness().map_err(p9_error)?,
-                )
-                .map_err(p9_error)?;
-                read_bytes(response.as_bytes(), offset, count)
-            }
-            ControlNode::Snapshot { depth, path } => {
-                let client = self.client.snapshot().map_err(p9_error)?;
-                let response = snapshot::snapshot_json(
-                    &client,
-                    &self.cache,
-                    &namespace_path(&path),
-                    depth,
-                    self.config.request_timeout,
-                    self.cache_reads_enabled(),
-                    &self.response_freshness().map_err(p9_error)?,
-                )
-                .map_err(p9_error)?;
-                read_bytes(response.as_bytes(), offset, count)
             }
         }
     }
@@ -272,16 +202,6 @@ impl FileTree for ControlTree {
     }
 }
 
-impl ControlTree {
-    fn response_freshness(&self) -> crate::Result<ResponseFreshness> {
-        ResponseFreshness::from_feed(&self.session_epoch, &self.feed_state)
-    }
-
-    fn cache_reads_enabled(&self) -> bool {
-        self.feed_state.snapshot().state == "connected"
-    }
-}
-
 fn walk_child(node: &ControlNode, name: &[u8]) -> Option<ControlNode> {
     let name = String::from_utf8_lossy(name).to_string();
     match node {
@@ -289,49 +209,14 @@ fn walk_child(node: &ControlNode, name: &[u8]) -> Option<ControlNode> {
             "usage" => Some(ControlNode::Usage),
             "status" => Some(ControlNode::Status),
             "query" => Some(ControlNode::Query),
-            "stat" => Some(ControlNode::StatRoot),
-            "list" => Some(ControlNode::ListRoot),
-            "read" => Some(ControlNode::ReadRoot),
-            "snapshot" => Some(ControlNode::SnapshotRoot),
             _ => None,
         },
-        ControlNode::StatRoot => Some(ControlNode::Stat(extend_path(Vec::new(), name))),
-        ControlNode::Stat(path) => Some(ControlNode::Stat(extend_path(path.clone(), name))),
-        ControlNode::ListRoot => Some(ControlNode::List(extend_path(Vec::new(), name))),
-        ControlNode::List(path) => Some(ControlNode::List(extend_path(path.clone(), name))),
-        ControlNode::ReadRoot => Some(ControlNode::Read(extend_path(Vec::new(), name))),
-        ControlNode::Read(path) => Some(ControlNode::Read(extend_path(path.clone(), name))),
-        ControlNode::SnapshotRoot => name.parse::<usize>().ok().map(ControlNode::SnapshotDepth),
-        ControlNode::SnapshotDepth(depth) => Some(ControlNode::Snapshot {
-            depth: *depth,
-            path: extend_path(Vec::new(), name),
-        }),
-        ControlNode::Snapshot { depth, path } => Some(ControlNode::Snapshot {
-            depth: *depth,
-            path: extend_path(path.clone(), name),
-        }),
         ControlNode::Usage | ControlNode::Status | ControlNode::Query => None,
     }
 }
 
-fn extend_path(mut path: Vec<String>, name: String) -> Vec<String> {
-    if path.is_empty() && name == "." {
-        return path;
-    }
-    path.push(name);
-    path
-}
-
-fn namespace_path(path: &[String]) -> String {
-    if path.is_empty() {
-        "/".to_string()
-    } else {
-        format!("/{}", path.join("/"))
-    }
-}
-
 fn qid_for_path(path: u64, node: &ControlNode) -> Qid {
-    if is_dir_node(node) {
+    if matches!(node, ControlNode::Root) {
         Qid::dir(path)
     } else {
         Qid::file(path)
@@ -353,34 +238,11 @@ fn node_name(node: &ControlNode) -> Vec<u8> {
         ControlNode::Usage => b"usage".to_vec(),
         ControlNode::Status => b"status".to_vec(),
         ControlNode::Query => b"query".to_vec(),
-        ControlNode::StatRoot => b"stat".to_vec(),
-        ControlNode::Stat(path) => query_name(path),
-        ControlNode::ListRoot => b"list".to_vec(),
-        ControlNode::List(path) => query_name(path),
-        ControlNode::ReadRoot => b"read".to_vec(),
-        ControlNode::Read(path) => query_name(path),
-        ControlNode::SnapshotRoot => b"snapshot".to_vec(),
-        ControlNode::SnapshotDepth(depth) => depth.to_string().into_bytes(),
-        ControlNode::Snapshot { path, .. } => query_name(path),
     }
 }
 
-fn query_name(path: &[String]) -> Vec<u8> {
-    path.last()
-        .map(|name| name.as_bytes().to_vec())
-        .unwrap_or_else(|| b".".to_vec())
-}
-
 fn is_dir_node(node: &ControlNode) -> bool {
-    matches!(
-        node,
-        ControlNode::Root
-            | ControlNode::StatRoot
-            | ControlNode::ListRoot
-            | ControlNode::ReadRoot
-            | ControlNode::SnapshotRoot
-            | ControlNode::SnapshotDepth(_)
-    )
+    matches!(node, ControlNode::Root)
 }
 
 fn read_bytes(bytes: &[u8], offset: u64, count: u32) -> r9p::Result<ReadData> {
@@ -399,30 +261,18 @@ fn p9_error(error: crate::Error) -> P9Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{namespace_path, walk_child, ControlNode};
+    use super::{walk_child, ControlNode};
 
     #[test]
-    fn dot_names_the_root_query_path() {
-        let node = walk_child(&ControlNode::StatRoot, b".").expect("dot should walk");
-        assert_eq!(node, ControlNode::Stat(Vec::new()));
-    }
-
-    #[test]
-    fn nested_paths_keep_namespace_segments() {
-        let node = walk_child(&ControlNode::ListRoot, b"srv").expect("first segment");
-        let node = walk_child(&node, b"runtime").expect("second segment");
+    fn root_exposes_only_the_current_control_surface() {
         assert_eq!(
-            node,
-            ControlNode::List(vec!["srv".to_string(), "runtime".to_string()])
+            walk_child(&ControlNode::Root, b"status"),
+            Some(ControlNode::Status)
         );
-    }
-
-    #[test]
-    fn namespace_path_formats_root_and_nested_paths() {
-        assert_eq!(namespace_path(&[]), "/");
         assert_eq!(
-            namespace_path(&["srv".to_string(), "runtime".to_string()]),
-            "/srv/runtime"
+            walk_child(&ControlNode::Root, b"query"),
+            Some(ControlNode::Query)
         );
+        assert_eq!(walk_child(&ControlNode::Root, b"snapshot"), None);
     }
 }

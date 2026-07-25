@@ -307,7 +307,7 @@ impl<T> Server<T> {
                     .ok_or_else(|| Error::from_static("version not negotiated"))?;
                 if !variant.supports_referrals() {
                     return Err(Error::from_static(
-                        "namespace referrals require negotiated 9P2000.r9p",
+                        "namespace referrals require negotiated 9P2000.R",
                     ));
                 }
                 let state = self.session.fid(fid)?;

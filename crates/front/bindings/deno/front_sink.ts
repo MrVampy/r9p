@@ -1,12 +1,12 @@
-export const SUPPORTED_ABI_VERSION = 20;
+export const SUPPORTED_ABI_VERSION = 21;
 export const FRONT_CAP_PUSHED_NAMESPACE_METADATA = 1n << 0n;
 export const FRONT_CAP_REQUEST_CONTEXT_V2 = 1n << 1n;
 export const FRONT_CAP_SYNTHETIC_READ_RELAY = 1n << 2n;
 export const FRONT_CAP_NATIVE_CLIENT_MUTATIONS = 1n << 3n;
 export const FRONT_CAP_ATOMIC_CREATE_WRITE = 1n << 4n;
 export const FRONT_CAP_NAMESPACE_MUTATION_RELAYS = 1n << 5n;
-export const FRONT_CAP_RESOLVED_NAMESPACE_CLIENT = 1n << 6n;
-export const FRONT_CAP_AUTHENTICATED_SERVE = 1n << 7n;
+export const FRONT_CAP_AUTHENTICATED_SERVE = 1n << 6n;
+export const FRONT_CAP_CLIENT_AUTHORITY_BINDINGS = 1n << 7n;
 export const REQUIRED_FRONT_CAPABILITIES =
   FRONT_CAP_PUSHED_NAMESPACE_METADATA |
   FRONT_CAP_REQUEST_CONTEXT_V2 |
@@ -14,8 +14,8 @@ export const REQUIRED_FRONT_CAPABILITIES =
   FRONT_CAP_NATIVE_CLIENT_MUTATIONS |
   FRONT_CAP_ATOMIC_CREATE_WRITE |
   FRONT_CAP_NAMESPACE_MUTATION_RELAYS |
-  FRONT_CAP_RESOLVED_NAMESPACE_CLIENT |
-  FRONT_CAP_AUTHENTICATED_SERVE;
+  FRONT_CAP_AUTHENTICATED_SERVE |
+  FRONT_CAP_CLIENT_AUTHORITY_BINDINGS;
 
 export { renderExportDescriptor } from "./export_descriptor.ts";
 export type { ExportDescriptorOptions } from "./export_descriptor.ts";
@@ -28,6 +28,10 @@ const SYMBOLS = {
   r9p_front_capabilities: { parameters: [], result: "u64" },
   r9p_front_new: { parameters: [], result: "pointer" },
   r9p_front_free: { parameters: ["pointer"], result: "void" },
+  r9p_front_bind_client_authority: {
+    parameters: ["pointer", "buffer", "usize", "buffer", "usize"],
+    result: "i32",
+  },
   r9p_front_set: {
     parameters: ["pointer", "buffer", "usize", "buffer", "usize"],
     result: "i32",
@@ -166,58 +170,6 @@ const SYMBOLS = {
     ],
     result: "i32",
   },
-  r9p_front_client_resolved_rpc: {
-    parameters: [
-      "pointer",
-      "buffer",
-      "usize",
-      "buffer",
-      "usize",
-      "buffer",
-      "usize",
-      "buffer",
-      "usize",
-      "buffer",
-      "usize",
-      "buffer",
-      "usize",
-      "buffer",
-      "usize",
-      "buffer",
-      "usize",
-      "u32",
-      "u64",
-      "buffer",
-      "usize",
-      "buffer",
-    ],
-    result: "i32",
-  },
-  r9p_front_client_resolved_read: {
-    parameters: [
-      "pointer",
-      "buffer",
-      "usize",
-      "buffer",
-      "usize",
-      "buffer",
-      "usize",
-      "buffer",
-      "usize",
-      "buffer",
-      "usize",
-      "buffer",
-      "usize",
-      "buffer",
-      "usize",
-      "u32",
-      "u64",
-      "buffer",
-      "usize",
-      "buffer",
-    ],
-    result: "i32",
-  },
   r9p_front_client_create_at: {
     parameters: [
       "pointer",
@@ -334,27 +286,6 @@ export interface ClientReadOptions {
   responseCapacity?: number;
 }
 
-export interface ResolvedClientCoordinates {
-  resolverBind: string;
-  resolverUname: string;
-  resolverAname: string;
-  resolverAuthConfig?: string;
-  authorityBoundary?: string;
-  serviceAuthConfig?: string;
-  msize?: number;
-  timeoutMs?: bigint;
-  responseCapacity?: number;
-}
-
-export interface ResolvedClientRpcOptions extends ResolvedClientCoordinates {
-  path: string;
-  request: string;
-}
-
-export interface ResolvedClientReadOptions extends ResolvedClientCoordinates {
-  path: string;
-}
-
 export interface ClientCreateAtOptions {
   endpointBind: string;
   uname: string;
@@ -444,6 +375,24 @@ export class FrontHost implements TransitionSink {
       throw new Error("front handle allocation failed");
     }
     return new FrontHost(library, handle);
+  }
+
+  bindClientAuthority(authorityBoundary: string, authConfigPath: string): void {
+    this.assertOpen();
+    const [authority, authorityLen] = bytes(authorityBoundary);
+    const [authConfig, authConfigLen] = bytes(authConfigPath);
+    const status = this.library.symbols.r9p_front_bind_client_authority(
+      this.handle,
+      authority,
+      authorityLen,
+      authConfig,
+      authConfigLen,
+    );
+    if (status !== 0) {
+      throw new Error(
+        `front bind_client_authority(${authorityBoundary}) failed with status ${status}: ${this.lastError()}`,
+      );
+    }
   }
 
   serve(bind: string, sessionAuthConfig?: string): number {
@@ -556,108 +505,6 @@ export class FrontHost implements TransitionSink {
     if (responseLen > response.length) {
       throw new Error(
         `front client_read(${options.path}) response exceeded buffer: ${responseLen} > ${response.length}`,
-      );
-    }
-    return decoder.decode(response.slice(0, responseLen));
-  }
-
-  resolvedRpc(options: ResolvedClientRpcOptions): string {
-    this.assertOpen();
-    const [resolverBind, resolverBindLen] = bytes(options.resolverBind);
-    const [resolverUname, resolverUnameLen] = bytes(options.resolverUname);
-    const [resolverAname, resolverAnameLen] = bytes(options.resolverAname);
-    const [resolverAuth, resolverAuthLen] = bytes(options.resolverAuthConfig ?? "");
-    const [path, pathLen] = bytes(options.path);
-    const [authority, authorityLen] = bytes(options.authorityBoundary ?? "");
-    const [serviceAuth, serviceAuthLen] = bytes(options.serviceAuthConfig ?? "");
-    const [request, requestLen] = bytes(options.request);
-    const response = new Uint8Array(
-      new ArrayBuffer(options.responseCapacity ?? 65_536),
-    );
-    const responseLenOut = new Uint8Array(new ArrayBuffer(8));
-    const status = this.library.symbols.r9p_front_client_resolved_rpc(
-      this.handle,
-      resolverBind,
-      resolverBindLen,
-      resolverUname,
-      resolverUnameLen,
-      resolverAname,
-      resolverAnameLen,
-      resolverAuth,
-      resolverAuthLen,
-      path,
-      pathLen,
-      authority,
-      authorityLen,
-      serviceAuth,
-      serviceAuthLen,
-      request,
-      requestLen,
-      options.msize ?? 65_536,
-      options.timeoutMs ?? 5_000n,
-      response,
-      BigInt(response.length),
-      responseLenOut,
-    );
-    return this.decodeResolvedResponse("rpc", options.path, status, response, responseLenOut);
-  }
-
-  resolvedRead(options: ResolvedClientReadOptions): string {
-    this.assertOpen();
-    const [resolverBind, resolverBindLen] = bytes(options.resolverBind);
-    const [resolverUname, resolverUnameLen] = bytes(options.resolverUname);
-    const [resolverAname, resolverAnameLen] = bytes(options.resolverAname);
-    const [resolverAuth, resolverAuthLen] = bytes(options.resolverAuthConfig ?? "");
-    const [path, pathLen] = bytes(options.path);
-    const [authority, authorityLen] = bytes(options.authorityBoundary ?? "");
-    const [serviceAuth, serviceAuthLen] = bytes(options.serviceAuthConfig ?? "");
-    const response = new Uint8Array(
-      new ArrayBuffer(options.responseCapacity ?? 65_536),
-    );
-    const responseLenOut = new Uint8Array(new ArrayBuffer(8));
-    const status = this.library.symbols.r9p_front_client_resolved_read(
-      this.handle,
-      resolverBind,
-      resolverBindLen,
-      resolverUname,
-      resolverUnameLen,
-      resolverAname,
-      resolverAnameLen,
-      resolverAuth,
-      resolverAuthLen,
-      path,
-      pathLen,
-      authority,
-      authorityLen,
-      serviceAuth,
-      serviceAuthLen,
-      options.msize ?? 65_536,
-      options.timeoutMs ?? 5_000n,
-      response,
-      BigInt(response.length),
-      responseLenOut,
-    );
-    return this.decodeResolvedResponse("read", options.path, status, response, responseLenOut);
-  }
-
-  private decodeResolvedResponse(
-    operation: "rpc" | "read",
-    path: string,
-    status: number,
-    response: Uint8Array<ArrayBuffer>,
-    responseLenOut: Uint8Array<ArrayBuffer>,
-  ): string {
-    const responseLen = Number(
-      new DataView(responseLenOut.buffer).getBigUint64(0, true),
-    );
-    if (status !== 0) {
-      throw new Error(
-        `front resolved_${operation}(${path}) failed with status ${status}: ${this.lastError()}`,
-      );
-    }
-    if (responseLen > response.length) {
-      throw new Error(
-        `front resolved_${operation}(${path}) response exceeded buffer: ${responseLen} > ${response.length}`,
       );
     }
     return decoder.decode(response.slice(0, responseLen));

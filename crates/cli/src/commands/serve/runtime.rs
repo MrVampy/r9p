@@ -231,7 +231,7 @@ where
             default_msize: config.msize,
             max_msize: config.msize,
             max_fids: config.max_fids,
-            variant: Variant::R9p,
+            variant: Variant::R,
             session_uname,
             ..ServerConfig::default()
         },
@@ -259,7 +259,7 @@ fn export_descriptor(config: &ExportConfig, bound: &BoundListener) -> CliResult<
         },
         auth: config.auth.clone(),
         pid: std::process::id(),
-        protocol: Protocol::NineP2000R9p,
+        protocol: Protocol::NineP2000R,
         msize: config.serve.msize,
         expires_at: None,
         local_root_label: Some(config.serve.root.display().to_string()),

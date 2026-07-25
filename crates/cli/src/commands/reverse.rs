@@ -328,6 +328,7 @@ mod tests {
         Config {
             address: None,
             auth_config: None,
+            authorities: session::AuthorityBindings::new(),
             aname: String::new(),
             uname: "tester".to_string(),
             msize: 65_536,

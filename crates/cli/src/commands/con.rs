@@ -74,6 +74,7 @@ fn open_stream(target: &Target) -> CliResult<(Client, r9p::fid::Fid, r9p::fid::F
             aname: target.config.aname.clone(),
             msize: target.config.msize,
             auth_config: target.config.auth_config.clone(),
+            authorities: target.config.authorities.clone(),
         },
         target.config.request_timeout.unwrap_or(Duration::ZERO),
     )?;

@@ -1,11 +1,12 @@
 use super::Client;
 use crate::ConnectionConfig;
 use r9p::{
-    codec,
+    codec::{self, Variant},
     error::{Error as P9Error, Result as P9Result},
     fid::Fid,
     qid::{Qid, DMDIR},
-    server::{FileTree, OpenFile, ReadData, Server},
+    referral::NamespaceReferral,
+    server::{FileTree, OpenFile, ReadData, Server, ServerConfig},
     stat::Stat,
 };
 use std::{
@@ -30,6 +31,7 @@ fn connection(address: String) -> ConnectionConfig {
         aname: "/".to_string(),
         msize: 8192,
         auth_config: None,
+        authorities: crate::AuthorityBindings::new(),
     }
 }
 
@@ -183,6 +185,60 @@ fn client_slot_replacement_bumps_session_epoch() {
     let _ = fs::remove_file(second_socket);
 }
 
+#[test]
+fn ordinary_namespace_operations_cross_referrals_transparently() {
+    let service_listener = TcpListener::bind("127.0.0.1:0").expect("service listener");
+    let service_address = service_listener.local_addr().expect("service address");
+    let service = thread::spawn(move || {
+        let (stream, _) = service_listener.accept().expect("service accept");
+        handle_configured_connection(stream, ValueTree, ServerConfig::default())
+            .expect("service connection");
+    });
+
+    let root_listener = TcpListener::bind("127.0.0.1:0").expect("root listener");
+    let root_address = root_listener.local_addr().expect("root address");
+    let root = thread::spawn(move || {
+        let (stream, _) = root_listener.accept().expect("root accept");
+        handle_configured_connection(
+            stream,
+            ReferralRoot {
+                endpoint: service_address.to_string().into_bytes(),
+            },
+            ServerConfig {
+                variant: Variant::R,
+                ..ServerConfig::default()
+            },
+        )
+        .expect("root connection");
+    });
+
+    let client = Client::connect_with_timeout(
+        &connection(root_address.to_string()),
+        Duration::from_secs(1),
+    )
+    .expect("namespace client should connect");
+    assert_eq!(client.variant(), Variant::R);
+
+    let fid = client
+        .walk_path("/sources/x/value")
+        .expect("walk should route directly to the referred service");
+    client
+        .open(fid, r9p::OREAD)
+        .expect("referred file should open");
+    assert_eq!(
+        client
+            .read_full(fid, 0, 8192)
+            .expect("referred file should read"),
+        b"direct-service-value"
+    );
+    client.clunk(fid).expect("referred fid should clunk");
+    client.shutdown().expect("namespace should shut down");
+
+    drop(client);
+    root.join().expect("root server should not panic");
+    service.join().expect("service server should not panic");
+}
+
 struct RootOnly;
 
 impl FileTree for RootOnly {
@@ -217,6 +273,102 @@ impl FileTree for RootOnly {
     }
 }
 
+struct ReferralRoot {
+    endpoint: Vec<u8>,
+}
+
+impl FileTree for ReferralRoot {
+    fn attach(&mut self, _fid: Fid, _uname: &[u8], _aname: &[u8]) -> P9Result<Qid> {
+        Ok(ROOT_QID)
+    }
+
+    fn walk(
+        &mut self,
+        _fid: Fid,
+        _newfid: Fid,
+        _start: Qid,
+        names: &[Vec<u8>],
+    ) -> P9Result<Vec<Qid>> {
+        if names.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(P9Error::from(
+                "root does not relay referred namespace paths",
+            ))
+        }
+    }
+
+    fn open(&mut self, _fid: Fid, qid: Qid, _mode: u8) -> P9Result<OpenFile> {
+        Ok(OpenFile { qid, iounit: 0 })
+    }
+
+    fn read(&mut self, _fid: Fid, _qid: Qid, _offset: u64, _count: u32) -> P9Result<ReadData> {
+        Ok(ReadData::Directory(Vec::new()))
+    }
+
+    fn stat(&mut self, _qid: Qid) -> P9Result<Stat> {
+        Ok(root_stat())
+    }
+
+    fn referrals(&mut self, _fid: Fid, _qid: Qid) -> P9Result<Vec<NamespaceReferral>> {
+        Ok(vec![NamespaceReferral {
+            mount_path: b"/sources/x".to_vec(),
+            endpoint: self.endpoint.clone(),
+            uname: b"codex".to_vec(),
+            aname: b"/".to_vec(),
+            exported_root: b"/".to_vec(),
+            authority_boundary: b"loopback".to_vec(),
+            generation: 1,
+            valid_for_ms: 10_000,
+        }])
+    }
+}
+
+struct ValueTree;
+
+impl FileTree for ValueTree {
+    fn attach(&mut self, _fid: Fid, _uname: &[u8], _aname: &[u8]) -> P9Result<Qid> {
+        Ok(ROOT_QID)
+    }
+
+    fn walk(
+        &mut self,
+        _fid: Fid,
+        _newfid: Fid,
+        start: Qid,
+        names: &[Vec<u8>],
+    ) -> P9Result<Vec<Qid>> {
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+        if start == ROOT_QID && names.as_slice() == [b"value".as_slice()] {
+            Ok(vec![Qid::file(2)])
+        } else {
+            Err(P9Error::from("file does not exist"))
+        }
+    }
+
+    fn open(&mut self, _fid: Fid, qid: Qid, _mode: u8) -> P9Result<OpenFile> {
+        Ok(OpenFile { qid, iounit: 0 })
+    }
+
+    fn read(&mut self, _fid: Fid, qid: Qid, _offset: u64, _count: u32) -> P9Result<ReadData> {
+        if qid == Qid::file(2) {
+            Ok(ReadData::Bytes(b"direct-service-value".to_vec()))
+        } else {
+            Ok(ReadData::Directory(Vec::new()))
+        }
+    }
+
+    fn stat(&mut self, qid: Qid) -> P9Result<Stat> {
+        if qid == Qid::file(2) {
+            Ok(Stat::new("value", qid, 0o444))
+        } else {
+            Ok(root_stat())
+        }
+    }
+}
+
 fn root_stat() -> Stat {
     let mut stat = Stat::new(b".".to_vec(), ROOT_QID, DMDIR | 0o555);
     stat.uid = b"r9p".to_vec();
@@ -234,7 +386,15 @@ fn spawn_unix_root_server(socket_path: &Path) -> thread::JoinHandle<()> {
 }
 
 fn handle_connection(mut stream: impl Read + Write) -> io::Result<()> {
-    let mut server = Server::new(RootOnly);
+    handle_configured_connection(stream, RootOnly, ServerConfig::default())
+}
+
+fn handle_configured_connection(
+    mut stream: impl Read + Write,
+    tree: impl FileTree,
+    config: ServerConfig,
+) -> io::Result<()> {
+    let mut server = Server::with_config(tree, config);
     while let Some(message) = codec::read_tmessage_checked(&mut stream, server.session().msize())
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?
     {

@@ -1,7 +1,6 @@
 use std::{
-    io::{Read, Result as IoResult, Write},
+    io::{Read, Write},
     path::Path,
-    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     time::Duration,
 };
 
@@ -44,14 +43,6 @@ pub(crate) fn dial_address(
         }
         return dial_unix_socket(Path::new(path), config.request_timeout);
     }
-    if let Some(command) = command_address(address) {
-        if config.auth_config.is_some() {
-            return Err(cli_error(
-                "--auth-config is not valid for a command endpoint",
-            ));
-        }
-        return dial_command(command);
-    }
     let stream = match config.request_timeout {
         Some(timeout) => blocking::connect_tcp_stream_with_timeouts(
             address,
@@ -76,68 +67,6 @@ fn unix_address_path(address: &str) -> Option<&str> {
     address
         .strip_prefix("unix!")
         .or_else(|| address.strip_prefix("unix:"))
-}
-
-fn command_address(address: &str) -> Option<&str> {
-    address
-        .strip_prefix("cmd!")
-        .or_else(|| address.strip_prefix("cmd:"))
-}
-
-struct CommandTransport {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: ChildStdout,
-}
-
-impl Read for CommandTransport {
-    fn read(&mut self, buffer: &mut [u8]) -> IoResult<usize> {
-        self.stdout.read(buffer)
-    }
-}
-
-impl Write for CommandTransport {
-    fn write(&mut self, buffer: &[u8]) -> IoResult<usize> {
-        self.stdin.write(buffer)
-    }
-
-    fn flush(&mut self) -> IoResult<()> {
-        self.stdin.flush()
-    }
-}
-
-impl Drop for CommandTransport {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-fn dial_command(command: &str) -> CliResult<Box<dyn ReadWrite>> {
-    if command.trim().is_empty() {
-        return Err(cli_error("cmd transport command is empty"));
-    }
-    let mut child = Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(|error| cli_error(format!("spawn cmd transport: {error}")))?;
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| cli_error("cmd transport stdin unavailable"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| cli_error("cmd transport stdout unavailable"))?;
-    Ok(Box::new(CommandTransport {
-        child,
-        stdin,
-        stdout,
-    }))
 }
 
 #[cfg(unix)]
@@ -182,7 +111,7 @@ pub(crate) fn read_response(
 
 #[cfg(test)]
 mod tests {
-    use super::{command_address, unix_address_path};
+    use super::unix_address_path;
 
     #[test]
     fn accepts_plan9_and_descriptor_unix_address_forms() {
@@ -195,18 +124,5 @@ mod tests {
             Some("/tmp/r9p.sock")
         );
         assert_eq!(unix_address_path("127.0.0.1:564"), None);
-    }
-
-    #[test]
-    fn accepts_command_address_forms() {
-        assert_eq!(
-            command_address("cmd!ssh host nc -U /tmp/r9p.sock"),
-            Some("ssh host nc -U /tmp/r9p.sock")
-        );
-        assert_eq!(
-            command_address("cmd:ssh host nc -U /tmp/r9p.sock"),
-            Some("ssh host nc -U /tmp/r9p.sock")
-        );
-        assert_eq!(command_address("tcp!127.0.0.1!564"), None);
     }
 }

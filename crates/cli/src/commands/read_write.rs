@@ -2,7 +2,7 @@ use std::io::Read;
 
 use r9p::fid::Fid;
 use r9p::{
-    blocking::{BoxedClient, ORDWR, OREAD, OTRUNC, OWRITE},
+    blocking::{ORDWR, OREAD, OTRUNC, OWRITE},
     qid::{DMDIR, QTDIR},
     stat::Stat,
 };
@@ -38,18 +38,18 @@ pub(crate) fn read_cmd(config: Config, args: Vec<String>, mode: ReadMode) -> Cli
         config,
         path: args[0].clone(),
     };
-    let (mut client, fid) = open_path(&target, OREAD)?;
+    let (client, fid) = open_path(&target, OREAD)?;
     let result = if target.config.machine {
         match mode {
             ReadMode::Read => {
-                let data = read_all(&mut client, fid)?;
+                let data = read_all(&client, fid)?;
                 println!("read\t{}", hex_encode(&data));
                 Ok(())
             }
-            ReadMode::ReadFd => copy_fid_to_stdout(&mut client, fid).map(|_| ()),
+            ReadMode::ReadFd => copy_fid_to_stdout(&client, fid).map(|_| ()),
         }
     } else {
-        copy_fid_to_stdout(&mut client, fid).map(|_| ())
+        copy_fid_to_stdout(&client, fid).map(|_| ())
     };
     let clunk = client.clunk(fid);
     result?;
@@ -65,8 +65,8 @@ pub(crate) fn read_to_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
         config,
         path: args[0].clone(),
     };
-    let (mut client, fid) = open_path(&target, OREAD)?;
-    let result = copy_fid_to_file(&mut client, fid, &args[1]);
+    let (client, fid) = open_path(&target, OREAD)?;
+    let result = copy_fid_to_file(&client, fid, &args[1]);
     let clunk = client.clunk(fid);
     let count = result?;
     clunk?;
@@ -94,8 +94,8 @@ pub(crate) fn write_cmd(config: Config, mut args: Vec<String>, mode: WriteMode) 
         config: write_config_for_path(config, &args[0]),
         path: args[0].clone(),
     };
-    let (mut client, fid) = open_path(&target, OWRITE | OTRUNC)?;
-    let result = copy_stdin_to_fid(&mut client, fid, by_line);
+    let (client, fid) = open_path(&target, OWRITE | OTRUNC)?;
+    let result = copy_stdin_to_fid(&client, fid, by_line);
     let clunk = client.clunk(fid);
     let _count = result?;
     clunk?;
@@ -110,8 +110,8 @@ fn machine_write_fd_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
         config: write_config_for_path(config, &args[0]),
         path: args[0].clone(),
     };
-    let (mut client, fid) = open_path(&target, OWRITE | OTRUNC)?;
-    let result = copy_stdin_to_fid(&mut client, fid, false);
+    let (client, fid) = open_path(&target, OWRITE | OTRUNC)?;
+    let result = copy_stdin_to_fid(&client, fid, false);
     let clunk = client.clunk(fid);
     let count = result?;
     clunk?;
@@ -135,16 +135,16 @@ pub(crate) fn rpc_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
         config: operation_config(config),
         path: args[0].clone(),
     };
-    let (mut client, fid) = open_rpc_path(&target)?;
-    let result = rpc_exchange(&mut client, fid, &request);
+    let (client, fid) = open_rpc_path(&target)?;
+    let result = rpc_exchange(&client, fid, &request);
     let clunk = client.clunk(fid);
     result?;
     clunk?;
     Ok(())
 }
 
-fn open_rpc_path(target: &Target) -> CliResult<(BoxedClient, Fid)> {
-    let (mut client, path) = connect_path(target)?;
+fn open_rpc_path(target: &Target) -> CliResult<(session::Client, Fid)> {
+    let (client, path) = connect_path(target)?;
     let fid = client.walk_path(&path)?;
     let stat = client.stat(fid)?;
     match client.open(fid, ORDWR) {
@@ -170,7 +170,7 @@ fn rpc_open_hint(path: &str, stat: &Stat) -> Option<String> {
     None
 }
 
-fn rpc_exchange(client: &mut BoxedClient, fid: Fid, request: &[u8]) -> CliResult<()> {
+fn rpc_exchange(client: &session::Client, fid: Fid, request: &[u8]) -> CliResult<()> {
     let count = client.write(fid, 0, request)?;
     if count as usize != request.len() {
         return Err(cli_error("short rpc request write"));
@@ -188,8 +188,8 @@ pub(crate) fn write_at_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
         config: write_config_for_path(config, &args[0]),
         path: args[0].clone(),
     };
-    let (mut client, fid) = open_path(&target, OWRITE)?;
-    let result = copy_stdin_to_fid_at(&mut client, fid, offset, false);
+    let (client, fid) = open_path(&target, OWRITE)?;
+    let result = copy_stdin_to_fid_at(&client, fid, offset, false);
     let clunk = client.clunk(fid);
     let count = result?;
     clunk?;
@@ -232,8 +232,8 @@ fn write_local_file_to_target(
     open_mode: u8,
     local_path: &str,
 ) -> CliResult<u64> {
-    let (mut client, fid) = open_path(target, open_mode)?;
-    let result = copy_file_to_fid_at(&mut client, fid, offset, local_path);
+    let (client, fid) = open_path(target, open_mode)?;
+    let result = copy_file_to_fid_at(&client, fid, offset, local_path);
     let clunk = client.clunk(fid);
     let count = result?;
     clunk?;
@@ -260,13 +260,13 @@ pub(crate) fn create_write_from_cmd(config: Config, args: Vec<String>) -> CliRes
         config: target.config.clone(),
         path: parent,
     };
-    let (mut client, path) = connect_path(&parent_target)?;
+    let (client, path) = connect_path(&parent_target)?;
     let parent_fid = client.walk_path(&path)?;
     let created = client.create(parent_fid, name.as_bytes(), perm, mode);
     let parent_clunk = client.clunk(parent_fid);
     let (fid, _) = created?;
     parent_clunk?;
-    let result = copy_file_to_fid_at(&mut client, fid, offset, &args[4]);
+    let result = copy_file_to_fid_at(&client, fid, offset, &args[4]);
     let clunk = client.clunk(fid);
     let count = result?;
     clunk?;

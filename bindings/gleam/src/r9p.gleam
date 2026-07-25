@@ -24,19 +24,12 @@ pub type Target {
     aname: String,
     msize: Int,
     auth_config: Option(String),
+    authorities: List(AuthorityBinding),
   )
 }
 
 pub type AuthorityBinding {
   AuthorityBinding(boundary: String, config_path: String)
-}
-
-pub type Resolver {
-  Resolver(
-    target: Target,
-    service_msize: Int,
-    authorities: List(AuthorityBinding),
-  )
 }
 
 pub type VersionInfo {
@@ -60,7 +53,14 @@ pub fn with_timeout(adapter: Adapter, timeout_ms: Int) -> Adapter {
 }
 
 pub fn target(bind: String, uname: String, aname: String) -> Target {
-  Target(bind:, uname:, aname:, msize: default_msize, auth_config: None)
+  Target(
+    bind:,
+    uname:,
+    aname:,
+    msize: default_msize,
+    auth_config: None,
+    authorities: [],
+  )
 }
 
 pub fn target_with_msize(
@@ -69,104 +69,22 @@ pub fn target_with_msize(
   aname: String,
   msize: Int,
 ) -> Target {
-  Target(bind:, uname:, aname:, msize:, auth_config: None)
+  Target(bind:, uname:, aname:, msize:, auth_config: None, authorities: [])
 }
 
 pub fn with_auth_config(target: Target, path: String) -> Target {
   Target(..target, auth_config: Some(path))
 }
 
-pub fn resolver(target: Target) -> Resolver {
-  Resolver(target:, service_msize: default_msize, authorities: [])
-}
-
-pub fn resolver_with_service_msize(
-  resolver: Resolver,
-  service_msize: Int,
-) -> Resolver {
-  Resolver(..resolver, service_msize:)
-}
-
-pub fn resolver_bind_authority(
-  resolver: Resolver,
+pub fn bind_authority(
+  target: Target,
   boundary: String,
   config_path: String,
-) -> Resolver {
-  Resolver(..resolver, authorities: [
+) -> Target {
+  Target(..target, authorities: [
     AuthorityBinding(boundary:, config_path:),
-    ..resolver.authorities
+    ..target.authorities
   ])
-}
-
-pub fn resolved_stat(
-  adapter: Adapter,
-  resolver: Resolver,
-  path: String,
-) -> Result(r9p_stat.Stat, String) {
-  use line <- result.try(
-    run_resolved(adapter, resolver, "resolved-stat", [text(path)]),
-  )
-  r9p_stat.parse_line("stat", line)
-}
-
-pub fn resolved_list(
-  adapter: Adapter,
-  resolver: Resolver,
-  path: String,
-) -> Result(List(r9p_stat.Stat), String) {
-  use body <- result.try(
-    run_resolved(adapter, resolver, "resolved-list", [text(path)]),
-  )
-  body
-  |> codec.lines
-  |> r9p_stat.parse_lines
-}
-
-pub fn resolved_read(
-  adapter: Adapter,
-  resolver: Resolver,
-  path: String,
-) -> Result(BitArray, String) {
-  use line <- result.try(
-    run_resolved(adapter, resolver, "resolved-read", [text(path)]),
-  )
-  parse_read_line(line)
-}
-
-pub fn resolved_read_text(
-  adapter: Adapter,
-  resolver: Resolver,
-  path: String,
-) -> Result(String, String) {
-  use bytes <- result.try(resolved_read(adapter, resolver, path))
-  bit_array.to_string(bytes)
-  |> result.map_error(fn(_) { "r9p_beam_resolved_read_non_utf8:" <> path })
-}
-
-pub fn resolved_rpc(
-  adapter: Adapter,
-  resolver: Resolver,
-  path: String,
-  data: BitArray,
-) -> Result(BitArray, String) {
-  use line <- result.try(
-    run_resolved(adapter, resolver, "resolved-rpc", [
-      text(path),
-      codec.encode_hex(data),
-    ]),
-  )
-  parse_rpc_line(line)
-}
-
-pub fn resolved_rpc_text(
-  adapter: Adapter,
-  resolver: Resolver,
-  path: String,
-  data: String,
-) -> Result(String, String) {
-  use bytes <- result.try(resolved_rpc(adapter, resolver, path, <<data:utf8>>))
-  bit_array.to_string(bytes)
-  |> result.map_error(fn(_) { "r9p_beam_resolved_rpc_non_utf8:" <> path })
 }
 
 pub fn version(adapter: Adapter, target: Target) -> Result(VersionInfo, String) {
@@ -400,44 +318,21 @@ fn run(
   )
 }
 
-fn run_resolved(
-  adapter: Adapter,
-  resolver: Resolver,
-  operation: String,
-  fields: List(String),
-) -> Result(String, String) {
+fn target_fields(target: Target) -> List(String) {
   let authority_fields =
-    resolver.authorities
+    target.authorities
     |> list.reverse
     |> list.flat_map(fn(binding) {
       [text(binding.boundary), text(binding.config_path)]
     })
-  let header =
-    list.append(
-      [operation],
-      list.append(target_fields(resolver.target), [
-        int.to_string(resolver.service_msize),
-        int.to_string(list.length(resolver.authorities)),
-      ]),
-    )
-  request_port(
-    adapter.executable,
-    string.join(
-      list.append(header, list.append(authority_fields, fields)),
-      "\t",
-    ),
-    adapter.timeout_ms,
-  )
-}
-
-fn target_fields(target: Target) -> List(String) {
-  [
+  list.append([
     text(target.bind),
     text(target.uname),
     text(target.aname),
     int.to_string(target.msize),
     optional_text(target.auth_config),
-  ]
+    int.to_string(list.length(target.authorities)),
+  ], authority_fields)
 }
 
 fn optional_text(value: Option(String)) -> String {

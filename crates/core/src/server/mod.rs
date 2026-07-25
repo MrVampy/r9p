@@ -33,7 +33,7 @@ pub trait FileTree {
     fn stat(&mut self, qid: Qid) -> Result<Stat>;
 
     fn referrals(&mut self, _fid: Fid, _qid: Qid) -> Result<Vec<NamespaceReferral>> {
-        Err(Error::from_static("namespace referrals are not supported"))
+        Ok(Vec::new())
     }
 
     fn reset(&mut self) -> Result<()> {

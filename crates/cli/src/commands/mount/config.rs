@@ -21,6 +21,7 @@ pub(super) fn parse_mount_config(global: Config, args: Vec<String>) -> CliResult
     let mut config = MountConfig {
         address: String::new(),
         auth_config: global.auth_config,
+        authorities: global.authorities,
         mountpoint: String::new(),
         uname: global.uname,
         aname: global.aname,

@@ -22,12 +22,12 @@ pub(crate) fn machine_list_cmd(config: Config, args: Vec<String>) -> CliResult<(
         config,
         path: args[0].clone(),
     };
-    let (mut client, path) = connect_path(&target)?;
+    let (client, path) = connect_path(&target)?;
     let fid = client.walk_path(&path)?;
     let stat = client.stat(fid)?;
     if stat.mode & DMDIR != 0 {
         client.open(fid, OREAD)?;
-        let stats = read_dir_stats(&mut client, fid)?;
+        let stats = read_dir_stats(&client, fid)?;
         for stat in stats {
             print_machine_stat("entry", &stat);
         }
@@ -48,7 +48,7 @@ pub(crate) fn machine_write_cmd(config: Config, args: Vec<String>) -> CliResult<
         config: write_config_for_path(config, &args[0]),
         path: args[0].clone(),
     };
-    let (mut client, fid) = open_path(&target, OWRITE)?;
+    let (client, fid) = open_path(&target, OWRITE)?;
     let count = client.write(fid, offset, &data)?;
     client.clunk(fid)?;
     println!("write\t{count}");
@@ -64,10 +64,10 @@ pub(crate) fn machine_rpc_hex_cmd(config: Config, args: Vec<String>) -> CliResul
         config: operation_config(config),
         path: args[0].clone(),
     };
-    let (mut client, fid) = open_path(&target, ORDWR)?;
+    let (client, fid) = open_path(&target, ORDWR)?;
     let result = (|| {
-        write_exact_count(&mut client, fid, 0, &request)?;
-        read_all(&mut client, fid)
+        write_exact_count(&client, fid, 0, &request)?;
+        read_all(&client, fid)
     })();
     let clunk = client.clunk(fid);
     let response = result?;
@@ -95,7 +95,7 @@ pub(crate) fn machine_create_cmd(config: Config, args: Vec<String>) -> CliResult
         config: target.config.clone(),
         path: parent,
     };
-    let (mut client, path) = connect_path(&parent_target)?;
+    let (client, path) = connect_path(&parent_target)?;
     let parent_fid = client.walk_path(&path)?;
     let (fid, qid) = client.create(parent_fid, name.as_bytes(), perm, mode)?;
     let iounit = codec::max_write_payload(client.msize());

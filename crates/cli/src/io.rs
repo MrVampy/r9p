@@ -3,42 +3,50 @@ use std::{
     io::{self, BufRead, BufReader, Write},
 };
 
-use r9p::{
-    blocking::{self, BoxedClient},
-    fid::Fid,
-};
+use r9p::fid::Fid;
+use session::{Client as NamespaceClient, ConnectionConfig};
 
 use crate::errors::{cli_error, CliResult};
 use crate::target::{target_path, Target};
-use crate::transport::dial_target;
 use crate::READ_CHUNK;
 
-pub(crate) fn open_path(target: &Target, mode: u8) -> CliResult<(BoxedClient, Fid)> {
-    let (mut client, path) = connect_path(target)?;
+pub(crate) fn open_path(target: &Target, mode: u8) -> CliResult<(NamespaceClient, Fid)> {
+    let (client, path) = connect_path(target)?;
     let fid = client.walk_path(&path)?;
     client.open(fid, mode)?;
     Ok((client, fid))
 }
 
-pub(crate) fn connect_path(target: &Target) -> CliResult<(BoxedClient, String)> {
+pub(crate) fn connect_path(target: &Target) -> CliResult<(NamespaceClient, String)> {
     let path = target_path(target)?;
-    let stream = dial_target(target)?;
-    let client = blocking::Client::connect(
-        stream,
-        &target.config.uname,
-        &target.config.aname,
-        target.config.msize,
+    let address = match &target.config.address {
+        Some(address) => address.clone(),
+        None => {
+            let (service, _) = crate::target::split_namespace_path(&target.path)?;
+            format!("namespace!{service}")
+        }
+    };
+    let client = NamespaceClient::connect_with_timeout(
+        &ConnectionConfig {
+            address,
+            uname: target.config.uname.clone(),
+            aname: target.config.aname.clone(),
+            msize: target.config.msize,
+            auth_config: target.config.auth_config.clone(),
+            authorities: target.config.authorities.clone(),
+        },
+        target.config.request_timeout.unwrap_or_default(),
     )?;
     Ok((client, path))
 }
 
-pub(crate) fn copy_fid_to_stdout(client: &mut BoxedClient, fid: Fid) -> CliResult<u64> {
+pub(crate) fn copy_fid_to_stdout(client: &NamespaceClient, fid: Fid) -> CliResult<u64> {
     let mut stdout = io::stdout().lock();
     copy_fid_to_writer(client, fid, &mut stdout)
 }
 
 pub(crate) fn copy_fid_to_file(
-    client: &mut BoxedClient,
+    client: &NamespaceClient,
     fid: Fid,
     local_path: &str,
 ) -> CliResult<u64> {
@@ -47,7 +55,7 @@ pub(crate) fn copy_fid_to_file(
 }
 
 fn copy_fid_to_writer<W: Write>(
-    client: &mut BoxedClient,
+    client: &NamespaceClient,
     fid: Fid,
     writer: &mut W,
 ) -> CliResult<u64> {
@@ -67,7 +75,7 @@ fn copy_fid_to_writer<W: Write>(
     Ok(total)
 }
 
-pub(crate) fn read_all(client: &mut BoxedClient, fid: Fid) -> CliResult<Vec<u8>> {
+pub(crate) fn read_all(client: &NamespaceClient, fid: Fid) -> CliResult<Vec<u8>> {
     let mut out = Vec::new();
     let mut offset = 0_u64;
     loop {
@@ -84,7 +92,7 @@ pub(crate) fn read_all(client: &mut BoxedClient, fid: Fid) -> CliResult<Vec<u8>>
 }
 
 pub(crate) fn copy_stdin_to_fid(
-    client: &mut BoxedClient,
+    client: &NamespaceClient,
     fid: Fid,
     by_line: bool,
 ) -> CliResult<u64> {
@@ -92,7 +100,7 @@ pub(crate) fn copy_stdin_to_fid(
 }
 
 pub(crate) fn copy_stdin_to_fid_at(
-    client: &mut BoxedClient,
+    client: &NamespaceClient,
     fid: Fid,
     initial_offset: u64,
     by_line: bool,
@@ -102,7 +110,7 @@ pub(crate) fn copy_stdin_to_fid_at(
 }
 
 pub(crate) fn copy_file_to_fid_at(
-    client: &mut BoxedClient,
+    client: &NamespaceClient,
     fid: Fid,
     initial_offset: u64,
     local_path: &str,
@@ -113,7 +121,7 @@ pub(crate) fn copy_file_to_fid_at(
 }
 
 fn copy_reader_to_fid_at<R: BufRead>(
-    client: &mut BoxedClient,
+    client: &NamespaceClient,
     fid: Fid,
     initial_offset: u64,
     by_line: bool,
@@ -159,7 +167,7 @@ fn copy_reader_to_fid_at<R: BufRead>(
 }
 
 pub(crate) fn write_exact_count(
-    client: &mut BoxedClient,
+    client: &NamespaceClient,
     fid: Fid,
     offset: u64,
     data: &[u8],

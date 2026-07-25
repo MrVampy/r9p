@@ -4,7 +4,7 @@ use std::{
 };
 
 use r9p::{
-    blocking::{BoxedClient, OREAD, OTRUNC, OWRITE},
+    blocking::{OREAD, OTRUNC, OWRITE},
     fid::Fid,
     qid::DMDIR,
 };
@@ -29,7 +29,7 @@ pub(crate) fn machine_script_cmd(config: Config, args: Vec<String>) -> CliResult
         config,
         path: service,
     };
-    let (mut client, _) = connect_path(&target)?;
+    let (client, _) = connect_path(&target)?;
     let script = File::open(&script_path)?;
     for (index, line) in BufReader::new(script).lines().enumerate() {
         let line_number = index + 1;
@@ -38,14 +38,14 @@ pub(crate) fn machine_script_cmd(config: Config, args: Vec<String>) -> CliResult
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        run_script_line(&target, &mut client, line_number, &line)?;
+        run_script_line(&target, &client, line_number, &line)?;
     }
     Ok(())
 }
 
 fn run_script_line(
     target: &Target,
-    client: &mut BoxedClient,
+    client: &session::Client,
     line_number: usize,
     line: &str,
 ) -> CliResult<()> {
@@ -142,7 +142,7 @@ fn run_script_line(
 }
 
 fn create_write_from_path(
-    client: &mut BoxedClient,
+    client: &session::Client,
     path: &str,
     perm: u32,
     mode: u8,
@@ -162,7 +162,7 @@ fn create_write_from_path(
     Ok(count)
 }
 
-fn create_path(client: &mut BoxedClient, path: &str, perm: u32, mode: u8) -> CliResult<()> {
+fn create_path(client: &session::Client, path: &str, perm: u32, mode: u8) -> CliResult<()> {
     let (parent, name) = split_parent(path)?;
     let parent_fid = client.walk_path(&parent)?;
     let created = client.create(parent_fid, name.as_bytes(), perm, mode);
@@ -187,7 +187,7 @@ fn parse_mode(value: &str) -> CliResult<u8> {
 }
 
 fn fresh_stat_error(target: &Target, path: &str, line_number: usize) -> CliResult<()> {
-    let (mut fresh, _) = connect_path(target)?;
+    let (fresh, _) = connect_path(target)?;
     let result = match fresh.walk_path(path) {
         Ok(fid) => {
             let stat = fresh.stat(fid).map(|_| ());
@@ -207,7 +207,7 @@ fn fresh_stat_error(target: &Target, path: &str, line_number: usize) -> CliResul
     }
 }
 
-fn walk_open(client: &mut BoxedClient, path: &str, mode: u8) -> CliResult<Fid> {
+fn walk_open(client: &session::Client, path: &str, mode: u8) -> CliResult<Fid> {
     let fid = client.walk_path(path)?;
     match client.open(fid, mode) {
         Ok(_) => Ok(fid),
@@ -219,7 +219,7 @@ fn walk_open(client: &mut BoxedClient, path: &str, mode: u8) -> CliResult<Fid> {
 }
 
 fn read_range(
-    client: &mut BoxedClient,
+    client: &session::Client,
     fid: Fid,
     initial_offset: u64,
     requested: u64,

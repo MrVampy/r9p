@@ -31,7 +31,7 @@ pub(crate) fn rm_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
 }
 
 pub(crate) fn remove_one(target: &Target) -> CliResult<()> {
-    let (mut client, path) = connect_path(target)?;
+    let (client, path) = connect_path(target)?;
     let fid = client.walk_path(&path)?;
     client.remove(fid)?;
     Ok(())
@@ -87,7 +87,7 @@ pub(crate) fn create_one(target: &Target, perm: u32, mode: u8) -> CliResult<()> 
         config: target.config.clone(),
         path: parent,
     };
-    let (mut client, path) = connect_path(&parent_target)?;
+    let (client, path) = connect_path(&parent_target)?;
     let parent_fid = client.walk_path(&path)?;
     let (fid, _) = client.create(parent_fid, name.as_bytes(), perm, mode)?;
     client.clunk(fid)?;

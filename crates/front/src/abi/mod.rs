@@ -11,9 +11,9 @@ mod client;
 mod request;
 
 pub use client::{
+    r9p_front_bind_client_authority,
     r9p_front_client_create_at, r9p_front_client_create_write_at, r9p_front_client_read,
-    r9p_front_client_remove, r9p_front_client_resolved_read, r9p_front_client_resolved_rpc,
-    r9p_front_client_rpc, r9p_front_client_write_file,
+    r9p_front_client_remove, r9p_front_client_rpc, r9p_front_client_write_file,
 };
 pub use request::{
     r9p_front_complete_remove, r9p_front_complete_request, r9p_front_complete_write,
@@ -21,23 +21,23 @@ pub use request::{
     r9p_front_reject_request, r9p_front_reject_write, r9p_front_reject_wstat,
     r9p_front_request_context_copy, r9p_front_request_copy, r9p_front_request_prefix_copy,
 };
-pub const ABI_VERSION: u32 = 20;
+pub const ABI_VERSION: u32 = 21;
 pub const CAPABILITY_PUSHED_NAMESPACE_METADATA: u64 = 1 << 0;
 pub const CAPABILITY_REQUEST_CONTEXT_V2: u64 = 1 << 1;
 pub const CAPABILITY_SYNTHETIC_READ_RELAY: u64 = 1 << 2;
 pub const CAPABILITY_NATIVE_CLIENT_MUTATIONS: u64 = 1 << 3;
 pub const CAPABILITY_ATOMIC_CREATE_WRITE: u64 = 1 << 4;
 pub const CAPABILITY_NAMESPACE_MUTATION_RELAYS: u64 = 1 << 5;
-pub const CAPABILITY_RESOLVED_NAMESPACE_CLIENT: u64 = 1 << 6;
-pub const CAPABILITY_AUTHENTICATED_SERVE: u64 = 1 << 7;
+pub const CAPABILITY_AUTHENTICATED_SERVE: u64 = 1 << 6;
+pub const CAPABILITY_CLIENT_AUTHORITY_BINDINGS: u64 = 1 << 7;
 pub const CAPABILITIES: u64 = CAPABILITY_PUSHED_NAMESPACE_METADATA
     | CAPABILITY_REQUEST_CONTEXT_V2
     | CAPABILITY_SYNTHETIC_READ_RELAY
     | CAPABILITY_NATIVE_CLIENT_MUTATIONS
     | CAPABILITY_ATOMIC_CREATE_WRITE
     | CAPABILITY_NAMESPACE_MUTATION_RELAYS
-    | CAPABILITY_RESOLVED_NAMESPACE_CLIENT
-    | CAPABILITY_AUTHENTICATED_SERVE;
+    | CAPABILITY_AUTHENTICATED_SERVE
+    | CAPABILITY_CLIENT_AUTHORITY_BINDINGS;
 
 const OK: i32 = 0;
 const TIMEOUT: i32 = 1;
@@ -48,6 +48,7 @@ pub struct FrontAbi {
     front: Front,
     serves: Mutex<Vec<ServeHandle>>,
     staged_requests: Mutex<BTreeMap<u64, StagedRequest>>,
+    client_authorities: Mutex<session::AuthorityBindings>,
     last_error: Mutex<Vec<u8>>,
 }
 
@@ -107,6 +108,7 @@ pub extern "C" fn r9p_front_new() -> *mut FrontAbi {
         front: Front::new(),
         serves: Mutex::new(Vec::new()),
         staged_requests: Mutex::new(BTreeMap::new()),
+        client_authorities: Mutex::new(session::AuthorityBindings::new()),
         last_error: Mutex::new(Vec::new()),
     }))
 }

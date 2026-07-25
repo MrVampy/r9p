@@ -7,7 +7,7 @@ export interface ExportDescriptorOptions {
   mode: "ro" | "rw";
   auth: string;
   pid: number;
-  protocol: "9P2000" | "9P2000.r9p" | "9P2000.L";
+  protocol: "9P2000" | "9P2000.R" | "9P2000.L";
   msize: number;
   expiresAt?: string;
   localRootLabel?: string;

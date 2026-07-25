@@ -1,5 +1,5 @@
 use r9p::{
-    blocking::{BoxedClient, OREAD},
+    blocking::OREAD,
     fid::Fid,
     qid::DMDIR,
     stat::{decode_dir_entries, Stat},
@@ -74,12 +74,12 @@ pub(crate) fn parse_ls_options(args: &mut Vec<String>) -> CliResult<LsOptions> {
 }
 
 pub(crate) fn ls_one(target: &Target, options: &LsOptions) -> CliResult<()> {
-    let (mut client, path) = connect_path(target)?;
+    let (client, path) = connect_path(target)?;
     let fid = client.walk_path(&path)?;
     let stat = client.stat(fid)?;
     if stat.mode & DMDIR != 0 && !options.directory {
         client.open(fid, OREAD)?;
-        let mut stats = read_dir_stats(&mut client, fid)?;
+        let mut stats = read_dir_stats(&client, fid)?;
         if !options.no_sort {
             if options.sort_time {
                 stats.sort_by_key(|stat| stat.mtime);
@@ -95,7 +95,7 @@ pub(crate) fn ls_one(target: &Target, options: &LsOptions) -> CliResult<()> {
     Ok(())
 }
 
-pub(crate) fn read_dir_stats(client: &mut BoxedClient, fid: Fid) -> CliResult<Vec<Stat>> {
+pub(crate) fn read_dir_stats(client: &session::Client, fid: Fid) -> CliResult<Vec<Stat>> {
     let mut offset = 0_u64;
     let mut data = Vec::new();
     loop {

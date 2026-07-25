@@ -13,6 +13,7 @@ fn global() -> Config {
     Config {
         address: None,
         auth_config: None,
+        authorities: session::AuthorityBindings::new(),
         aname: String::new(),
         uname: "codex".to_string(),
         msize: DEFAULT_MSIZE,

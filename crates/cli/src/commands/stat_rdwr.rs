@@ -18,7 +18,7 @@ pub(crate) fn stat_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
         config,
         path: args[0].clone(),
     };
-    let (mut client, path) = connect_path(&target)?;
+    let (client, path) = connect_path(&target)?;
     let fid = client.walk_path(&path)?;
     let stat = client.stat(fid)?;
     if target.config.machine {
@@ -38,7 +38,7 @@ pub(crate) fn rdwr_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
         config,
         path: args[0].clone(),
     };
-    let (mut client, fid) = open_path(&target, ORDWR)?;
+    let (client, fid) = open_path(&target, ORDWR)?;
     let mut stdin = io::BufReader::new(io::stdin().lock());
     let mut stdout = io::stdout().lock();
     loop {

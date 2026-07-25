@@ -53,6 +53,7 @@ fn session_serve_cmd(config: Config, mut args: Vec<String>) -> CliResult<()> {
         aname: config.aname,
         msize: config.msize,
         auth_config: config.auth_config,
+        authorities: config.authorities,
         connect_timeout: timeout_or_default(config.request_timeout),
         request_timeout: timeout_or_default(config.control_timeout.or(config.request_timeout)),
         change_feed_path,

@@ -208,19 +208,19 @@ fn plain_version_accepts_period_extensions_not_prefix_collisions() {
 }
 
 #[test]
-fn r9p_extension_is_negotiated_explicitly_and_can_downgrade() {
-    assert_eq!(Variant::R9p.accept(b"9P2000.r9p"), Some(Variant::R9p));
-    assert_eq!(Variant::R9p.accept(b"9P2000"), Some(Variant::Plain));
+fn r_extension_is_negotiated_explicitly_and_can_downgrade() {
+    assert_eq!(Variant::R.accept(b"9P2000.R"), Some(Variant::R));
+    assert_eq!(Variant::R.accept(b"9P2000"), Some(Variant::Plain));
     assert_eq!(
-        Variant::R9p.accept_response(b"9P2000"),
+        Variant::R.accept_response(b"9P2000"),
         Some(Variant::Plain)
     );
-    assert_eq!(Variant::Plain.accept_response(b"9P2000.r9p"), None);
+    assert_eq!(Variant::Plain.accept_response(b"9P2000.R"), None);
 
     let mut server = Server::with_config(
         ProtocolTree::new(),
         ServerConfig {
-            variant: Variant::R9p,
+            variant: Variant::R,
             ..ServerConfig::default()
         },
     );
@@ -228,31 +228,31 @@ fn r9p_extension_is_negotiated_explicitly_and_can_downgrade() {
         server.handle(TMessage::Version {
             tag: NOTAG,
             msize: 8192,
-            version: b"9P2000.r9p".to_vec(),
+            version: b"9P2000.R".to_vec(),
         }),
         RMessage::Version {
             tag: NOTAG,
             msize: 8192,
-            version: b"9P2000.r9p".to_vec(),
+            version: b"9P2000.R".to_vec(),
         }
     );
-    assert_eq!(server.session().variant(), Some(Variant::R9p));
+    assert_eq!(server.session().variant(), Some(Variant::R));
 }
 
 #[test]
-fn referrals_are_protocol_mechanism_and_require_the_r9p_dialect() {
+fn referrals_are_protocol_mechanism_and_require_the_r_dialect() {
     let mut plain = Server::new(ProtocolTree::new());
     negotiate(&mut plain);
     attach(&mut plain, 1);
     assert_error(
         plain.handle(TMessage::Referrals { tag: 2, fid: 1 }),
-        "namespace referrals require negotiated 9P2000.r9p",
+        "namespace referrals require negotiated 9P2000.R",
     );
 
     let mut composed = Server::with_config(
         ProtocolTree::new(),
         ServerConfig {
-            variant: Variant::R9p,
+            variant: Variant::R,
             ..ServerConfig::default()
         },
     );
@@ -260,7 +260,7 @@ fn referrals_are_protocol_mechanism_and_require_the_r9p_dialect() {
         composed.handle(TMessage::Version {
             tag: NOTAG,
             msize: 8192,
-            version: b"9P2000.r9p".to_vec(),
+            version: b"9P2000.R".to_vec(),
         }),
         RMessage::Version { .. }
     ));

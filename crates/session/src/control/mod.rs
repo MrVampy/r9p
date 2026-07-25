@@ -10,7 +10,10 @@ mod snapshot_report;
 mod tree;
 
 use crate::feed::{start_feed_worker, FeedEventBus, FeedState, FeedWorkerConfig, FeedWorkerHandle};
-use crate::{Client, ClientSlot, ConnectionConfig, Error, NamespaceCache, Result, SessionEpoch};
+use crate::{
+    AuthorityBindings, Client, ClientSlot, ConnectionConfig, Error, NamespaceCache, Result,
+    SessionEpoch,
+};
 pub use request::{parse_request, ControlRequest};
 use std::{
     fs,
@@ -29,6 +32,7 @@ pub struct ControlConfig {
     pub aname: String,
     pub msize: u32,
     pub auth_config: Option<PathBuf>,
+    pub authorities: AuthorityBindings,
     pub connect_timeout: Duration,
     pub request_timeout: Duration,
     pub change_feed_path: Option<String>,
@@ -56,6 +60,7 @@ impl ControlRuntime {
                 aname: config.aname.clone(),
                 msize: config.msize,
                 auth_config: config.auth_config.clone(),
+                authorities: config.authorities.clone(),
             },
             config.connect_timeout,
         )?;
@@ -239,6 +244,7 @@ pub fn request_control_socket(
             aname: String::new(),
             msize: 65_536,
             auth_config: None,
+            authorities: AuthorityBindings::new(),
         },
         timeout,
     )?;

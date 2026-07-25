@@ -2,15 +2,16 @@ mod front_port;
 mod hex;
 
 use r9p::{
-    blocking::{self, BoxedClient, ReadWrite},
+    blocking::{self, ReadWrite},
     client::{Client as ProtocolClient, ClientResponse, Completion},
     codec,
-    error::{Error, Result as R9pResult},
+    error::{Error as R9pError, Result as R9pResult},
     qid::Qid,
     stat::Stat,
 };
 use session::{
-    AuthorityBindings, Client as SessionClient, ConnectionConfig as SessionConnectionConfig,
+    AuthorityBindings, Client as NamespaceClient, ConnectionConfig,
+    Error as SessionError, Result as SessionResult,
 };
 use std::{
     collections::HashMap,
@@ -29,12 +30,6 @@ struct TargetKey {
     aname: String,
     msize: u32,
     auth_config: Option<PathBuf>,
-}
-
-#[derive(Clone, Debug)]
-struct ResolvedTargetKey {
-    resolver: TargetKey,
-    service_msize: u32,
     authorities: AuthorityBindings,
 }
 
@@ -42,7 +37,7 @@ const AUTH_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
 struct PeerClientServer {
-    clients: HashMap<TargetKey, BoxedClient>,
+    clients: HashMap<TargetKey, NamespaceClient>,
     fronts: front_port::FrontManager,
 }
 
@@ -79,10 +74,6 @@ impl PeerClientServer {
         let Some((operation, fields)) = fields.split_first() else {
             return Err("invalid_r9p_beam_port_request".to_string());
         };
-        if operation.starts_with("resolved-") {
-            let (target, args) = resolved_target_and_args(fields)?;
-            return self.handle_resolved(operation, target, args);
-        }
         let (key, args) = target_and_args(fields)?;
         match (*operation, args) {
             ("version", []) => version_probe_output(&key).map_err(|error| error.to_string()),
@@ -157,42 +148,10 @@ impl PeerClientServer {
         }
     }
 
-    fn handle_resolved(
-        &mut self,
-        operation: &str,
-        target: ResolvedTargetKey,
-        args: &[&str],
-    ) -> Result<String, String> {
-        match (operation, args) {
-            ("resolved-stat", [path]) => {
-                let path = hex::decode_text(path)?;
-                let (key, service_path) = resolve_namespace_target(&target, &path)?;
-                self.with_client_retry(&key, |client| stat_output(client, &service_path))
-            }
-            ("resolved-list", [path]) => {
-                let path = hex::decode_text(path)?;
-                let (key, service_path) = resolve_namespace_target(&target, &path)?;
-                self.with_client_retry(&key, |client| list_output(client, &service_path))
-            }
-            ("resolved-read", [path]) => {
-                let path = hex::decode_text(path)?;
-                let (key, service_path) = resolve_namespace_target(&target, &path)?;
-                self.with_client_retry(&key, |client| read_output(client, &service_path))
-            }
-            ("resolved-rpc", [path, data]) => {
-                let path = hex::decode_text(path)?;
-                let data = hex::decode(data)?;
-                let (key, service_path) = resolve_namespace_target(&target, &path)?;
-                self.with_client_retry(&key, |client| rpc_output(client, &service_path, &data))
-            }
-            _ => Err("invalid_r9p_beam_port_resolved_request".to_string()),
-        }
-    }
-
     fn with_client_retry(
         &mut self,
         key: &TargetKey,
-        operation: impl Fn(&mut BoxedClient) -> R9pResult<String> + Copy,
+        operation: impl Fn(&NamespaceClient) -> SessionResult<String> + Copy,
     ) -> Result<String, String> {
         match self.with_client(key, operation) {
             Ok(output) => Ok(output),
@@ -208,7 +167,7 @@ impl PeerClientServer {
     fn with_client(
         &mut self,
         key: &TargetKey,
-        operation: impl FnOnce(&mut BoxedClient) -> R9pResult<String>,
+        operation: impl FnOnce(&NamespaceClient) -> SessionResult<String>,
     ) -> Result<String, String> {
         if !self.clients.contains_key(key) {
             let client = connect_client(key).map_err(|error| error.to_string())?;
@@ -218,7 +177,7 @@ impl PeerClientServer {
         let result = {
             let client = self
                 .clients
-                .get_mut(key)
+                .get(key)
                 .ok_or_else(|| "r9p_beam_port_missing_cached_client".to_string())?;
             operation(client).map_err(|error| error.to_string())
         };
@@ -231,9 +190,18 @@ impl PeerClientServer {
     }
 }
 
-fn connect_client(key: &TargetKey) -> R9pResult<BoxedClient> {
-    let stream: Box<dyn ReadWrite> = connect_stream(key)?;
-    blocking::Client::connect(stream, &key.uname, &key.aname, key.msize)
+fn connect_client(key: &TargetKey) -> SessionResult<NamespaceClient> {
+    NamespaceClient::connect_with_timeout(
+        &ConnectionConfig {
+            address: key.bind.clone(),
+            uname: key.uname.clone(),
+            aname: key.aname.clone(),
+            msize: key.msize,
+            auth_config: key.auth_config.clone(),
+            authorities: key.authorities.clone(),
+        },
+        AUTH_HANDSHAKE_TIMEOUT,
+    )
 }
 
 fn connect_stream(key: &TargetKey) -> R9pResult<Box<dyn ReadWrite>> {
@@ -244,12 +212,12 @@ fn connect_stream(key: &TargetKey) -> R9pResult<Box<dyn ReadWrite>> {
         .or_else(|| key.bind.strip_prefix("unix:"))
     {
         if key.auth_config.is_some() {
-            return Err(Error::from(
+            return Err(R9pError::from(
                 "session auth config is only valid for TCP endpoints",
             ));
         }
         let stream = UnixStream::connect(Path::new(path))
-            .map_err(|error| Error::from(format!("connect {path}: {error}")))?;
+            .map_err(|error| R9pError::from(format!("connect {path}: {error}")))?;
         return Ok(Box::new(stream));
     }
 
@@ -270,31 +238,33 @@ fn version_probe_output(key: &TargetKey) -> R9pResult<String> {
     let request = protocol.version_request(key.msize);
     codec::write_tmessage_checked(&mut stream, key.msize, &request)?;
     let response = codec::read_rmessage_checked(&mut stream, key.msize)?
-        .ok_or_else(|| Error::from("9P transport closed before version response"))?;
+        .ok_or_else(|| R9pError::from("9P transport closed before version response"))?;
 
     match protocol.receive(response)? {
         ClientResponse::Completion {
             completion: Completion::Version { msize, version },
             ..
         } => Ok(format!("version\t{}\t{msize}", hex::encode(&version))),
-        ClientResponse::Error { ename, .. } => Err(Error::new(ename)),
-        other => Err(Error::from(format!(
+        ClientResponse::Error { ename, .. } => Err(R9pError::new(ename)),
+        other => Err(R9pError::from(format!(
             "unexpected version response: {other:?}"
         ))),
     }
 }
 
-fn attach_output(client: &mut BoxedClient) -> R9pResult<String> {
-    Ok(format_qid("attach", client.root_qid()))
+fn attach_output(client: &NamespaceClient) -> SessionResult<String> {
+    client
+        .stat(client.root_fid())
+        .map(|stat| format_qid("attach", stat.qid))
 }
 
-fn stat_output(client: &mut BoxedClient, path: &str) -> R9pResult<String> {
+fn stat_output(client: &NamespaceClient, path: &str) -> SessionResult<String> {
     client
         .stat_path(path)
         .map(|stat| format_stat("stat", &stat))
 }
 
-fn list_output(client: &mut BoxedClient, path: &str) -> R9pResult<String> {
+fn list_output(client: &NamespaceClient, path: &str) -> SessionResult<String> {
     client.list_path(path).map(|stats| format_stat_list(&stats))
 }
 
@@ -306,58 +276,68 @@ fn format_stat_list(stats: &[Stat]) -> String {
         .join("\n")
 }
 
-fn read_output(client: &mut BoxedClient, path: &str) -> R9pResult<String> {
+fn read_output(client: &NamespaceClient, path: &str) -> SessionResult<String> {
     client
         .read_path(path)
         .map(|bytes| format!("read\t{}", hex::encode(&bytes)))
 }
 
 fn read_range_output(
-    client: &mut BoxedClient,
+    client: &NamespaceClient,
     path: &str,
     offset: u64,
     count: u32,
-) -> R9pResult<String> {
+) -> SessionResult<String> {
     client
         .read_path_range(path, offset, count)
         .map(|bytes| format!("read\t{}", hex::encode(&bytes)))
 }
 
 fn write_output(
-    client: &mut BoxedClient,
+    client: &NamespaceClient,
     path: &str,
     offset: u64,
     data: &[u8],
-) -> R9pResult<String> {
+) -> SessionResult<String> {
     client
         .write_path(path, offset, data)
         .map(|count| format!("write\t{count}"))
 }
 
-fn write_file_output(client: &mut BoxedClient, path: &str, data: &[u8]) -> R9pResult<String> {
+fn write_file_output(
+    client: &NamespaceClient,
+    path: &str,
+    data: &[u8],
+) -> SessionResult<String> {
     client
         .write_file(path, data)
         .map(|count| format!("write-file\t{count}"))
 }
 
-fn rpc_output(client: &mut BoxedClient, path: &str, data: &[u8]) -> R9pResult<String> {
+fn rpc_output(client: &NamespaceClient, path: &str, data: &[u8]) -> SessionResult<String> {
     client
         .rpc_path(path, data)
         .map(|bytes| format!("rpc\t{}\t{}", bytes.len(), hex::encode(&bytes)))
 }
 
-fn create_output(client: &mut BoxedClient, path: &str, perm: u32, mode: u8) -> R9pResult<String> {
-    let (parent, name) = split_parent(path).map_err(Error::from)?;
+fn create_output(
+    client: &NamespaceClient,
+    path: &str,
+    perm: u32,
+    mode: u8,
+) -> SessionResult<String> {
+    let (parent, name) =
+        split_parent(path).map_err(|error| SessionError::new(libc::EINVAL, error))?;
     create_at_output(client, &parent, &name, perm, mode)
 }
 
 fn create_at_output(
-    client: &mut BoxedClient,
+    client: &NamespaceClient,
     parent: &str,
     name: &str,
     perm: u32,
     mode: u8,
-) -> R9pResult<String> {
+) -> SessionResult<String> {
     let qid = client.create_at(parent, name, perm, mode)?;
     let iounit = r9p::codec::max_write_payload(client.msize());
     Ok(format!(
@@ -367,40 +347,28 @@ fn create_at_output(
 }
 
 fn create_write_at_output(
-    client: &mut BoxedClient,
+    client: &NamespaceClient,
     parent: &str,
     name: &str,
     perm: u32,
     mode: u8,
     offset: u64,
     data: &[u8],
-) -> R9pResult<String> {
+) -> SessionResult<String> {
     client
         .create_write_at(parent, name, perm, mode, offset, data)
         .map(|count| format!("create-write-at\t{count}"))
 }
 
-fn remove_output(client: &mut BoxedClient, path: &str) -> R9pResult<String> {
+fn remove_output(client: &NamespaceClient, path: &str) -> SessionResult<String> {
     client.remove_path(path)?;
     Ok("remove".to_string())
 }
 
 fn target_and_args<'a>(fields: &'a [&'a str]) -> Result<(TargetKey, &'a [&'a str]), String> {
-    let [bind, uname, aname, msize, auth_config, args @ ..] = fields else {
+    let [bind, uname, aname, msize, auth_config, binding_count, rest @ ..] = fields else {
         return Err("invalid_r9p_beam_port_target".to_string());
     };
-    target_key(bind, uname, aname, msize, auth_config).map(|key| (key, args))
-}
-
-fn resolved_target_and_args<'a>(
-    fields: &'a [&'a str],
-) -> Result<(ResolvedTargetKey, &'a [&'a str]), String> {
-    let [bind, uname, aname, msize, auth_config, service_msize, binding_count, rest @ ..] = fields
-    else {
-        return Err("invalid_r9p_beam_port_resolved_target".to_string());
-    };
-    let resolver = target_key(bind, uname, aname, msize, auth_config)?;
-    let service_msize = parse_u32("service_msize", service_msize)?;
     let binding_count = binding_count
         .parse::<usize>()
         .map_err(|_| format!("invalid_authority_binding_count:{binding_count}"))?;
@@ -415,56 +383,19 @@ fn resolved_target_and_args<'a>(
     for pair in raw_bindings.chunks_exact(2) {
         let boundary = hex::decode_text(pair[0])?;
         let config_path = PathBuf::from(hex::decode_text(pair[1])?);
-        authorities = authorities
-            .bind_session_auth(boundary, config_path)
+        authorities
+            .insert_session_auth(boundary, config_path)
             .map_err(|error| error.to_string())?;
     }
-    Ok((
-        ResolvedTargetKey {
-            resolver,
-            service_msize,
-            authorities,
-        },
-        args,
-    ))
-}
-
-fn resolve_namespace_target(
-    target: &ResolvedTargetKey,
-    namespace_path: &str,
-) -> Result<(TargetKey, String), String> {
-    let resolver = SessionClient::connect_with_timeout(
-        &SessionConnectionConfig {
-            address: target.resolver.bind.clone(),
-            uname: target.resolver.uname.clone(),
-            aname: target.resolver.aname.clone(),
-            msize: target.resolver.msize,
-            auth_config: target.resolver.auth_config.clone(),
-        },
-        AUTH_HANDSHAKE_TIMEOUT,
-    )
-    .map_err(|error| format!("r9p_beam_resolver_connect_failed:{error}"))?;
-    let resolved = resolver
-        .resolve_namespace_path_timeout(
-            namespace_path,
-            target.service_msize,
-            &target.authorities,
-            AUTH_HANDSHAKE_TIMEOUT,
+    target_key(bind, uname, aname, msize, auth_config).map(|key| {
+        (
+            TargetKey {
+                authorities,
+                ..key
+            },
+            args,
         )
-        .map_err(|error| format!("r9p_beam_namespace_resolve_failed:{error}"))?;
-    let connection = resolved.target().connection();
-    let key = TargetKey {
-        bind: connection.address.clone(),
-        uname: connection.uname.clone(),
-        aname: connection.aname.clone(),
-        msize: connection.msize,
-        auth_config: connection.auth_config.clone(),
-    };
-    let service_path = resolved.service_path().to_string();
-    resolver
-        .shutdown()
-        .map_err(|error| format!("r9p_beam_resolver_shutdown_failed:{error}"))?;
-    Ok((key, service_path))
+    })
 }
 
 fn target_key(
@@ -485,6 +416,7 @@ fn target_key(
         } else {
             Some(PathBuf::from(auth_config))
         },
+        authorities: AuthorityBindings::new(),
     })
 }
 
@@ -601,6 +533,7 @@ mod tests {
                 aname: "/".to_string(),
                 msize: 65_536,
                 auth_config: None,
+                authorities: AuthorityBindings::new(),
             }),
         );
     }
@@ -622,6 +555,7 @@ mod tests {
                 aname: "/".to_string(),
                 msize: 65_536,
                 auth_config: Some(PathBuf::from("/etc/r9p/client.conf")),
+                authorities: AuthorityBindings::new(),
             }),
         );
     }
@@ -634,6 +568,7 @@ mod tests {
             aname: "/".to_string(),
             msize: 65_536,
             auth_config: Some(PathBuf::from("/etc/r9p/client.conf")),
+            authorities: AuthorityBindings::new(),
         };
 
         let error = match connect_stream(&key) {
@@ -680,6 +615,7 @@ mod tests {
             aname: "/".to_string(),
             msize: 65_536,
             auth_config: None,
+            authorities: AuthorityBindings::new(),
         };
         let stream = connect_stream(&key);
         assert!(stream.is_ok());
@@ -972,7 +908,7 @@ mod tests {
 
     fn target_fields(bind: &str) -> String {
         format!(
-            "{}\t{}\t{}\t65536\t",
+            "{}\t{}\t{}\t65536\t\t0",
             hex_text(bind),
             hex_text("codex"),
             hex_text("/")

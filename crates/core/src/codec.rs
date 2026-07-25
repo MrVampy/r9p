@@ -22,35 +22,35 @@ pub const MAX_MSIZE: u32 = 64 * 1024;
 pub enum Variant {
     #[default]
     Plain,
-    R9p,
+    R,
 }
 
 impl Variant {
     pub const fn wire_name(self) -> &'static [u8] {
         match self {
             Variant::Plain => b"9P2000",
-            Variant::R9p => b"9P2000.r9p",
+            Variant::R => b"9P2000.R",
         }
     }
 
     pub fn accept(self, requested: &[u8]) -> Option<Variant> {
-        if self == Self::R9p && requested == Self::R9p.wire_name() {
-            return Some(Self::R9p);
+        if self == Self::R && requested == Self::R.wire_name() {
+            return Some(Self::R);
         }
         plain_request(requested).then_some(Self::Plain)
     }
 
     pub const fn supports_symlinks(self) -> bool {
-        matches!(self, Self::R9p)
+        matches!(self, Self::R)
     }
 
     pub const fn supports_referrals(self) -> bool {
-        matches!(self, Self::R9p)
+        matches!(self, Self::R)
     }
 
     pub fn accept_response(self, response: &[u8]) -> Option<Variant> {
-        if self == Self::R9p && response == Self::R9p.wire_name() {
-            return Some(Self::R9p);
+        if self == Self::R && response == Self::R.wire_name() {
+            return Some(Self::R);
         }
         (response == Self::Plain.wire_name()).then_some(Self::Plain)
     }

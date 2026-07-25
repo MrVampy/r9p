@@ -143,12 +143,8 @@ function validateEndpointAuth(
   transportClass: "tcp" | "unix",
   auth: string,
 ): void {
-  const authClass = auth === "none"
-    ? "none"
-    : auth.split(":", 1)[0] ?? "";
-  const authDetails = auth === "none"
-    ? ""
-    : auth.slice(authClass.length + 1);
+  const authClass = auth === "none" ? "none" : auth.split(":", 1)[0] ?? "";
+  const authDetails = auth === "none" ? "" : auth.slice(authClass.length + 1);
   if (
     !["none", "p9any", "uds-peercred"].includes(authClass) ||
     (authClass !== "none" && authDetails === "") ||

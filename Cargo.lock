@@ -17,6 +17,7 @@ name = "beam-port"
 version = "0.1.0"
 dependencies = [
  "front",
+ "libc",
  "r9p",
  "r9p-auth",
  "session",

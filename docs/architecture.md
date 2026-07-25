@@ -43,7 +43,9 @@ reconnect, shutdown, and one ordinary 9P server session per accepted stream.
 Its caller supplies a fresh `FileTree` factory, so an application tree does not
 have to impersonate a host filesystem to use reverse attachment.
 `FilesystemExport` is the convenience specialization that opens `LocalTree`
-instances; the broker remains unaware of either tree.
+instances; the broker remains unaware of either tree. The transport adapter
+also owns bounded TCP keepalive for application-idle pool streams, so hard peer
+loss becomes a stream failure and re-enters the existing reconnect lifecycle.
 
 The server core owns wire-level fid lifecycle. It records open modes and
 directory offsets, rejects operations that violate 9P sequencing, and reserves

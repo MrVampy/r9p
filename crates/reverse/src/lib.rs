@@ -8,7 +8,9 @@
 mod broker;
 mod export;
 
-use std::{io, net::TcpStream};
+use std::{io, net::TcpStream, time::Duration};
+
+use socket2::{SockRef, TcpKeepalive};
 
 pub use broker::{BrokerConfig, BrokerStatus, ProxyEndpoint, ReverseBroker};
 pub use export::{
@@ -16,11 +18,28 @@ pub use export::{
     ReverseExportStatus,
 };
 
+const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
+#[cfg(target_os = "linux")]
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+#[cfg(target_os = "linux")]
+const KEEPALIVE_RETRIES: u32 = 3;
+
 fn configure_transport_socket(stream: &TcpStream) -> io::Result<()> {
     // Reverse sessions carry latency-sensitive 9P request/response frames.
     // Leaving Nagle enabled compounds delayed acknowledgements across the
     // small, sequential walks and stats used by filesystem clients.
-    stream.set_nodelay(true)
+    stream.set_nodelay(true)?;
+
+    // Pool streams can remain application-idle indefinitely. Without bounded
+    // TCP keepalive, a hard peer outage can leave the old pool apparently
+    // connected for the host kernel's multi-hour default and prevent the
+    // export loop from reconnecting to a restarted broker.
+    let keepalive = TcpKeepalive::new().with_time(KEEPALIVE_IDLE);
+    #[cfg(target_os = "linux")]
+    let keepalive = keepalive
+        .with_interval(KEEPALIVE_INTERVAL)
+        .with_retries(KEEPALIVE_RETRIES);
+    SockRef::from(stream).set_tcp_keepalive(&keepalive)
 }
 
 #[cfg(test)]

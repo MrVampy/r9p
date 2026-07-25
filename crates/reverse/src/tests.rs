@@ -36,6 +36,37 @@ fn reverse_transport_socket_disables_nagle() -> Result<(), Box<dyn std::error::E
 
     assert!(client.nodelay()?);
     assert!(server.nodelay()?);
+    let client_socket = socket2::SockRef::from(&client);
+    let server_socket = socket2::SockRef::from(&server);
+    assert!(client_socket.keepalive()?);
+    assert!(server_socket.keepalive()?);
+    assert_eq!(
+        client_socket.tcp_keepalive_time()?,
+        super::KEEPALIVE_IDLE
+    );
+    assert_eq!(
+        server_socket.tcp_keepalive_time()?,
+        super::KEEPALIVE_IDLE
+    );
+    #[cfg(target_os = "linux")]
+    {
+        assert_eq!(
+            client_socket.tcp_keepalive_interval()?,
+            super::KEEPALIVE_INTERVAL
+        );
+        assert_eq!(
+            server_socket.tcp_keepalive_interval()?,
+            super::KEEPALIVE_INTERVAL
+        );
+        assert_eq!(
+            client_socket.tcp_keepalive_retries()?,
+            super::KEEPALIVE_RETRIES
+        );
+        assert_eq!(
+            server_socket.tcp_keepalive_retries()?,
+            super::KEEPALIVE_RETRIES
+        );
+    }
     Ok(())
 }
 

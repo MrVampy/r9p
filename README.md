@@ -217,6 +217,11 @@ broker discards peers whose TCP close is already observable. Status snapshots
 report pool, handshake, bridge, rejection, and failure counters to embedding
 applications.
 
+Reverse transport sockets use bounded TCP keepalive in addition to disabling
+Nagle. This makes an application-idle pool detect a hard peer outage and enter
+the existing reconnect loop instead of retaining apparently established
+streams for the host kernel's long default timeout.
+
 This is a runtime adapter, not a registration system. A service may publish the
 broker's ordinary endpoint using its existing registry lifecycle, but service
 naming, leases, capability admission, and direct-versus-relay choice remain the

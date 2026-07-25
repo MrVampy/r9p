@@ -13,3 +13,4 @@ workspace = true
 fs.workspace = true
 r9p.workspace = true
 r9p-auth.workspace = true
+socket2.workspace = true

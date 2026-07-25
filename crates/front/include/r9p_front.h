@@ -103,6 +103,11 @@
  *   accepting. Push calls (set, append_event, complete_request) wake any
  *   blocked 9P readers; a blocked read returns empty at the front's wait
  *   timeout (default 30s).
+ * - r9p_front_serve_tcp_authenticated reads an r9p session-auth server
+ *   configuration before binding. Every accepted TCP stream completes p9any
+ *   and Noise IK authentication before 9P negotiation, and the authenticated
+ *   principal is bound to the 9P attach uname. Use this for any network front;
+ *   plain r9p_front_serve_tcp remains the explicit contained-host boundary.
  * - r9p_front_client_rpc is the v13 outbound 9P RPC helper. It connects to
  *   endpoint_bind, attaches as uname/aname, opens path O_RDWR, writes the
  *   request, reads the response on the same fid, and copies that response into
@@ -140,6 +145,7 @@
 #define R9P_FRONT_CAP_ATOMIC_CREATE_WRITE (UINT64_C(1) << 4)
 #define R9P_FRONT_CAP_NAMESPACE_MUTATION_RELAYS (UINT64_C(1) << 5)
 #define R9P_FRONT_CAP_RESOLVED_NAMESPACE_CLIENT (UINT64_C(1) << 6)
+#define R9P_FRONT_CAP_AUTHENTICATED_SERVE (UINT64_C(1) << 7)
 
 typedef struct r9p_front r9p_front;
 
@@ -198,6 +204,10 @@ int32_t r9p_front_set_protocol_limits(r9p_front *front, uint32_t max_msize,
                                       uint32_t iounit);
 int32_t r9p_front_serve_tcp(r9p_front *front, const char *bind,
                             size_t bind_len, uint16_t *port_out);
+int32_t r9p_front_serve_tcp_authenticated(
+    r9p_front *front, const char *bind, size_t bind_len,
+    const char *auth_config_path, size_t auth_config_path_len,
+    uint16_t *port_out);
 int32_t r9p_front_next_request(r9p_front *front, uint64_t timeout_ms,
                                uint64_t *id_out, size_t *len_out);
 intptr_t r9p_front_request_copy(r9p_front *front, uint64_t request_id,

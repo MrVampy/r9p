@@ -21,6 +21,7 @@ use crate::{
     error::{Error, Result, EPERM},
     fid::Fid,
     qid::Qid,
+    referral::NamespaceReferral,
     stat::Stat,
 };
 
@@ -30,6 +31,10 @@ pub trait FileTree {
     fn open(&mut self, fid: Fid, qid: Qid, mode: u8) -> Result<OpenFile>;
     fn read(&mut self, fid: Fid, qid: Qid, offset: u64, count: u32) -> Result<ReadData>;
     fn stat(&mut self, qid: Qid) -> Result<Stat>;
+
+    fn referrals(&mut self, _fid: Fid, _qid: Qid) -> Result<Vec<NamespaceReferral>> {
+        Err(Error::from_static("namespace referrals are not supported"))
+    }
 
     fn reset(&mut self) -> Result<()> {
         Ok(())

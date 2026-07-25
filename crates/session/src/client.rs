@@ -2,7 +2,10 @@ use crate::{
     error::client_error, request::RequestTracker, transport::connect_stream, ConnectionConfig,
     Error, Result,
 };
-use r9p::{codec::Variant, fid::Fid, multiplex::MultiplexedClient, qid::Qid, stat::Stat};
+use r9p::{
+    codec::Variant, fid::Fid, multiplex::MultiplexedClient, qid::Qid,
+    referral::NamespaceReferral, stat::Stat,
+};
 use std::{
     thread,
     time::{Duration, Instant},
@@ -56,7 +59,7 @@ impl Client {
             &config.uname,
             &config.aname,
             config.msize,
-            Variant::R9pSymlink,
+            Variant::R9p,
         )
         .map_err(client_error)?;
         let tracked_inner = inner.clone();
@@ -110,6 +113,12 @@ impl Client {
     pub fn walk_timeout(&self, fid: Fid, names: &[Vec<u8>], timeout: Duration) -> Result<Fid> {
         self.inner
             .walk_timeout(fid, names, timeout)
+            .map_err(client_error)
+    }
+
+    pub fn referrals_timeout(&self, timeout: Duration) -> Result<Vec<NamespaceReferral>> {
+        self.inner
+            .referrals_timeout(self.root_fid(), timeout)
             .map_err(client_error)
     }
 
@@ -283,7 +292,7 @@ impl Client {
         {
             return Err(Error::new(
                 libc::EPROTO,
-                "server exposed symlink metadata without negotiating 9P2000.r9p-symlink",
+                "server exposed symlink metadata without negotiating 9P2000.r9p",
             ));
         }
         Ok(stat)

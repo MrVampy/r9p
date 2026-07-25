@@ -6,13 +6,18 @@ use r9p::server::{
     serve_connection as serve_protocol_connection, ConnectionHandler, FileTree, ServerCompletion,
     ServerConfig, ServerRequest, ServerRequestKind,
 };
+use r9p_auth::{authenticate_server, ServerConfig as SessionAuthConfig};
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 pub use r9p::server::ConnectionStream as FrontServeStream;
+
+const AUTH_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct ServeHandle {
     addr: SocketAddr,
@@ -49,10 +54,27 @@ impl Front {
     where
         S: FrontServeStream,
     {
-        serve_front_connection(self, stream)
+        serve_front_connection(self, stream, None)
     }
 
     pub fn serve_tcp(&self, bind: &str) -> Result<ServeHandle> {
+        self.serve_tcp_with_auth(bind, None)
+    }
+
+    pub fn serve_tcp_authenticated(
+        &self,
+        bind: &str,
+        auth_config_path: &Path,
+    ) -> Result<ServeHandle> {
+        let auth = SessionAuthConfig::read(auth_config_path)?;
+        self.serve_tcp_with_auth(bind, Some(auth))
+    }
+
+    fn serve_tcp_with_auth(
+        &self,
+        bind: &str,
+        auth: Option<SessionAuthConfig>,
+    ) -> Result<ServeHandle> {
         let listener = TcpListener::bind(bind)
             .map_err(|error| Error::new(format!("front bind {bind}: {error}")))?;
         let addr = listener
@@ -69,11 +91,31 @@ impl Front {
                 let Ok(stream) = stream else { continue };
                 let connection_front = front.clone();
                 let connection_stop = Arc::clone(&accept_stop);
+                let connection_auth = auth.clone();
                 thread::spawn(move || {
-                    let _ = serve_front_connection(
-                        &connection_front,
-                        StoppableStream::new(stream, connection_stop),
-                    );
+                    match connection_auth {
+                        Some(auth) => {
+                            let Ok(session) =
+                                authenticate_server(stream, &auth, AUTH_HANDSHAKE_TIMEOUT)
+                            else {
+                                return;
+                            };
+                            let session_uname =
+                                Some(session.peer.principal().as_bytes().to_vec());
+                            let _ = serve_front_connection(
+                                &connection_front,
+                                StoppableStream::new(session.stream, connection_stop),
+                                session_uname,
+                            );
+                        }
+                        None => {
+                            let _ = serve_front_connection(
+                                &connection_front,
+                                StoppableStream::new(stream, connection_stop),
+                                None,
+                            );
+                        }
+                    }
                 });
             }
         });
@@ -125,7 +167,11 @@ impl<S: FrontServeStream> FrontServeStream for StoppableStream<S> {
     }
 }
 
-fn serve_front_connection<S>(front: &Front, stream: S) -> Result<()>
+fn serve_front_connection<S>(
+    front: &Front,
+    stream: S,
+    session_uname: Option<Vec<u8>>,
+) -> Result<()>
 where
     S: FrontServeStream,
 {
@@ -135,6 +181,7 @@ where
         ServerConfig {
             default_msize: max_msize,
             max_msize,
+            session_uname,
             ..ServerConfig::default()
         },
         Arc::new(FrontConnectionHandler::new(front.clone())),
@@ -305,6 +352,13 @@ fn perform_request(
                 .map_err(|_| Error::from_static("front tree poisoned"))?;
             tree.wstat(*fid, *qid, stat)
                 .map(|()| ServerCompletion::Wstat)
+        }
+        ServerRequestKind::Referrals { fid, qid } => {
+            let mut tree = tree
+                .lock()
+                .map_err(|_| Error::from_static("front tree poisoned"))?;
+            tree.referrals(*fid, *qid)
+                .map(|referrals| ServerCompletion::Referrals { referrals })
         }
     }
 }

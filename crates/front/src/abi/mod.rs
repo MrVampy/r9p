@@ -4,6 +4,7 @@ use crate::serve::ServeHandle;
 use crate::{Front, PushedDirectoryMetadata, PushedFileMetadata};
 use std::collections::BTreeMap;
 use std::ffi::c_char;
+use std::path::Path;
 use std::sync::Mutex;
 
 mod client;
@@ -28,13 +29,15 @@ pub const CAPABILITY_NATIVE_CLIENT_MUTATIONS: u64 = 1 << 3;
 pub const CAPABILITY_ATOMIC_CREATE_WRITE: u64 = 1 << 4;
 pub const CAPABILITY_NAMESPACE_MUTATION_RELAYS: u64 = 1 << 5;
 pub const CAPABILITY_RESOLVED_NAMESPACE_CLIENT: u64 = 1 << 6;
+pub const CAPABILITY_AUTHENTICATED_SERVE: u64 = 1 << 7;
 pub const CAPABILITIES: u64 = CAPABILITY_PUSHED_NAMESPACE_METADATA
     | CAPABILITY_REQUEST_CONTEXT_V2
     | CAPABILITY_SYNTHETIC_READ_RELAY
     | CAPABILITY_NATIVE_CLIENT_MUTATIONS
     | CAPABILITY_ATOMIC_CREATE_WRITE
     | CAPABILITY_NAMESPACE_MUTATION_RELAYS
-    | CAPABILITY_RESOLVED_NAMESPACE_CLIENT;
+    | CAPABILITY_RESOLVED_NAMESPACE_CLIENT
+    | CAPABILITY_AUTHENTICATED_SERVE;
 
 const OK: i32 = 0;
 const TIMEOUT: i32 = 1;
@@ -540,6 +543,48 @@ pub unsafe extern "C" fn r9p_front_serve_tcp(
         return INVALID;
     };
     match abi.front.serve_tcp(bind) {
+        Ok(serve) => {
+            if !port_out.is_null() {
+                unsafe { *port_out = serve.addr().port() };
+            }
+            match abi.serves.lock() {
+                Ok(mut serves) => {
+                    serves.push(serve);
+                    clear_last_error(abi);
+                    OK
+                }
+                Err(error) => set_last_error(abi, error),
+            }
+        }
+        Err(error) => set_last_error(abi, error),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn r9p_front_serve_tcp_authenticated(
+    handle: *mut FrontAbi,
+    bind: *const c_char,
+    bind_len: usize,
+    auth_config_path: *const c_char,
+    auth_config_path_len: usize,
+    port_out: *mut u16,
+) -> i32 {
+    let Some(abi) = (unsafe { handle.as_ref() }) else {
+        return INVALID;
+    };
+    let (Some(bind), Some(auth_config_path)) = (
+        unsafe { str_arg(bind, bind_len) },
+        unsafe { str_arg(auth_config_path, auth_config_path_len) },
+    ) else {
+        return INVALID;
+    };
+    if auth_config_path.is_empty() {
+        return INVALID;
+    }
+    match abi
+        .front
+        .serve_tcp_authenticated(bind, Path::new(auth_config_path))
+    {
         Ok(serve) => {
             if !port_out.is_null() {
                 unsafe { *port_out = serve.addr().port() };

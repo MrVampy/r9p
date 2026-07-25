@@ -64,7 +64,7 @@ fn validate(descriptor: Descriptor) -> Result(Nil, String) {
   use _ <- result.try(
     validate_choice("protocol", descriptor.protocol, [
       "9P2000",
-      "9P2000.r9p-symlink",
+      "9P2000.r9p",
       "9P2000.L",
     ]),
   )

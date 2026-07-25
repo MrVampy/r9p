@@ -1,4 +1,5 @@
 use crate::{fid::Fid, qid::Qid, stat::Stat};
+use crate::referral::NamespaceReferral;
 
 pub type Tag = u16;
 
@@ -32,6 +33,8 @@ pub const TSTAT: u8 = 124;
 pub const RSTAT: u8 = 125;
 pub const TWSTAT: u8 = 126;
 pub const RWSTAT: u8 = 127;
+pub const TREFERRALS: u8 = 200;
+pub const RREFERRALS: u8 = 201;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TMessage {
@@ -104,6 +107,10 @@ pub enum TMessage {
         fid: Fid,
         stat: Stat,
     },
+    Referrals {
+        tag: Tag,
+        fid: Fid,
+    },
 }
 
 impl TMessage {
@@ -121,7 +128,8 @@ impl TMessage {
             | Self::Clunk { tag, .. }
             | Self::Remove { tag, .. }
             | Self::Stat { tag, .. }
-            | Self::Wstat { tag, .. } => *tag,
+            | Self::Wstat { tag, .. }
+            | Self::Referrals { tag, .. } => *tag,
         }
     }
 
@@ -140,6 +148,7 @@ impl TMessage {
             Self::Remove { .. } => TREMOVE,
             Self::Stat { .. } => TSTAT,
             Self::Wstat { .. } => TWSTAT,
+            Self::Referrals { .. } => TREFERRALS,
         }
     }
 }
@@ -201,6 +210,10 @@ pub enum RMessage {
     Wstat {
         tag: Tag,
     },
+    Referrals {
+        tag: Tag,
+        referrals: Vec<NamespaceReferral>,
+    },
 }
 
 impl RMessage {
@@ -219,7 +232,8 @@ impl RMessage {
             | Self::Clunk { tag }
             | Self::Remove { tag }
             | Self::Stat { tag, .. }
-            | Self::Wstat { tag } => *tag,
+            | Self::Wstat { tag }
+            | Self::Referrals { tag, .. } => *tag,
         }
     }
 
@@ -239,6 +253,7 @@ impl RMessage {
             Self::Remove { .. } => RREMOVE,
             Self::Stat { .. } => RSTAT,
             Self::Wstat { .. } => RWSTAT,
+            Self::Referrals { .. } => RREFERRALS,
         }
     }
 }

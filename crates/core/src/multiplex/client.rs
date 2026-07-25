@@ -10,6 +10,7 @@ use crate::{
     fid::Fid,
     message::{TMessage, Tag, NOTAG},
     qid::Qid,
+    referral::NamespaceReferral,
     stat::Stat,
 };
 use std::{
@@ -302,6 +303,26 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
 
     pub fn walk_one_timeout(&self, fid: Fid, name: &[u8], timeout: Duration) -> Result<Fid> {
         self.walk_timeout(fid, &[name.to_vec()], timeout)
+    }
+
+    pub fn referrals_timeout(
+        &self,
+        fid: Fid,
+        timeout: Duration,
+    ) -> Result<Vec<NamespaceReferral>> {
+        if !self.variant().supports_referrals() {
+            return Err(Error::from(
+                "server did not negotiate namespace referrals",
+            ));
+        }
+        let op = {
+            let mut protocol = lock(&self.inner.protocol, "lock 9P protocol client")?;
+            protocol.referrals(fid).map_err(protocol_error)?
+        };
+        match self.call_op_timeout(op, timeout)? {
+            Completion::Referrals { referrals } => Ok(referrals),
+            other => Err(unexpected("Rreferrals", other)),
+        }
     }
 
     pub fn walk(&self, fid: Fid, names: &[Vec<u8>]) -> Result<Fid> {

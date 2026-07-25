@@ -79,7 +79,7 @@ fn reverse_export_serves_a_writable_file_tree() -> Result<(), Box<dyn std::error
         "codex",
         "/",
         65_536,
-        Variant::R9pSymlink,
+        Variant::R9p,
     )
     .map_err(|error| stage_error("connect reader", error))?;
     assert_eq!(
@@ -96,7 +96,7 @@ fn reverse_export_serves_a_writable_file_tree() -> Result<(), Box<dyn std::error
         "codex",
         "/",
         65_536,
-        Variant::R9pSymlink,
+        Variant::R9p,
     )
     .map_err(|error| stage_error("connect writer", error))?;
     writer
@@ -255,7 +255,7 @@ fn reverse_broker_discards_closed_idle_streams() -> Result<(), Box<dyn std::erro
         "codex",
         "/",
         65_536,
-        Variant::R9pSymlink,
+        Variant::R9p,
     )?;
     assert_eq!(reader.read_path("/identity")?, b"live\n");
     Ok(())

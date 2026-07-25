@@ -2,9 +2,11 @@ use crate::{
     error::{Error, Result},
     message::{
         RMessage, TMessage, MAXWELEM, RATTACH, RAUTH, RCLUNK, RCREATE, RERROR, RFLUSH, ROPEN,
-        RREAD, RREMOVE, RSTAT, RVERSION, RWALK, RWRITE, RWSTAT, TATTACH, TAUTH, TCLUNK, TCREATE,
-        TFLUSH, TOPEN, TREAD, TREMOVE, TSTAT, TVERSION, TWALK, TWRITE, TWSTAT,
+        RREAD, RREFERRALS, RREMOVE, RSTAT, RVERSION, RWALK, RWRITE, RWSTAT, TATTACH, TAUTH,
+        TCLUNK, TCREATE, TFLUSH, TOPEN, TREAD, TREFERRALS, TREMOVE, TSTAT, TVERSION, TWALK,
+        TWRITE, TWSTAT,
     },
+    referral::NamespaceReferral,
     stat::{push_qid, push_string, push_u16, push_u32, push_u64, Cursor, Stat},
 };
 use std::io::{Read, Write};
@@ -21,31 +23,35 @@ pub const MAX_MSIZE: u32 = 64 * 1024;
 pub enum Variant {
     #[default]
     Plain,
-    R9pSymlink,
+    R9p,
 }
 
 impl Variant {
     pub const fn wire_name(self) -> &'static [u8] {
         match self {
             Variant::Plain => b"9P2000",
-            Variant::R9pSymlink => b"9P2000.r9p-symlink",
+            Variant::R9p => b"9P2000.r9p",
         }
     }
 
     pub fn accept(self, requested: &[u8]) -> Option<Variant> {
-        if self == Self::R9pSymlink && requested == Self::R9pSymlink.wire_name() {
-            return Some(Self::R9pSymlink);
+        if self == Self::R9p && requested == Self::R9p.wire_name() {
+            return Some(Self::R9p);
         }
         plain_request(requested).then_some(Self::Plain)
     }
 
     pub const fn supports_symlinks(self) -> bool {
-        matches!(self, Self::R9pSymlink)
+        matches!(self, Self::R9p)
+    }
+
+    pub const fn supports_referrals(self) -> bool {
+        matches!(self, Self::R9p)
     }
 
     pub fn accept_response(self, response: &[u8]) -> Option<Variant> {
-        if self == Self::R9pSymlink && response == Self::R9pSymlink.wire_name() {
-            return Some(Self::R9pSymlink);
+        if self == Self::R9p && response == Self::R9p.wire_name() {
+            return Some(Self::R9p);
         }
         (response == Self::Plain.wire_name()).then_some(Self::Plain)
     }
@@ -262,6 +268,10 @@ pub fn decode_tmessage(frame: &[u8]) -> Result<TMessage> {
             let stat = Stat::decode(&cursor.bytes(nstat)?)?;
             TMessage::Wstat { tag, fid, stat }
         }
+        TREFERRALS => TMessage::Referrals {
+            tag,
+            fid: cursor.u32()?,
+        },
         _ => return Err(Error::from("unknown message type")),
     };
     if cursor.remaining() != 0 {
@@ -333,6 +343,14 @@ pub fn decode_rmessage(frame: &[u8]) -> Result<RMessage> {
             RMessage::Stat { tag, stat }
         }
         RWSTAT => RMessage::Wstat { tag },
+        RREFERRALS => {
+            let count = usize::from(cursor.u16()?);
+            let mut referrals = Vec::with_capacity(count);
+            for _ in 0..count {
+                referrals.push(decode_referral(&mut cursor)?);
+            }
+            RMessage::Referrals { tag, referrals }
+        }
         _ => return Err(Error::from("unknown message type")),
     };
     if cursor.remaining() != 0 {
@@ -431,6 +449,7 @@ pub fn encode_tmessage(message: &TMessage) -> Result<Vec<u8>> {
             );
             frame.extend(encoded);
         }
+        TMessage::Referrals { fid, .. } => push_u32(&mut frame, *fid),
     }
     finish_frame(frame)
 }
@@ -488,6 +507,16 @@ pub fn encode_rmessage(message: &RMessage) -> Result<Vec<u8>> {
             );
             frame.extend(encoded);
         }
+        RMessage::Referrals { referrals, .. } => {
+            push_u16(
+                &mut frame,
+                u16::try_from(referrals.len())
+                    .map_err(|_| Error::from("too many namespace referrals"))?,
+            );
+            for referral in referrals {
+                encode_referral(&mut frame, referral)?;
+            }
+        }
     }
     finish_frame(frame)
 }
@@ -513,6 +542,38 @@ fn finish_frame(mut frame: Vec<u8>) -> Result<Vec<u8>> {
     let size = u32::try_from(frame.len()).map_err(|_| Error::from("frame too large"))?;
     frame[0..4].copy_from_slice(&size.to_le_bytes());
     Ok(frame)
+}
+
+fn encode_referral(out: &mut Vec<u8>, referral: &NamespaceReferral) -> Result<()> {
+    referral.validate()?;
+    for value in [
+        referral.mount_path.as_slice(),
+        referral.endpoint.as_slice(),
+        referral.uname.as_slice(),
+        referral.aname.as_slice(),
+        referral.exported_root.as_slice(),
+        referral.authority_boundary.as_slice(),
+    ] {
+        push_string(out, value)?;
+    }
+    push_u64(out, referral.generation);
+    push_u64(out, referral.valid_for_ms);
+    Ok(())
+}
+
+fn decode_referral(cursor: &mut Cursor<'_>) -> Result<NamespaceReferral> {
+    let referral = NamespaceReferral {
+        mount_path: cursor.string()?,
+        endpoint: cursor.string()?,
+        uname: cursor.string()?,
+        aname: cursor.string()?,
+        exported_root: cursor.string()?,
+        authority_boundary: cursor.string()?,
+        generation: cursor.u64()?,
+        valid_for_ms: cursor.u64()?,
+    };
+    referral.validate()?;
+    Ok(referral)
 }
 
 #[cfg(test)]
@@ -546,6 +607,28 @@ mod tests {
         };
         let frame = encode_rmessage(&message)?;
         assert_eq!(decode_rmessage(&frame)?, RMessage::Stat { tag: 9, stat });
+        Ok(())
+    }
+
+    #[test]
+    fn referral_messages_round_trip() -> Result<()> {
+        let request = TMessage::Referrals { tag: 11, fid: 3 };
+        assert_eq!(decode_tmessage(&encode_tmessage(&request)?)?, request);
+
+        let response = RMessage::Referrals {
+            tag: 11,
+            referrals: vec![NamespaceReferral {
+                mount_path: b"/sources/reddit".to_vec(),
+                endpoint: b"192.168.0.30:19599".to_vec(),
+                uname: b"codex".to_vec(),
+                aname: b"/".to_vec(),
+                exported_root: b"/".to_vec(),
+                authority_boundary: b"p9any:noise-ik@sources".to_vec(),
+                generation: 2,
+                valid_for_ms: 15_000,
+            }],
+        };
+        assert_eq!(decode_rmessage(&encode_rmessage(&response)?)?, response);
         Ok(())
     }
 

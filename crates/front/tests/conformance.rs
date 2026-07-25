@@ -5,9 +5,10 @@ use front::abi::{
     r9p_front_register_intake, r9p_front_register_log, r9p_front_register_read_relay,
     r9p_front_register_remove_relay, r9p_front_register_rpc, r9p_front_register_write_relay,
     r9p_front_request_context_copy, r9p_front_request_copy, r9p_front_request_prefix_copy,
-    r9p_front_serve_tcp, r9p_front_set, r9p_front_set_principal_class_aname,
-    r9p_front_set_principal_root, r9p_front_set_protocol_limits, r9p_front_set_pushed_directory,
-    r9p_front_set_pushed_file, r9p_front_stop, ABI_VERSION, CAPABILITIES,
+    r9p_front_serve_tcp, r9p_front_serve_tcp_authenticated, r9p_front_set,
+    r9p_front_set_principal_class_aname, r9p_front_set_principal_root,
+    r9p_front_set_protocol_limits, r9p_front_set_pushed_directory, r9p_front_set_pushed_file,
+    r9p_front_stop, ABI_VERSION, CAPABILITIES,
 };
 use front::Front;
 use r9p::blocking::{Client, OWRITE};
@@ -16,10 +17,16 @@ use r9p::message::{RMessage, TMessage, NOTAG};
 use r9p::qid::DMDIR;
 use r9p::stat::decode_dir_entries;
 use r9p::{codec, Error};
+use r9p_auth::{authenticate_client, generate_key_pair, write_key_pair, ClientConfig};
+use std::fs;
 use std::ffi::c_char;
 use std::net::TcpStream;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
+
+static NEXT_AUTH_TEST: AtomicU64 = AtomicU64::new(1);
 
 fn cstr(value: &str) -> (*const c_char, usize) {
     (value.as_ptr().cast::<c_char>(), value.len())
@@ -32,6 +39,85 @@ fn cbytes(value: &[u8]) -> (*const u8, usize) {
 fn assert_front_contract() {
     assert_eq!(r9p_front_abi_version(), ABI_VERSION);
     assert_eq!(r9p_front_capabilities(), CAPABILITIES);
+}
+
+fn front_auth_fixture() -> (PathBuf, PathBuf, ClientConfig) {
+    let root = std::env::temp_dir().join(format!(
+        "r9p-front-auth-test-{}-{}",
+        std::process::id(),
+        NEXT_AUTH_TEST.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&root).expect("auth test directory");
+    let server = generate_key_pair().expect("server key pair");
+    let client = generate_key_pair().expect("client key pair");
+    let server_private = root.join("server.key");
+    let server_public = root.join("server.pub");
+    write_key_pair(&server_private, &server_public, &server).expect("write server key pair");
+    let server_config = root.join("server.conf");
+    fs::write(
+        &server_config,
+        format!(
+            "format r9p-session-auth.v1\nrole server\ndomain front-test\nprivate-key {}\npeer {} codex\n",
+            server_private.display(),
+            client.public
+        ),
+    )
+    .expect("write server config");
+    let client_config =
+        ClientConfig::new("front-test", client.private, server.public).expect("client config");
+    (root, server_config, client_config)
+}
+
+#[test]
+fn abi_authenticated_serve_binds_transport_principal_to_attach_uname() {
+    assert_front_contract();
+    let (root, server_config, client_config) = front_auth_fixture();
+    let handle = r9p_front_new();
+    let (path, path_len) = cstr("status");
+    let (bytes, bytes_len) = cbytes(b"ready\n");
+    assert_eq!(
+        unsafe { r9p_front_set(handle, path, path_len, bytes, bytes_len) },
+        0
+    );
+    let (bind, bind_len) = cstr("127.0.0.1:0");
+    let server_config = server_config.to_string_lossy();
+    let (auth_path, auth_path_len) = cstr(&server_config);
+    let mut port = 0_u16;
+    assert_eq!(
+        unsafe {
+            r9p_front_serve_tcp_authenticated(
+                handle,
+                bind,
+                bind_len,
+                auth_path,
+                auth_path_len,
+                &mut port,
+            )
+        },
+        0
+    );
+    assert_ne!(port, 0);
+
+    let address = format!("127.0.0.1:{port}");
+    let stream = TcpStream::connect(address).expect("connect authenticated front");
+    let stream = authenticate_client(
+        stream,
+        &client_config,
+        "codex",
+        Duration::from_secs(2),
+    )
+    .expect("authenticate front client");
+    let mut client =
+        Client::connect(stream, "codex", "/", 65_536).expect("attach authenticated front");
+    let fid = client.walk_path("/status").expect("walk status");
+    client.open(fid, 0).expect("open status");
+    assert_eq!(
+        client.read(fid, 0, 4096).expect("read status"),
+        b"ready\n".to_vec()
+    );
+
+    unsafe { r9p_front_free(handle) };
+    fs::remove_dir_all(root).expect("remove auth test directory");
 }
 
 fn request_prefix(handle: *mut front::abi::FrontAbi, request_id: u64) -> String {

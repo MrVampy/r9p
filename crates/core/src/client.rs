@@ -4,6 +4,7 @@ use crate::{
     flush::RequestTable,
     message::{RMessage, TMessage, Tag, NOTAG},
     qid::Qid,
+    referral::NamespaceReferral,
     stat::Stat,
 };
 use std::collections::BTreeMap;
@@ -23,6 +24,7 @@ pub enum Completion {
     Remove,
     Stat { stat: Stat },
     Wstat,
+    Referrals { referrals: Vec<NamespaceReferral> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,6 +212,15 @@ impl Client {
         })
     }
 
+    pub fn referrals(&mut self, fid: Fid) -> Result<Op> {
+        let tag = self.alloc_tag()?;
+        Ok(Op {
+            tag,
+            fid: Some(fid),
+            message: TMessage::Referrals { tag, fid },
+        })
+    }
+
     pub fn flush(&mut self, oldtag: Tag) -> Result<Op> {
         if oldtag == NOTAG {
             return Err(Error::from_static(EBADTAG));
@@ -358,6 +369,13 @@ impl Client {
                 Ok(ClientResponse::Completion {
                     tag,
                     completion: Completion::Wstat,
+                })
+            }
+            RMessage::Referrals { tag, referrals } => {
+                self.finish(tag)?;
+                Ok(ClientResponse::Completion {
+                    tag,
+                    completion: Completion::Referrals { referrals },
                 })
             }
         }

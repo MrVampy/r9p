@@ -300,6 +300,26 @@ impl<T> Server<T> {
                     },
                 }))
             }
+            TMessage::Referrals { fid, .. } => {
+                let variant = self
+                    .session
+                    .variant()
+                    .ok_or_else(|| Error::from_static("version not negotiated"))?;
+                if !variant.supports_referrals() {
+                    return Err(Error::from_static(
+                        "namespace referrals require negotiated 9P2000.r9p",
+                    ));
+                }
+                let state = self.session.fid(fid)?;
+                self.session.reserve_shared_fid(key, fid)?;
+                Ok(ServerEvent::Dispatch(ServerRequest {
+                    key,
+                    kind: ServerRequestKind::Referrals {
+                        fid,
+                        qid: state.qid,
+                    },
+                }))
+            }
         }
     }
 
@@ -441,6 +461,15 @@ impl<T> Server<T> {
             (ServerRequestKind::Wstat { .. }, ServerCompletion::Wstat) => {
                 Ok(RMessage::Wstat { tag })
             }
+            (
+                ServerRequestKind::Referrals { .. },
+                ServerCompletion::Referrals { referrals },
+            ) => {
+                for referral in &referrals {
+                    referral.validate()?;
+                }
+                Ok(RMessage::Referrals { tag, referrals })
+            }
             _ => Err(Error::from("completion kind does not match request")),
         }
     }
@@ -539,6 +568,9 @@ pub(super) fn perform_file_tree_request<T: FileTree>(
         ServerRequestKind::Wstat { fid, qid, stat } => tree
             .wstat(*fid, *qid, stat)
             .map(|()| ServerCompletion::Wstat),
+        ServerRequestKind::Referrals { fid, qid } => tree
+            .referrals(*fid, *qid)
+            .map(|referrals| ServerCompletion::Referrals { referrals }),
     }
 }
 

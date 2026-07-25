@@ -3,6 +3,7 @@ use crate::{
     flush::{FlushOutcome, RequestKey},
     message::{RMessage, Tag},
     qid::Qid,
+    referral::NamespaceReferral,
     stat::Stat,
 };
 
@@ -100,6 +101,10 @@ pub enum ServerRequestKind {
         qid: Qid,
         stat: Stat,
     },
+    Referrals {
+        fid: Fid,
+        qid: Qid,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,4 +120,5 @@ pub enum ServerCompletion {
     Remove,
     Stat { stat: Stat },
     Wstat,
+    Referrals { referrals: Vec<NamespaceReferral> },
 }

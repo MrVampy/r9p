@@ -32,7 +32,7 @@ pub const EWSTATMUID: &str = "wstat -- attempt to change muid";
 pub const EWSTATDMDIR: &str = "wstat -- attempt to change DMDIR bit";
 pub const EWSTATDMSYMLINK: &str = "wstat -- attempt to change DMSYMLINK bit";
 pub const EWSTATDIRLENGTH: &str = "wstat -- attempt to set non-zero directory length";
-pub const ESYMLINKDIALECT: &str = "symlink metadata requires negotiated 9P2000.r9p-symlink";
+pub const ESYMLINKDIALECT: &str = "symlink metadata requires negotiated 9P2000.r9p";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {

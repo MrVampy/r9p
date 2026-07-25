@@ -101,7 +101,7 @@ impl FilesystemExport {
                     default_msize: config.msize,
                     max_msize: config.msize,
                     max_fids: config.max_fids,
-                    variant: Variant::R9pSymlink,
+                    variant: Variant::R9p,
                     ..ServerConfig::default()
                 },
             },

@@ -6,6 +6,7 @@ export const FRONT_CAP_NATIVE_CLIENT_MUTATIONS = 1n << 3n;
 export const FRONT_CAP_ATOMIC_CREATE_WRITE = 1n << 4n;
 export const FRONT_CAP_NAMESPACE_MUTATION_RELAYS = 1n << 5n;
 export const FRONT_CAP_RESOLVED_NAMESPACE_CLIENT = 1n << 6n;
+export const FRONT_CAP_AUTHENTICATED_SERVE = 1n << 7n;
 export const REQUIRED_FRONT_CAPABILITIES =
   FRONT_CAP_PUSHED_NAMESPACE_METADATA |
   FRONT_CAP_REQUEST_CONTEXT_V2 |
@@ -13,7 +14,8 @@ export const REQUIRED_FRONT_CAPABILITIES =
   FRONT_CAP_NATIVE_CLIENT_MUTATIONS |
   FRONT_CAP_ATOMIC_CREATE_WRITE |
   FRONT_CAP_NAMESPACE_MUTATION_RELAYS |
-  FRONT_CAP_RESOLVED_NAMESPACE_CLIENT;
+  FRONT_CAP_RESOLVED_NAMESPACE_CLIENT |
+  FRONT_CAP_AUTHENTICATED_SERVE;
 
 export { renderExportDescriptor } from "./export_descriptor.ts";
 export type { ExportDescriptorOptions } from "./export_descriptor.ts";
@@ -36,6 +38,17 @@ const SYMBOLS = {
   },
   r9p_front_serve_tcp: {
     parameters: ["pointer", "buffer", "usize", "buffer"],
+    result: "i32",
+  },
+  r9p_front_serve_tcp_authenticated: {
+    parameters: [
+      "pointer",
+      "buffer",
+      "usize",
+      "buffer",
+      "usize",
+      "buffer",
+    ],
     result: "i32",
   },
   r9p_front_register_intake: {
@@ -433,18 +446,32 @@ export class FrontHost implements TransitionSink {
     return new FrontHost(library, handle);
   }
 
-  serve(bind: string): number {
+  serve(bind: string, sessionAuthConfig?: string): number {
     this.assertOpen();
     const [bindBytes, bindLen] = bytes(bind);
     const portOut = new Uint8Array(2);
-    const status = this.library.symbols.r9p_front_serve_tcp(
-      this.handle,
-      bindBytes,
-      bindLen,
-      portOut,
-    );
+    const status = sessionAuthConfig === undefined
+      ? this.library.symbols.r9p_front_serve_tcp(
+        this.handle,
+        bindBytes,
+        bindLen,
+        portOut,
+      )
+      : (() => {
+        const [authConfigBytes, authConfigLen] = bytes(sessionAuthConfig);
+        return this.library.symbols.r9p_front_serve_tcp_authenticated(
+          this.handle,
+          bindBytes,
+          bindLen,
+          authConfigBytes,
+          authConfigLen,
+          portOut,
+        );
+      })();
     if (status !== 0) {
-      throw new Error(`front serve_tcp(${bind}) failed with status ${status}`);
+      throw new Error(
+        `front serve_tcp(${bind}) failed with status ${status}: ${this.lastError()}`,
+      );
     }
     return new DataView(portOut.buffer).getUint16(0, true);
   }

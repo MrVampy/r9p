@@ -122,11 +122,11 @@ fn serves_symlink_target_without_following_outside_export() -> Result<()> {
     let mut server = Server::with_config(
         LocalTree::open(&root)?,
         ServerConfig {
-            variant: Variant::R9pSymlink,
+            variant: Variant::R9p,
             ..ServerConfig::default()
         },
     );
-    attach_with_variant(&mut server, Variant::R9pSymlink);
+    attach_with_variant(&mut server, Variant::R9p);
     let reply = server.handle(TMessage::Walk {
         tag: 2,
         fid: 1,

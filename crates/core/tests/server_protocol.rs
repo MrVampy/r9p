@@ -8,6 +8,7 @@ use r9p::{
     fid::{Fid, NOFID},
     message::{RMessage, TMessage, NOTAG},
     qid::{Qid, DMDIR},
+    referral::NamespaceReferral,
     server::{
         FileTree, OpenFile, ReadData, Server, ServerCompletion, ServerConfig, ServerEvent,
         ServerRequest,
@@ -87,6 +88,19 @@ impl FileTree for ProtocolTree {
     fn wstat(&mut self, _fid: Fid, _qid: Qid, _stat: &Stat) -> Result<()> {
         self.wstat_count += 1;
         Ok(())
+    }
+
+    fn referrals(&mut self, _fid: Fid, _qid: Qid) -> Result<Vec<NamespaceReferral>> {
+        Ok(vec![NamespaceReferral {
+            mount_path: b"/sources/x".to_vec(),
+            endpoint: b"192.168.0.30:19596".to_vec(),
+            uname: b"glenda".to_vec(),
+            aname: b"/".to_vec(),
+            exported_root: b"/".to_vec(),
+            authority_boundary: b"p9any:noise-ik@sources".to_vec(),
+            generation: 1,
+            valid_for_ms: 10_000,
+        }])
     }
 }
 
@@ -194,22 +208,22 @@ fn plain_version_accepts_period_extensions_not_prefix_collisions() {
 }
 
 #[test]
-fn symlink_extension_is_negotiated_explicitly_and_can_downgrade() {
+fn r9p_extension_is_negotiated_explicitly_and_can_downgrade() {
     assert_eq!(
-        Variant::R9pSymlink.accept(b"9P2000.r9p-symlink"),
-        Some(Variant::R9pSymlink)
+        Variant::R9p.accept(b"9P2000.r9p"),
+        Some(Variant::R9p)
     );
-    assert_eq!(Variant::R9pSymlink.accept(b"9P2000"), Some(Variant::Plain));
+    assert_eq!(Variant::R9p.accept(b"9P2000"), Some(Variant::Plain));
     assert_eq!(
-        Variant::R9pSymlink.accept_response(b"9P2000"),
+        Variant::R9p.accept_response(b"9P2000"),
         Some(Variant::Plain)
     );
-    assert_eq!(Variant::Plain.accept_response(b"9P2000.r9p-symlink"), None);
+    assert_eq!(Variant::Plain.accept_response(b"9P2000.r9p"), None);
 
     let mut server = Server::with_config(
         ProtocolTree::new(),
         ServerConfig {
-            variant: Variant::R9pSymlink,
+            variant: Variant::R9p,
             ..ServerConfig::default()
         },
     );
@@ -217,15 +231,48 @@ fn symlink_extension_is_negotiated_explicitly_and_can_downgrade() {
         server.handle(TMessage::Version {
             tag: NOTAG,
             msize: 8192,
-            version: b"9P2000.r9p-symlink".to_vec(),
+            version: b"9P2000.r9p".to_vec(),
         }),
         RMessage::Version {
             tag: NOTAG,
             msize: 8192,
-            version: b"9P2000.r9p-symlink".to_vec(),
+            version: b"9P2000.r9p".to_vec(),
         }
     );
-    assert_eq!(server.session().variant(), Some(Variant::R9pSymlink));
+    assert_eq!(server.session().variant(), Some(Variant::R9p));
+}
+
+#[test]
+fn referrals_are_protocol_mechanism_and_require_the_r9p_dialect() {
+    let mut plain = Server::new(ProtocolTree::new());
+    negotiate(&mut plain);
+    attach(&mut plain, 1);
+    assert_error(
+        plain.handle(TMessage::Referrals { tag: 2, fid: 1 }),
+        "namespace referrals require negotiated 9P2000.r9p",
+    );
+
+    let mut composed = Server::with_config(
+        ProtocolTree::new(),
+        ServerConfig {
+            variant: Variant::R9p,
+            ..ServerConfig::default()
+        },
+    );
+    assert!(matches!(
+        composed.handle(TMessage::Version {
+            tag: NOTAG,
+            msize: 8192,
+            version: b"9P2000.r9p".to_vec(),
+        }),
+        RMessage::Version { .. }
+    ));
+    attach(&mut composed, 1);
+    assert!(matches!(
+        composed.handle(TMessage::Referrals { tag: 2, fid: 1 }),
+        RMessage::Referrals { referrals, .. }
+            if referrals.len() == 1 && referrals[0].mount_path == b"/sources/x"
+    ));
 }
 
 #[test]

@@ -162,6 +162,7 @@ dependencies = [
  "fs",
  "libc",
  "r9p",
+ "r9p-auth",
  "session",
 ]
 

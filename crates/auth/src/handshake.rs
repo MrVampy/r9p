@@ -41,6 +41,7 @@ pub fn authenticate_client(
     principal: &str,
     timeout: Duration,
 ) -> Result<SecureStream> {
+    configure_transport_socket(&stream)?;
     validate_principal(principal)?;
     let previous = install_handshake_timeout(&stream, timeout)?;
     p9any::negotiate_client(&mut stream, config.domain())?;
@@ -84,6 +85,7 @@ pub fn authenticate_server(
     config: &ServerConfig,
     timeout: Duration,
 ) -> Result<AuthenticatedSession> {
+    configure_transport_socket(&stream)?;
     let previous = install_handshake_timeout(&stream, timeout)?;
     p9any::negotiate_server(&mut stream, config.domain())?;
 
@@ -212,6 +214,12 @@ fn restore_timeouts(stream: &TcpStream, timeouts: SocketTimeouts) -> Result<()> 
         .map_err(|error| Error::from(format!("restore TCP timeout: {error}")))
 }
 
+fn configure_transport_socket(stream: &TcpStream) -> Result<()> {
+    stream
+        .set_nodelay(true)
+        .map_err(|error| Error::from(format!("set TCP_NODELAY: {error}")))
+}
+
 fn noise_error(context: &'static str) -> impl FnOnce(snow::Error) -> Error {
     move |error| Error::from(format!("{context}: {error}"))
 }
@@ -241,7 +249,16 @@ mod tests {
             let (stream, _) = listener
                 .accept()
                 .map_err(|error| Error::from(error.to_string()))?;
+            let socket = stream
+                .try_clone()
+                .map_err(|error| Error::from(error.to_string()))?;
             let mut session = authenticate_server(stream, &server_config, Duration::from_secs(2))?;
+            if !socket
+                .nodelay()
+                .map_err(|error| Error::from(error.to_string()))?
+            {
+                return Err(Error::from("authenticated server socket has Nagle enabled"));
+            }
             let mut request = [0_u8; 5];
             session
                 .stream
@@ -257,8 +274,14 @@ mod tests {
             Ok(session.peer)
         });
         let stream = TcpStream::connect(address).map_err(|error| Error::from(error.to_string()))?;
+        let socket = stream
+            .try_clone()
+            .map_err(|error| Error::from(error.to_string()))?;
         let mut stream =
             authenticate_client(stream, &client_config, "codex", Duration::from_secs(2))?;
+        assert!(socket
+            .nodelay()
+            .map_err(|error| Error::from(error.to_string()))?);
         stream
             .write_all(b"hello")
             .map_err(|error| Error::from(error.to_string()))?;

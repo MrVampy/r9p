@@ -12,7 +12,14 @@ export interface ExportDescriptorOptions {
   expiresAt?: string;
   localRootLabel?: string;
   namespaceMountPaths?: string[];
+  sessionEndpoint?: SessionEndpointOptions;
   extraFields?: Readonly<Record<string, string>>;
+}
+
+export interface SessionEndpointOptions {
+  endpointBind: string;
+  aname: string;
+  auth: string;
 }
 
 const RESERVED_FIELDS = new Set([
@@ -30,6 +37,9 @@ const RESERVED_FIELDS = new Set([
   "expires_at",
   "local_root_label",
   "namespace_mount_paths",
+  "session_endpoint_bind",
+  "session_aname",
+  "session_auth",
 ]);
 
 export function renderExportDescriptor(
@@ -63,6 +73,13 @@ export function renderExportDescriptor(
       "namespace_mount_paths",
       options.namespaceMountPaths.join(","),
     ]);
+  }
+  if (options.sessionEndpoint !== undefined) {
+    fields.push(
+      ["session_endpoint_bind", options.sessionEndpoint.endpointBind],
+      ["session_aname", options.sessionEndpoint.aname],
+      ["session_auth", options.sessionEndpoint.auth],
+    );
   }
   for (
     const [name, value] of Object.entries(options.extraFields ?? {}).sort((
@@ -103,36 +120,65 @@ function validateOptions(options: ExportDescriptorOptions): void {
       );
     }
   }
-  const authClass = options.auth === "none"
+  validateEndpointAuth(
+    options.endpointBind,
+    options.transportClass,
+    options.auth,
+  );
+  if (options.sessionEndpoint !== undefined) {
+    const session = options.sessionEndpoint;
+    if (session.endpointBind === "" || session.aname === "") {
+      throw new Error("session endpoint bind and aname must be non-empty");
+    }
+    validateEndpointAuth(
+      session.endpointBind,
+      endpointTransportClass(session.endpointBind),
+      session.auth,
+    );
+  }
+}
+
+function validateEndpointAuth(
+  endpointBind: string,
+  transportClass: "tcp" | "unix",
+  auth: string,
+): void {
+  const authClass = auth === "none"
     ? "none"
-    : options.auth.split(":", 1)[0] ?? "";
-  const authDetails = options.auth === "none"
+    : auth.split(":", 1)[0] ?? "";
+  const authDetails = auth === "none"
     ? ""
-    : options.auth.slice(authClass.length + 1);
+    : auth.slice(authClass.length + 1);
   if (
     !["none", "p9any", "uds-peercred"].includes(authClass) ||
     (authClass !== "none" && authDetails === "") ||
     (authClass === "p9any" && !validP9anyDetails(authDetails))
   ) {
-    throw new Error(`invalid auth boundary ${options.auth}`);
+    throw new Error(`invalid auth boundary ${auth}`);
   }
   if (
-    options.transportClass === "tcp" && authClass === "none" &&
-    !isLoopback(options.endpointBind)
+    transportClass === "tcp" && authClass === "none" &&
+    !isLoopback(endpointBind)
   ) {
     throw new Error("descriptor auth=none is only admitted for loopback TCP");
   }
-  if (options.transportClass === "tcp" && authClass === "uds-peercred") {
+  if (transportClass === "tcp" && authClass === "uds-peercred") {
     throw new Error("descriptor uds-peercred auth is not valid for TCP");
   }
   if (
-    options.transportClass === "unix" &&
+    transportClass === "unix" &&
     authClass === "p9any"
   ) {
     throw new Error(
       "descriptor p9any session auth is not valid for unix sockets",
     );
   }
+}
+
+function endpointTransportClass(endpointBind: string): "tcp" | "unix" {
+  return endpointBind.startsWith("unix:") || endpointBind.startsWith("unix!")
+    ? "unix"
+    : "tcp";
 }
 
 function validP9anyDetails(details: string): boolean {

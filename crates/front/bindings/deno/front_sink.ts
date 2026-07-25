@@ -18,7 +18,10 @@ export const REQUIRED_FRONT_CAPABILITIES =
   FRONT_CAP_CLIENT_AUTHORITY_BINDINGS;
 
 export { renderExportDescriptor } from "./export_descriptor.ts";
-export type { ExportDescriptorOptions } from "./export_descriptor.ts";
+export type {
+  ExportDescriptorOptions,
+  SessionEndpointOptions,
+} from "./export_descriptor.ts";
 import { parseRequestContext } from "./request_context.ts";
 import type { RequestContext } from "./request_context.ts";
 export type { RequestContext } from "./request_context.ts";

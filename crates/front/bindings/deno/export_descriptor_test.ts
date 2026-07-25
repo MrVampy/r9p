@@ -16,6 +16,11 @@ Deno.test("renderExportDescriptor emits the canonical field order", () => {
       msize: 65_536,
       localRootLabel: "example",
       namespaceMountPaths: ["/venues/example/demo/sensor"],
+      sessionEndpoint: {
+        endpointBind: "192.168.0.20:4568",
+        aname: "/",
+        auth: "p9any:noise-ik@example",
+      },
       extraFields: {
         service_unit: "example.service",
         host_firewall_admission: "tcp:192.168.0.20:4567",
@@ -34,6 +39,9 @@ Deno.test("renderExportDescriptor emits the canonical field order", () => {
       "msize\t65536\n" +
       "local_root_label\texample\n" +
       "namespace_mount_paths\t/venues/example/demo/sensor\n" +
+      "session_endpoint_bind\t192.168.0.20:4568\n" +
+      "session_aname\t/\n" +
+      "session_auth\tp9any:noise-ik@example\n" +
       "host_firewall_admission\ttcp:192.168.0.20:4567\n" +
       "service_unit\texample.service\n",
   );
@@ -52,6 +60,28 @@ Deno.test("renderExportDescriptor rejects invalid authority boundaries", () => {
       pid: 42,
       protocol: "9P2000",
       msize: 65_536,
+    })
+  );
+});
+
+Deno.test("renderExportDescriptor validates the session endpoint boundary", () => {
+  assertThrows(() =>
+    renderExportDescriptor({
+      endpointBind: "127.0.0.1:4567",
+      aname: "/",
+      uname: "codex",
+      exportedRoot: "/",
+      transportClass: "tcp",
+      mode: "ro",
+      auth: "none",
+      pid: 42,
+      protocol: "9P2000",
+      msize: 65_536,
+      sessionEndpoint: {
+        endpointBind: "192.168.0.20:4568",
+        aname: "/",
+        auth: "none",
+      },
     })
   );
 });

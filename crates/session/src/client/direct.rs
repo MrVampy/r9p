@@ -16,21 +16,9 @@ const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(200);
 #[derive(Clone)]
 pub(super) struct DirectClient {
     inner: MultiplexedClient<crate::transport::ClientStream>,
-    tracker: RequestTracker,
 }
 
 impl DirectClient {
-    pub fn connect_with_timeout(config: &ConnectionConfig, timeout: Duration) -> Result<Self> {
-        Self::connect_with_tracker_timeout(config, RequestTracker::default(), timeout)
-    }
-
-    pub fn connect_with_tracker(
-        config: &ConnectionConfig,
-        tracker: RequestTracker,
-    ) -> Result<Self> {
-        Self::connect_with_tracker_timeout(config, tracker, Duration::ZERO)
-    }
-
     pub fn connect_with_tracker_timeout(
         config: &ConnectionConfig,
         tracker: RequestTracker,
@@ -67,15 +55,7 @@ impl DirectClient {
         let inner = inner.with_call_observer(move |tag| -> Box<dyn Send> {
             Box::new(tracked_requests.track_current(tag, tracked_inner.clone()))
         });
-        Ok(Self { inner, tracker })
-    }
-
-    pub fn tracker(&self) -> RequestTracker {
-        self.tracker.clone()
-    }
-
-    pub fn interrupt_fuse_unique(&self, unique: u64, timeout: Duration) -> Result<usize> {
-        self.tracker.interrupt(unique, timeout)
+        Ok(Self { inner })
     }
 
     pub fn root_fid(&self) -> Fid {
@@ -88,6 +68,14 @@ impl DirectClient {
 
     pub fn msize(&self) -> u32 {
         self.inner.msize()
+    }
+
+    pub fn version(&self) -> Vec<u8> {
+        self.inner.version()
+    }
+
+    pub fn root_qid(&self) -> Qid {
+        self.inner.root_qid()
     }
 
     pub fn max_write_payload(&self) -> u32 {
@@ -104,12 +92,6 @@ impl DirectClient {
             .map_err(client_error)
     }
 
-    pub fn walk_one_timeout(&self, fid: Fid, name: &[u8], timeout: Duration) -> Result<Fid> {
-        self.inner
-            .walk_one_timeout(fid, name, timeout)
-            .map_err(client_error)
-    }
-
     pub fn walk_timeout(&self, fid: Fid, names: &[Vec<u8>], timeout: Duration) -> Result<Fid> {
         self.inner
             .walk_timeout(fid, names, timeout)
@@ -120,10 +102,6 @@ impl DirectClient {
         self.inner
             .referrals_timeout(self.root_fid(), timeout)
             .map_err(client_error)
-    }
-
-    pub fn walk_path(&self, path: &str) -> Result<Fid> {
-        self.inner.walk_path(path).map_err(client_error)
     }
 
     pub fn walk(&self, fid: Fid, names: &[Vec<u8>]) -> Result<Fid> {

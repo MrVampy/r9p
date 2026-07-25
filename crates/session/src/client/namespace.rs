@@ -131,6 +131,14 @@ impl Client {
         self.state.root.msize()
     }
 
+    pub fn version(&self) -> Vec<u8> {
+        self.state.root.version()
+    }
+
+    pub fn root_qid(&self) -> Qid {
+        self.state.root.root_qid()
+    }
+
     pub fn max_write_payload(&self) -> u32 {
         self.state.root.max_write_payload()
     }

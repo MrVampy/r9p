@@ -207,6 +207,10 @@ impl NodeTable {
         Ok(old_fid.filter(|old| *old != fid))
     }
 
+    pub fn take_cached_fid(&mut self, nodeid: u64) -> Result<Option<Fid>> {
+        Ok(self.node_mut(nodeid)?.fid.take())
+    }
+
     pub fn update_stat(&mut self, nodeid: u64, stat: Stat) -> Result<()> {
         let node = self.node_mut(nodeid)?;
         let identity_changed = !same_inode_identity(node, &stat);

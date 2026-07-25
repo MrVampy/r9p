@@ -47,19 +47,19 @@ impl R9pFuse {
         let client = self.client_snapshot()?;
         let fid = self.fresh_child_fid(header.nodeid, name, &client, self.lookup_timeout())?;
         let stat = client.stat_timeout(fid, self.lookup_timeout())?;
-        let (nodeid, generation, clunk_fid) = {
+        let (nodeid, generation, cached_fid) = {
             let mut nodes = self.nodes()?;
-            let inserted = nodes.insert_lookup(header.nodeid, fid, stat.clone(), name)?;
-            let nodeid = inserted.nodeid;
+            let nodeid = nodes.insert_lookup_lazy(header.nodeid, stat.clone(), name)?;
             let generation = nodes.node(nodeid)?.generation;
-            (nodeid, generation, inserted.clunk_fid)
+            let cached_fid = nodes.take_cached_fid(nodeid)?;
+            (nodeid, generation, cached_fid)
         };
         if self.config.debug {
-            eprintln!("r9p mount: lookup bound node {nodeid} with fid {fid}");
+            eprintln!("r9p mount: lookup retained path-only node {nodeid}");
         }
-        if let Some(clunk_fid) = clunk_fid {
+        for clunk_fid in cached_fid.into_iter().chain(std::iter::once(fid)) {
             if self.config.debug {
-                eprintln!("r9p mount: lookup discarded fid {clunk_fid}");
+                eprintln!("r9p mount: lookup released transient fid {clunk_fid}");
             }
             let _ = client.clunk_timeout(clunk_fid, self.control_timeout());
         }

@@ -297,6 +297,32 @@ fn forgetting_lazy_nodes_has_no_fid_to_clunk() {
 }
 
 #[test]
+fn path_only_lookup_can_release_a_previous_cached_binding() {
+    let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
+    let docs = nodes
+        .insert_lookup(
+            ROOT_NODEID,
+            2,
+            Stat::new("docs", Qid::dir(2), 0o555),
+            b"docs",
+        )
+        .map(|inserted| inserted.nodeid)
+        .expect("docs node should insert");
+
+    let same = nodes
+        .insert_lookup_lazy(ROOT_NODEID, Stat::new("docs", Qid::dir(2), 0o555), b"docs")
+        .expect("path-only lookup should reuse docs");
+    let cached = nodes
+        .take_cached_fid(same)
+        .expect("cached binding should be releasable");
+
+    assert_eq!(same, docs);
+    assert_eq!(cached, Some(2));
+    assert_eq!(nodes.node(docs).expect("docs").fid, None);
+    assert_eq!(nodes.node(docs).expect("docs").lookups, 2);
+}
+
+#[test]
 fn forget_returns_removed_fid_without_clunking_under_lock() {
     let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
     let docs = nodes

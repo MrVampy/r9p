@@ -49,10 +49,11 @@ pub enum ExportMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(non_camel_case_types)]
 pub enum Protocol {
-    NineP2000,
-    NineP2000R,
-    NineP2000L,
+    P9_2000,
+    P9_2000R,
+    P9_2000L,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -271,17 +272,17 @@ impl ExportMode {
 impl Protocol {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::NineP2000 => "9P2000",
-            Self::NineP2000R => "9P2000.R",
-            Self::NineP2000L => "9P2000.L",
+            Self::P9_2000 => "9P2000",
+            Self::P9_2000R => "9P2000.R",
+            Self::P9_2000L => "9P2000.L",
         }
     }
 
     pub fn parse(value: &str) -> Result<Self> {
         match value {
-            "9P2000" => Ok(Self::NineP2000),
-            "9P2000.R" => Ok(Self::NineP2000R),
-            "9P2000.L" => Ok(Self::NineP2000L),
+            "9P2000" => Ok(Self::P9_2000),
+            "9P2000.R" => Ok(Self::P9_2000R),
+            "9P2000.L" => Ok(Self::P9_2000L),
             _ => Err(Error::from(format!("unknown protocol {value}"))),
         }
     }
@@ -534,7 +535,7 @@ mod tests {
             mode: ExportMode::ReadOnly,
             auth: AuthBoundary::none(),
             pid: 42,
-            protocol: Protocol::NineP2000,
+            protocol: Protocol::P9_2000,
             msize: 65_536,
             expires_at: None,
             local_root_label: Some("/tmp/candidate".to_string()),

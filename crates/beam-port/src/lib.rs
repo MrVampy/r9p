@@ -485,6 +485,7 @@ fn response_line(response: Result<String, String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use r9p_auth::{generate_key_pair, write_key_pair};
     use std::{
         env, fs,
         os::unix::net::UnixListener,
@@ -681,6 +682,76 @@ mod tests {
     }
 
     #[test]
+    fn front_commands_serve_authenticated_static_file() {
+        let root = temp_directory_path("authenticated-front");
+        fs::create_dir(&root).expect("auth test directory");
+        let server_key = generate_key_pair().expect("server key pair");
+        let client_key = generate_key_pair().expect("client key pair");
+        let server_private = root.join("server.key");
+        let server_public = root.join("server.pub");
+        let client_private = root.join("client.key");
+        let client_public = root.join("client.pub");
+        write_key_pair(&server_private, &server_public, &server_key)
+            .expect("write server key pair");
+        write_key_pair(&client_private, &client_public, &client_key)
+            .expect("write client key pair");
+        let server_config = root.join("server.conf");
+        let client_config = root.join("client.conf");
+        fs::write(
+            &server_config,
+            format!(
+                "format r9p-session-auth.v1\nrole server\ndomain front-test\nprivate-key {}\npeer {} codex\n",
+                server_private.display(),
+                client_key.public
+            ),
+        )
+        .expect("write server config");
+        fs::write(
+            &client_config,
+            format!(
+                "format r9p-session-auth.v1\nrole client\ndomain front-test\nprivate-key {}\nserver-key {}\n",
+                client_private.display(),
+                server_key.public
+            ),
+        )
+        .expect("write client config");
+
+        let mut server = PeerClientServer::default();
+        let front_id = parse_front_id(&server.handle_line("front-new").expect("front-new"));
+        let set = format!(
+            "front-set\t{front_id}\t{}\t{}",
+            hex_text("status"),
+            hex::encode(b"authenticated")
+        );
+        assert_eq!(
+            server.handle_line(&set).expect("front-set"),
+            "front-set".to_string()
+        );
+        let serve = format!(
+            "front-serve-tcp-authenticated\t{front_id}\t{}\t{}",
+            hex_text("127.0.0.1:0"),
+            hex_text(&server_config.to_string_lossy())
+        );
+        let addr = parse_authenticated_front_addr(
+            &server.handle_line(&serve).expect("authenticated front serve"),
+        );
+        let target = target_fields_with_auth(&addr, &client_config.to_string_lossy());
+        let read = server
+            .handle_line(&format!("read\t{target}\t{}", hex_text("status")))
+            .expect("authenticated read");
+        let fields = read.split('\t').collect::<Vec<_>>();
+        assert_eq!(fields[0], "read");
+        assert_eq!(hex::decode(&fields[1]).expect("read bytes"), b"authenticated");
+
+        let stop = format!("front-stop\t{front_id}");
+        assert_eq!(
+            server.handle_line(&stop).expect("front-stop"),
+            "front-stop".to_string()
+        );
+        fs::remove_dir_all(root).expect("remove auth test directory");
+    }
+
+    #[test]
     fn front_commands_remove_projected_subtree() {
         let mut server = PeerClientServer::default();
         let front_id = parse_front_id(&server.handle_line("front-new").expect("front-new"));
@@ -869,14 +940,15 @@ mod tests {
     }
 
     fn temp_socket_path(label: &str) -> std::path::PathBuf {
+        temp_directory_path(label).with_extension("sock")
+    }
+
+    fn temp_directory_path(label: &str) -> std::path::PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_nanos())
             .unwrap_or(0);
-        env::temp_dir().join(format!(
-            "r9p-beam-port-{label}-{}-{nanos}.sock",
-            std::process::id()
-        ))
+        env::temp_dir().join(format!("r9p-beam-port-{label}-{}-{nanos}", std::process::id()))
     }
 
     fn hex_text(value: &str) -> String {
@@ -895,12 +967,28 @@ mod tests {
         hex::decode_text(fields[1]).expect("front address")
     }
 
+    fn parse_authenticated_front_addr(output: &str) -> String {
+        let fields = output.split('\t').collect::<Vec<_>>();
+        assert_eq!(fields[0], "front-serve-tcp-authenticated");
+        hex::decode_text(fields[1]).expect("authenticated front address")
+    }
+
     fn target_fields(bind: &str) -> String {
         format!(
             "{}\t{}\t{}\t65536\t\t0",
             hex_text(bind),
             hex_text("codex"),
             hex_text("/")
+        )
+    }
+
+    fn target_fields_with_auth(bind: &str, auth_config_path: &str) -> String {
+        format!(
+            "{}\t{}\t{}\t65536\t{}\t0",
+            hex_text(bind),
+            hex_text("codex"),
+            hex_text("/"),
+            hex_text(auth_config_path)
         )
     }
 }

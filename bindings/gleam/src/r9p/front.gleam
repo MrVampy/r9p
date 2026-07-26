@@ -154,6 +154,27 @@ pub fn serve_tcp(front: Front, bind: String) -> Result(String, String) {
   }
 }
 
+pub fn serve_tcp_authenticated(
+  front: Front,
+  bind: String,
+  auth_config_path: String,
+) -> Result(String, String) {
+  use line <- result.try(
+    run(front.adapter, "front-serve-tcp-authenticated", [
+      int.to_string(front.id),
+      text(bind),
+      text(auth_config_path),
+    ]),
+  )
+  case codec.fields(line) {
+    ["front-serve-tcp-authenticated", address] -> codec.decode_text(address)
+    _ ->
+      Error(
+        "r9p_front_unexpected_front-serve-tcp-authenticated_output:" <> line,
+      )
+  }
+}
+
 pub fn next_request(
   front: Front,
   timeout_ms: Int,

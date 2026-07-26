@@ -1,6 +1,6 @@
 use crate::{hex, parse_u64};
 use front::{serve::ServeHandle, Front, RequestContext};
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, path::Path, time::Duration};
 
 #[derive(Default)]
 pub(crate) struct FrontManager {
@@ -121,6 +121,21 @@ impl FrontManager {
                 let addr = serve.addr().to_string();
                 state.serves.push(serve);
                 Ok(format!("front-serve-tcp\t{}", hex::encode(addr.as_bytes())))
+            }
+            ["front-serve-tcp-authenticated", raw_id, bind, auth_config_path] => {
+                let state = self.front(raw_id)?;
+                let bind = hex::decode_text(bind)?;
+                let auth_config_path = hex::decode_text(auth_config_path)?;
+                let serve = state
+                    .front
+                    .serve_tcp_authenticated(&bind, Path::new(&auth_config_path))
+                    .map_err(|error| error.to_string())?;
+                let addr = serve.addr().to_string();
+                state.serves.push(serve);
+                Ok(format!(
+                    "front-serve-tcp-authenticated\t{}",
+                    hex::encode(addr.as_bytes())
+                ))
             }
             ["front-next-request", raw_id, timeout_ms] => {
                 let state = self.front(raw_id)?;

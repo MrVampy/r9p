@@ -9,7 +9,7 @@ pub use front::Front;
 pub(crate) use front::ReadTarget;
 pub use model::{
     CreateRelayRequest, IntakeRequest, PushedDirectoryMetadata, PushedEntryMetadata,
-    PushedFileMetadata, RequestContext, DEFAULT_LOG_CAPACITY,
+    PushedFileMetadata, RequestContext, DEFAULT_IOUNIT, DEFAULT_LOG_CAPACITY,
 };
 pub use tree::FrontTree;
 

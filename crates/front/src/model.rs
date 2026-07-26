@@ -12,6 +12,8 @@ pub(crate) const ROOT_ID: u64 = 0;
 
 pub const DEFAULT_LOG_CAPACITY: usize = 1 << 20;
 
+pub const DEFAULT_IOUNIT: u32 = 4096;
+
 pub(crate) enum Body {
     Dir(BTreeMap<Vec<u8>, u64>),
     File(Vec<u8>),
@@ -217,7 +219,7 @@ impl Default for ProtocolConfig {
     fn default() -> Self {
         Self {
             max_msize: MAX_MSIZE,
-            iounit: 0,
+            iounit: DEFAULT_IOUNIT,
         }
     }
 }

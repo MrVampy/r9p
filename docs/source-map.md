@@ -34,9 +34,11 @@ This map defines the local sources agents should inspect before making source-sp
     without becoming files in the composed namespace.
 - `crates/auth/src/`
   - P9any provider negotiation, Noise IK authentication, authenticated record
-    framing, key material, and typed client/server session configuration.
-  - It binds a verified transport session to a 9P username but carries no
-    backend admission or namespace policy.
+    framing, Unix peer attestation, key material, and typed client/server
+    session configuration.
+  - It exposes a verified transport subject and may preauthorize a 9P username
+    from a server bootstrap allowlist, but carries no backend admission or
+    namespace policy.
 - `crates/reverse/src/`
   - Generic authenticated reverse-connect runtime adapter.
   - An application-owned tree or filesystem owner connects outward and serves

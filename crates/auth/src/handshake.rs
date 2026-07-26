@@ -23,9 +23,19 @@ pub struct PeerIdentity {
 pub struct AuthenticatedSession {
     pub stream: SecureStream,
     pub peer: PeerIdentity,
+    pub preauthorized: bool,
 }
 
 impl PeerIdentity {
+    pub fn new(principal: impl Into<String>, public_key: PublicKey) -> Result<Self> {
+        let principal = principal.into();
+        validate_principal(&principal)?;
+        Ok(Self {
+            principal,
+            public_key,
+        })
+    }
+
     pub fn principal(&self) -> &str {
         &self.principal
     }
@@ -81,9 +91,26 @@ pub fn authenticate_client(
 }
 
 pub fn authenticate_server(
+    stream: TcpStream,
+    config: &ServerConfig,
+    timeout: Duration,
+) -> Result<AuthenticatedSession> {
+    authenticate_server_inner(stream, config, timeout, false)
+}
+
+pub fn authenticate_server_attested(
+    stream: TcpStream,
+    config: &ServerConfig,
+    timeout: Duration,
+) -> Result<AuthenticatedSession> {
+    authenticate_server_inner(stream, config, timeout, true)
+}
+
+fn authenticate_server_inner(
     mut stream: TcpStream,
     config: &ServerConfig,
     timeout: Duration,
+    allow_attested: bool,
 ) -> Result<AuthenticatedSession> {
     configure_transport_socket(&stream)?;
     let previous = install_handshake_timeout(&stream, timeout)?;
@@ -113,7 +140,8 @@ pub fn authenticate_server(
             .get_remote_static()
             .ok_or_else(|| Error::from("Noise handshake did not authenticate a client key"))?,
     )?;
-    if !config.authorize(public_key, &principal) {
+    let preauthorized = config.authorize(public_key, &principal);
+    if !preauthorized && !allow_attested {
         return Err(Error::from(format!(
             "client key is not authorized for principal {principal}"
         )));
@@ -132,6 +160,7 @@ pub fn authenticate_server(
             principal,
             public_key,
         },
+        preauthorized,
     })
 }
 
@@ -327,6 +356,48 @@ mod tests {
             .join()
             .map_err(|_| Error::from("auth server panicked"))?
             .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn attested_server_defers_an_unlisted_key_to_application_admission() -> Result<()> {
+        let server_key = generate_key_pair()?;
+        let bootstrap_key = generate_key_pair()?;
+        let service_key = generate_key_pair()?;
+        let server_config = ServerConfig::new(
+            "vault",
+            server_key.private.clone(),
+            [(bootstrap_key.public, "codex".to_string())],
+        )?;
+        let client_config =
+            ClientConfig::new("vault", service_key.private, server_key.public)?;
+        let listener =
+            TcpListener::bind("127.0.0.1:0").map_err(|error| Error::from(error.to_string()))?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| Error::from(error.to_string()))?;
+        let expected_public_key = service_key.public;
+        let server = thread::spawn(move || -> Result<AuthenticatedSession> {
+            let (stream, _) = listener
+                .accept()
+                .map_err(|error| Error::from(error.to_string()))?;
+            authenticate_server_attested(stream, &server_config, Duration::from_secs(2))
+        });
+
+        let stream = TcpStream::connect(address).map_err(|error| Error::from(error.to_string()))?;
+        let _stream = authenticate_client(
+            stream,
+            &client_config,
+            "/srv/infra/example",
+            Duration::from_secs(2),
+        )?;
+        let session = server
+            .join()
+            .map_err(|_| Error::from("auth server panicked"))??;
+
+        assert_eq!(session.peer.principal(), "/srv/infra/example");
+        assert_eq!(session.peer.public_key(), expected_public_key);
+        assert!(!session.preauthorized);
         Ok(())
     }
 

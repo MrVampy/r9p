@@ -201,6 +201,17 @@ Each session creates its own ephemeral handshake state; there is no per-session
 operator setup. The provider follows p9any's extensible negotiation shape but
 does not claim dp9ik or unmodified factotum interoperability.
 
+`authenticate_server` remains a strict key-and-username allowlist.
+Applications that own a separate admission layer may instead call
+`authenticate_server_attested`: r9p still proves the Noise static key and
+reports whether the claimed username was preauthorized, while the application
+must admit any otherwise-unlisted subject before accepting its 9P attach.
+`TransportIdentity` exposes that key as
+`noise-static-key:<hex>`. On Unix sockets it derives
+`unix-peer:uid:<uid>` from `SO_PEERCRED`, plus `unix-peer:same-user` when the
+peer runs under the listener's effective UID. Mapping those subjects to
+namespace principals remains application policy.
+
 ### Reverse-connect 9P
 
 `reverse-export` changes connection placement, not the 9P protocol or the

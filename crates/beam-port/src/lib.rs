@@ -733,7 +733,9 @@ mod tests {
             hex_text(&server_config.to_string_lossy())
         );
         let addr = parse_authenticated_front_addr(
-            &server.handle_line(&serve).expect("authenticated front serve"),
+            &server
+                .handle_line(&serve)
+                .expect("authenticated front serve"),
         );
         let target = target_fields_with_auth(&addr, &client_config.to_string_lossy());
         let read = server
@@ -741,7 +743,10 @@ mod tests {
             .expect("authenticated read");
         let fields = read.split('\t').collect::<Vec<_>>();
         assert_eq!(fields[0], "read");
-        assert_eq!(hex::decode(&fields[1]).expect("read bytes"), b"authenticated");
+        assert_eq!(
+            hex::decode(&fields[1]).expect("read bytes"),
+            b"authenticated"
+        );
 
         let stop = format!("front-stop\t{front_id}");
         assert_eq!(
@@ -948,7 +953,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_nanos())
             .unwrap_or(0);
-        env::temp_dir().join(format!("r9p-beam-port-{label}-{}-{nanos}", std::process::id()))
+        env::temp_dir().join(format!(
+            "r9p-beam-port-{label}-{}-{nanos}",
+            std::process::id()
+        ))
     }
 
     fn hex_text(value: &str) -> String {

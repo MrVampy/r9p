@@ -369,8 +369,7 @@ mod tests {
             server_key.private.clone(),
             [(bootstrap_key.public, "codex".to_string())],
         )?;
-        let client_config =
-            ClientConfig::new("vault", service_key.private, server_key.public)?;
+        let client_config = ClientConfig::new("vault", service_key.private, server_key.public)?;
         let listener =
             TcpListener::bind("127.0.0.1:0").map_err(|error| Error::from(error.to_string()))?;
         let address = listener

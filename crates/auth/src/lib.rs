@@ -7,15 +7,14 @@ mod stream;
 
 pub use config::{ClientConfig, ServerConfig};
 pub use handshake::{
-    authenticate_client, authenticate_server, authenticate_server_attested,
-    AuthenticatedSession, PeerIdentity,
+    authenticate_client, authenticate_server, authenticate_server_attested, AuthenticatedSession,
+    PeerIdentity,
 };
 pub use key::{
     generate_key_pair, provision_key_pair, write_key_pair, KeyPair, PrivateKey, PublicKey,
 };
 pub use peercred::{
-    TransportIdentity, NOISE_SUBJECT_PREFIX, UNIX_PEER_SUBJECT_PREFIX,
-    UNIX_SAME_USER_SUBJECT,
+    TransportIdentity, NOISE_SUBJECT_PREFIX, UNIX_PEER_SUBJECT_PREFIX, UNIX_SAME_USER_SUBJECT,
 };
 pub use stream::SecureStream;
 

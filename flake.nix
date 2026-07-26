@@ -84,6 +84,7 @@
             src = self;
             cargoLock.lockFile = ./Cargo.lock;
             cargoBuildFlags = [ "-p" "beam-port" ];
+            doCheck = false;
             nativeBuildInputs = with pkgs; [
               clang
               mold
@@ -141,6 +142,7 @@
           packages.r9p = r9p;
 
           checks = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+            beam-front = frontTests;
             fuse-runtime-helper = pkgs.runCommandLocal "r9p-fuse-runtime-helper-check" { } ''
               grep -F ${pkgs.lib.escapeShellArg "${pkgs.fuse3}/bin"} ${r9p}/bin/r9p
               grep -F 'PATH=$PATH' ${r9p}/bin/r9p

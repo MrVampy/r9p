@@ -857,11 +857,14 @@ pub(crate) fn created_child_path(parent_path: &str, name: &str) -> String {
 }
 
 pub(crate) fn open_allowed(node: &Node, mode: u8) -> bool {
-    if !mode::is_valid(mode) || mode & (OTRUNC | ORCLOSE) != 0 {
+    if !mode::is_valid(mode) || mode & ORCLOSE != 0 {
         return false;
     }
     if node.write_relay.is_some() && mode & mode::ACCESS_MASK == OWRITE {
         return true;
+    }
+    if mode & OTRUNC != 0 {
+        return false;
     }
     match &node.body {
         Body::Dir(_) | Body::File(_) | Body::Log(_) | Body::ReadRelay(_) => {

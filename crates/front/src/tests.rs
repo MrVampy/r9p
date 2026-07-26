@@ -607,7 +607,7 @@ fn retained_principal_roots_drop_stale_unames() -> Result<()> {
 }
 
 #[test]
-fn write_relay_buffers_chunks_until_clunk() -> Result<()> {
+fn write_relay_accepts_truncating_open_and_buffers_chunks_until_clunk() -> Result<()> {
     let front = Front::new();
     front.register_write_relay("control")?;
     front.set_wait_timeout(Duration::from_secs(5))?;
@@ -619,7 +619,8 @@ fn write_relay_buffers_chunks_until_clunk() -> Result<()> {
         let mut tree = writer_front.tree();
         tree.attach(1, b"alice", b"/")?;
         let qids = walk_to(&mut tree, 1, 2, &["control"]);
-        tree.open(2, qids[0], OWRITE)?;
+        assert!(tree.accepts_open_mode(2, OWRITE | OTRUNC)?);
+        tree.open(2, qids[0], OWRITE | OTRUNC)?;
         let first = tree.write(2, qids[0], 0, b"#M(\"command\" ")?;
         let second = tree.write(2, qids[0], u64::from(first), b"\"restart\")")?;
         write_tx.send((first, second)).expect("send write result");

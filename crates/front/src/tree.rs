@@ -34,6 +34,16 @@ impl FrontTree {
             write_relay_buffers: BTreeMap::new(),
         }
     }
+
+    pub fn accepts_open_mode(&self, fid: Fid, mode: u8) -> Result<bool> {
+        let state = self.front.lock()?;
+        let id = self
+            .fids
+            .get(&fid)
+            .ok_or_else(|| Error::from_static(EBADFID))?
+            .node;
+        Ok(open_allowed(state.node(id)?, mode))
+    }
 }
 
 #[derive(Clone)]

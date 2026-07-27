@@ -350,7 +350,7 @@ fn spawn_proxy_acceptor(
                     let _ = local.shutdown();
                     continue;
                 };
-                let Some(remote) =
+                let Some(mut remote) =
                     receive_live_stream(&receiver, wait_timeout, &counters, &shutdown)
                 else {
                     counters
@@ -364,7 +364,8 @@ fn spawn_proxy_acceptor(
                     .name("r9p-reverse-bridge".to_string())
                     .spawn(move || {
                         let _bridge_slot = bridge_slot;
-                        let _ = bridge(local, remote);
+                        let _ = send_session_claim(&mut remote)
+                            .and_then(|()| bridge(local, remote));
                         bridge_counters
                             .completed_bridges
                             .fetch_add(1, Ordering::AcqRel);
@@ -447,8 +448,7 @@ impl Drop for CounterSlot {
     }
 }
 
-pub(crate) fn bridge(local: LocalStream, mut remote: SecureStream) -> io::Result<()> {
-    send_session_claim(&mut remote)?;
+pub(crate) fn bridge(local: LocalStream, remote: SecureStream) -> io::Result<()> {
     let mut local_reader = local.try_clone()?;
     let mut local_writer = local;
     let mut remote_reader = remote.try_clone()?;

@@ -69,7 +69,7 @@ fn reverse_transport_socket_disables_nagle() -> Result<(), Box<dyn std::error::E
 
 #[test]
 fn session_proxy_terminates_client_auth_behind_a_local_endpoint(
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let service_key = generate_key_pair()?;
     let compute_key = generate_key_pair()?;
     let upstream = std::net::TcpListener::bind(address(Ipv4Addr::LOCALHOST, 0))?;
@@ -82,7 +82,7 @@ fn session_proxy_terminates_client_auth_behind_a_local_endpoint(
             "/srv/agents/compute/m7".to_string(),
         )],
     )?;
-    let server = thread::spawn(move || -> Result<(), r9p::Error> {
+    let server = thread::spawn(move || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (stream, _) = upstream.accept()?;
         let session = authenticate_server(stream, &service_auth, Duration::from_secs(2))?;
         assert_eq!(session.peer.principal(), "/srv/agents/compute/m7");

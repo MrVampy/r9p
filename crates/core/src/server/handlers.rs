@@ -496,7 +496,11 @@ fn validate_stat_variant(variant: crate::codec::Variant, stat: &Stat) -> Result<
     }
 }
 
-pub(super) fn perform_file_tree_request<T: FileTree>(
+/// Applies one validated server request to an application-owned file tree.
+///
+/// Custom connection handlers can use this dispatcher for their ordinary
+/// namespace paths while retaining asynchronous handling for selected paths.
+pub fn perform_file_tree_request<T: FileTree>(
     tree: &mut T,
     request: &ServerRequest,
 ) -> Result<ServerCompletion> {

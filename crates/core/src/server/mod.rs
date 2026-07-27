@@ -10,6 +10,7 @@ mod validation;
 pub use config::ServerConfig;
 pub use connection::{serve_connection, ConnectionHandler, ConnectionStream};
 pub use file_tree_handler::serve_file_tree_connection;
+pub use handlers::perform_file_tree_request;
 pub use session::Session;
 pub use stream::{Broadcaster, Stream};
 pub use types::{

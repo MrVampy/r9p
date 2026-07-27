@@ -24,6 +24,14 @@ use r9p_auth::{
 
 use crate::configure_transport_socket;
 
+const SESSION_START_POLL: Duration = Duration::from_millis(100);
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ServerStart {
+    Immediate,
+    PeerActivity,
+}
+
 #[derive(Clone)]
 pub struct ReverseExportConfig {
     pub broker_endpoint: SocketAddr,
@@ -128,7 +136,7 @@ impl ReverseExport {
         T: FileTree + Send + 'static,
         F: Fn() -> Result<T> + Send + Sync + 'static,
     {
-        Self::start_server(config, move |stream, server| {
+        Self::start_server(config, ServerStart::Immediate, move |stream, server| {
             let tree = tree_factory()?;
             serve_file_tree_connection(stream, server, tree)
         })
@@ -139,7 +147,7 @@ impl ReverseExport {
         H: ConnectionHandler,
         F: Fn() -> Result<H> + Send + Sync + 'static,
     {
-        Self::start_server(config, move |stream, server| {
+        Self::start_server(config, ServerStart::Immediate, move |stream, server| {
             let handler = Arc::new(handler_factory()?);
             serve_connection(stream, server, handler)
         })
@@ -155,7 +163,7 @@ impl ReverseExport {
         T: FileTree + Send + 'static,
         F: Fn() -> Result<T> + Send + Sync + 'static,
     {
-        Self::start_server(config, move |stream, mut server| {
+        Self::start_server(config, ServerStart::PeerActivity, move |stream, mut server| {
             let session = authenticate_server(stream, &session_auth, authentication_timeout)?;
             server.session_uname = Some(session.peer.principal().as_bytes().to_vec());
             let tree = tree_factory()?;
@@ -173,7 +181,7 @@ impl ReverseExport {
         H: ConnectionHandler,
         F: Fn() -> Result<H> + Send + Sync + 'static,
     {
-        Self::start_server(config, move |stream, mut server| {
+        Self::start_server(config, ServerStart::PeerActivity, move |stream, mut server| {
             let session = authenticate_server(stream, &session_auth, authentication_timeout)?;
             server.session_uname = Some(session.peer.principal().as_bytes().to_vec());
             let handler = Arc::new(handler_factory()?);
@@ -181,7 +189,11 @@ impl ReverseExport {
         })
     }
 
-    fn start_server<F>(config: ReverseExportConfig, serve: F) -> Result<Self>
+    fn start_server<F>(
+        config: ReverseExportConfig,
+        server_start: ServerStart,
+        serve: F,
+    ) -> Result<Self>
     where
         F: Fn(SecureStream, ServerConfig) -> Result<()> + Send + Sync + 'static,
     {
@@ -207,7 +219,15 @@ impl ReverseExport {
             threads.push(
                 thread::Builder::new()
                     .name(format!("r9p-reverse-export-{index}"))
-                    .spawn(move || export_loop(config, index, worker_state, serve))
+                    .spawn(move || {
+                        export_loop(
+                            config,
+                            index,
+                            worker_state,
+                            server_start,
+                            serve,
+                        )
+                    })
                     .map_err(|error| Error::from(format!("spawn reverse export: {error}")))?,
             );
         }
@@ -270,6 +290,7 @@ fn export_loop<F>(
     config: ReverseExportConfig,
     worker_index: usize,
     state: ExportState,
+    server_start: ServerStart,
     serve: Arc<F>,
 ) where
     F: Fn(SecureStream, ServerConfig) -> Result<()> + Send + Sync + 'static,
@@ -329,13 +350,28 @@ fn export_loop<F>(
             return;
         }
         state.connected_streams.fetch_add(1, Ordering::AcqRel);
-        let _ = serve(stream, config.server.clone());
+        if server_start == ServerStart::Immediate
+            || wait_for_session_start(&stream, &state.shutdown)
+        {
+            let _ = serve(stream, config.server.clone());
+        }
         if let Ok(mut streams) = state.active_streams.lock() {
             streams[worker_index] = None;
         }
         state.connected_streams.fetch_sub(1, Ordering::AcqRel);
         state.completed_sessions.fetch_add(1, Ordering::AcqRel);
     }
+}
+
+fn wait_for_session_start(stream: &SecureStream, shutdown: &AtomicBool) -> bool {
+    while !shutdown.load(Ordering::Acquire) {
+        match stream.wait_readable(SESSION_START_POLL) {
+            Ok(true) => return !shutdown.load(Ordering::Acquire),
+            Ok(false) => {}
+            Err(_) => return false,
+        }
+    }
+    false
 }
 
 fn retry_delay(

@@ -241,7 +241,8 @@ fn reverse_export_serves_an_application_owned_tree() -> Result<(), Box<dyn std::
 }
 
 #[test]
-fn reverse_export_authenticates_the_end_service_peer() -> Result<(), Box<dyn std::error::Error>> {
+fn reverse_export_holds_idle_pool_and_authenticates_the_end_service_peer(
+) -> Result<(), Box<dyn std::error::Error>> {
     let broker_key = generate_key_pair()?;
     let exporter_key = generate_key_pair()?;
     let service_key = generate_key_pair()?;
@@ -287,10 +288,15 @@ fn reverse_export_authenticates_the_end_service_peer() -> Result<(), Box<dyn std
             service_key.private,
             [(compute_key.public, "/srv/agents/compute/m7".to_string())],
         )?,
-        Duration::from_secs(2),
+        Duration::from_millis(100),
         || Ok(IdentityHandler),
     )?;
     wait_generic_ready(&broker, &export)?;
+    thread::sleep(Duration::from_millis(300));
+    let idle_status = export.status();
+    assert_eq!(idle_status.connected_streams, 2);
+    assert_eq!(idle_status.authentication_failures, 0);
+    assert_eq!(idle_status.completed_sessions, 0);
 
     let unauthorized = authenticate_client(
         std::net::TcpStream::connect(tcp_proxy_endpoint(&broker)?)?,

@@ -18,7 +18,7 @@ use r9p::{
     },
     stat::Stat,
 };
-use r9p_auth::{generate_key_pair, ClientConfig, ServerConfig};
+use r9p_auth::{authenticate_client, generate_key_pair, ClientConfig, ServerConfig};
 
 use super::{
     BrokerConfig, FilesystemExport, FilesystemExportConfig, ProxyEndpoint, ReverseBroker,
@@ -180,6 +180,87 @@ fn reverse_export_serves_an_application_owned_tree() -> Result<(), Box<dyn std::
         "/",
         65_536,
     )?;
+    assert_eq!(reader.read_path("/identity")?, b"application-tree\n");
+    Ok(())
+}
+
+#[test]
+fn reverse_export_authenticates_the_end_service_peer() -> Result<(), Box<dyn std::error::Error>> {
+    let broker_key = generate_key_pair()?;
+    let exporter_key = generate_key_pair()?;
+    let service_key = generate_key_pair()?;
+    let compute_key = generate_key_pair()?;
+    let intruder_key = generate_key_pair()?;
+    let broker = ReverseBroker::start(BrokerConfig {
+        reverse_bind: address(Ipv4Addr::LOCALHOST, 0),
+        proxy_bind: ProxyEndpoint::tcp(address(Ipv4Addr::LOCALHOST, 0)),
+        auth: ServerConfig::new(
+            "r9p-reverse-placement-test",
+            broker_key.private.clone(),
+            [(exporter_key.public, "profile-host".to_string())],
+        )?,
+        peer_principal: "profile-host".to_string(),
+        max_waiting_streams: 2,
+        authentication_timeout: Duration::from_secs(2),
+        proxy_wait_timeout: Duration::from_secs(2),
+    })?;
+    let export = ReverseExport::start_authenticated_handler(
+        ReverseExportConfig {
+            broker_endpoint: broker.reverse_endpoint(),
+            auth: ClientConfig::new(
+                "r9p-reverse-placement-test",
+                exporter_key.private,
+                broker_key.public,
+            )?,
+            principal: "profile-host".to_string(),
+            connection_pool: 2,
+            connect_timeout: Duration::from_secs(2),
+            authentication_timeout: Duration::from_secs(2),
+            reconnect_min_delay: Duration::from_millis(25),
+            reconnect_max_delay: Duration::from_millis(200),
+            server: R9pServerConfig {
+                default_msize: 65_536,
+                max_msize: 65_536,
+                max_fids: 64,
+                variant: Variant::R,
+                ..R9pServerConfig::default()
+            },
+        },
+        ServerConfig::new(
+            "agents-profile-service",
+            service_key.private,
+            [(compute_key.public, "/srv/agents/compute/m7".to_string())],
+        )?,
+        Duration::from_secs(2),
+        || Ok(IdentityHandler),
+    )?;
+    wait_generic_ready(&broker, &export)?;
+
+    let unauthorized = authenticate_client(
+        std::net::TcpStream::connect(tcp_proxy_endpoint(&broker)?)?,
+        &ClientConfig::new(
+            "agents-profile-service",
+            intruder_key.private,
+            service_key.public,
+        )?,
+        "/srv/agents/compute/m7",
+        Duration::from_secs(2),
+    );
+    assert!(unauthorized.is_err());
+    wait_for_waiting_stream(&broker)?;
+
+    let stream = authenticate_client(
+        std::net::TcpStream::connect(tcp_proxy_endpoint(&broker)?)?,
+        &ClientConfig::new(
+            "agents-profile-service",
+            compute_key.private,
+            service_key.public,
+        )?,
+        "/srv/agents/compute/m7",
+        Duration::from_secs(2),
+    )?;
+    let mut reader =
+        Client::connect_with_variant(stream, "/srv/agents/compute/m7", "/", 65_536, Variant::R)?;
     assert_eq!(reader.read_path("/identity")?, b"application-tree\n");
     Ok(())
 }

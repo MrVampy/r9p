@@ -47,6 +47,16 @@ instances; the broker remains unaware of either tree. The transport adapter
 also owns bounded TCP keepalive for application-idle pool streams, so hard peer
 loss becomes a stream failure and re-enters the existing reconnect lifecycle.
 
+Reverse placement authentication and end-service authentication are distinct.
+The first authenticates the exporter to the broker and protects the outbound
+placement stream. `SecureStream` remains a cloneable authentication transport,
+so `ReverseExport::start_authenticated` and
+`ReverseExport::start_authenticated_handler` can establish a second
+p9any/Noise session through that stream before 9P version negotiation. The
+second session proves the final service client and supplies the server's fixed
+attach identity. This closes the loopback proxy boundary without making the
+broker an application admission or protocol relay.
+
 The server core owns wire-level fid lifecycle. It records open modes and
 directory offsets, rejects operations that violate 9P sequencing, and reserves
 fid transitions across split request completion. Clone walks share a source

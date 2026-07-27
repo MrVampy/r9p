@@ -2,7 +2,11 @@ use crate::{
     config::validate_principal, p9any, ClientConfig, PublicKey, SecureStream, ServerConfig,
     CONFIG_FORMAT, NOISE_PATTERN,
 };
-use r9p::error::{Error, Result};
+use r9p::{
+    error::{Error, Result},
+    multiplex::MultiplexTransport,
+    server::ConnectionStream,
+};
 use snow::{params::NoiseParams, HandshakeState};
 use std::{
     io::{Read, Write},
@@ -14,14 +18,36 @@ const MAX_NOISE_MESSAGE_BYTES: usize = u16::MAX as usize;
 const MAX_PRINCIPAL_BYTES: usize = 255;
 const SERVER_ACK: &[u8] = b"r9p-session-authenticated.v1";
 
+mod sealed {
+    pub trait Sealed {}
+}
+
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuthenticationTimeouts {
+    read: Option<Duration>,
+    write: Option<Duration>,
+}
+
+pub trait AuthenticationTransport: ConnectionStream + MultiplexTransport + sealed::Sealed {
+    #[doc(hidden)]
+    fn configure_authentication_transport(&self) -> Result<()>;
+
+    #[doc(hidden)]
+    fn install_authentication_timeout(&self, timeout: Duration) -> Result<AuthenticationTimeouts>;
+
+    #[doc(hidden)]
+    fn restore_authentication_timeouts(&self, timeouts: AuthenticationTimeouts) -> Result<()>;
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PeerIdentity {
     principal: String,
     public_key: PublicKey,
 }
 
-pub struct AuthenticatedSession {
-    pub stream: SecureStream,
+pub struct AuthenticatedSession<S = TcpStream> {
+    pub stream: SecureStream<S>,
     pub peer: PeerIdentity,
     pub preauthorized: bool,
 }
@@ -45,15 +71,15 @@ impl PeerIdentity {
     }
 }
 
-pub fn authenticate_client(
-    mut stream: TcpStream,
+pub fn authenticate_client<S: AuthenticationTransport>(
+    mut stream: S,
     config: &ClientConfig,
     principal: &str,
     timeout: Duration,
-) -> Result<SecureStream> {
-    configure_transport_socket(&stream)?;
+) -> Result<SecureStream<S>> {
+    stream.configure_authentication_transport()?;
     validate_principal(principal)?;
-    let previous = install_handshake_timeout(&stream, timeout)?;
+    let previous = stream.install_authentication_timeout(timeout)?;
     p9any::negotiate_client(&mut stream, config.domain())?;
 
     let params = noise_params()?;
@@ -86,34 +112,34 @@ pub fn authenticate_client(
         ));
     }
     let transport = finish_handshake(handshake)?;
-    restore_timeouts(&stream, previous)?;
+    stream.restore_authentication_timeouts(previous)?;
     Ok(SecureStream::new(stream, transport))
 }
 
-pub fn authenticate_server(
-    stream: TcpStream,
+pub fn authenticate_server<S: AuthenticationTransport>(
+    stream: S,
     config: &ServerConfig,
     timeout: Duration,
-) -> Result<AuthenticatedSession> {
+) -> Result<AuthenticatedSession<S>> {
     authenticate_server_inner(stream, config, timeout, false)
 }
 
-pub fn authenticate_server_attested(
-    stream: TcpStream,
+pub fn authenticate_server_attested<S: AuthenticationTransport>(
+    stream: S,
     config: &ServerConfig,
     timeout: Duration,
-) -> Result<AuthenticatedSession> {
+) -> Result<AuthenticatedSession<S>> {
     authenticate_server_inner(stream, config, timeout, true)
 }
 
-fn authenticate_server_inner(
-    mut stream: TcpStream,
+fn authenticate_server_inner<S: AuthenticationTransport>(
+    mut stream: S,
     config: &ServerConfig,
     timeout: Duration,
     allow_attested: bool,
-) -> Result<AuthenticatedSession> {
-    configure_transport_socket(&stream)?;
-    let previous = install_handshake_timeout(&stream, timeout)?;
+) -> Result<AuthenticatedSession<S>> {
+    stream.configure_authentication_transport()?;
+    let previous = stream.install_authentication_timeout(timeout)?;
     p9any::negotiate_server(&mut stream, config.domain())?;
 
     let params = noise_params()?;
@@ -153,7 +179,7 @@ fn authenticate_server_inner(
         .map_err(noise_error("write server authentication message"))?;
     write_frame(&mut stream, &second[..second_len])?;
     let transport = finish_handshake(handshake)?;
-    restore_timeouts(&stream, previous)?;
+    stream.restore_authentication_timeouts(previous)?;
     Ok(AuthenticatedSession {
         stream: SecureStream::new(stream, transport),
         peer: PeerIdentity {
@@ -213,40 +239,59 @@ fn read_frame<S: Read>(stream: &mut S, label: &str) -> Result<Vec<u8>> {
     Ok(message)
 }
 
-type SocketTimeouts = (Option<Duration>, Option<Duration>);
+impl sealed::Sealed for TcpStream {}
 
-fn install_handshake_timeout(stream: &TcpStream, timeout: Duration) -> Result<SocketTimeouts> {
-    if timeout.is_zero() {
-        return Err(Error::from(
-            "authentication handshake timeout must be nonzero",
-        ));
+impl AuthenticationTransport for TcpStream {
+    fn configure_authentication_transport(&self) -> Result<()> {
+        self.set_nodelay(true)
+            .map_err(|error| Error::from(format!("set TCP_NODELAY: {error}")))
     }
-    let previous = (
-        stream
-            .read_timeout()
-            .map_err(|error| Error::from(format!("read TCP timeout: {error}")))?,
-        stream
-            .write_timeout()
-            .map_err(|error| Error::from(format!("read TCP timeout: {error}")))?,
-    );
-    stream
-        .set_read_timeout(Some(timeout))
-        .and_then(|()| stream.set_write_timeout(Some(timeout)))
-        .map_err(|error| Error::from(format!("set authentication handshake timeout: {error}")))?;
-    Ok(previous)
+
+    fn install_authentication_timeout(&self, timeout: Duration) -> Result<AuthenticationTimeouts> {
+        if timeout.is_zero() {
+            return Err(Error::from(
+                "authentication handshake timeout must be nonzero",
+            ));
+        }
+        let previous = AuthenticationTimeouts {
+            read: self
+                .read_timeout()
+                .map_err(|error| Error::from(format!("read TCP timeout: {error}")))?,
+            write: self
+                .write_timeout()
+                .map_err(|error| Error::from(format!("read TCP timeout: {error}")))?,
+        };
+        self.set_read_timeout(Some(timeout))
+            .and_then(|()| self.set_write_timeout(Some(timeout)))
+            .map_err(|error| {
+                Error::from(format!("set authentication handshake timeout: {error}"))
+            })?;
+        Ok(previous)
+    }
+
+    fn restore_authentication_timeouts(&self, timeouts: AuthenticationTimeouts) -> Result<()> {
+        self.set_read_timeout(timeouts.read)
+            .and_then(|()| self.set_write_timeout(timeouts.write))
+            .map_err(|error| Error::from(format!("restore TCP timeout: {error}")))
+    }
 }
 
-fn restore_timeouts(stream: &TcpStream, timeouts: SocketTimeouts) -> Result<()> {
-    stream
-        .set_read_timeout(timeouts.0)
-        .and_then(|()| stream.set_write_timeout(timeouts.1))
-        .map_err(|error| Error::from(format!("restore TCP timeout: {error}")))
-}
+impl<S: AuthenticationTransport> sealed::Sealed for SecureStream<S> {}
 
-fn configure_transport_socket(stream: &TcpStream) -> Result<()> {
-    stream
-        .set_nodelay(true)
-        .map_err(|error| Error::from(format!("set TCP_NODELAY: {error}")))
+impl<S: AuthenticationTransport> AuthenticationTransport for SecureStream<S> {
+    fn configure_authentication_transport(&self) -> Result<()> {
+        self.transport_stream().configure_authentication_transport()
+    }
+
+    fn install_authentication_timeout(&self, timeout: Duration) -> Result<AuthenticationTimeouts> {
+        self.transport_stream()
+            .install_authentication_timeout(timeout)
+    }
+
+    fn restore_authentication_timeouts(&self, timeouts: AuthenticationTimeouts) -> Result<()> {
+        self.transport_stream()
+            .restore_authentication_timeouts(timeouts)
+    }
 }
 
 fn noise_error(context: &'static str) -> impl FnOnce(snow::Error) -> Error {

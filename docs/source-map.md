@@ -36,6 +36,9 @@ This map defines the local sources agents should inspect before making source-sp
   - P9any provider negotiation, Noise IK authentication, authenticated record
     framing, Unix peer attestation, key material, and typed client/server
     session configuration.
+  - `SecureStream` is itself an authentication transport, allowing an
+    end-service session to be layered over an authenticated reverse-placement
+    stream without teaching the broker application identity.
   - It exposes a verified transport subject and may preauthorize a 9P username
     from a server bootstrap allowlist, but carries no backend admission or
     namespace policy.
@@ -47,6 +50,8 @@ This map defines the local sources agents should inspect before making source-sp
     namespace policy.
   - `ReverseExport` owns the generic outbound lifecycle and accepts a fresh
     `FileTree` or asynchronous `ConnectionHandler` factory per session.
+    Its authenticated variants establish an independent final service-client
+    boundary through the placement stream.
     `FilesystemExport` is the local-tree specialization used by the CLI.
 - `crates/core/src/multiplex/`
   - Layered blocking transport facade for concurrent tagged client calls.

@@ -8,7 +8,7 @@ mod stream;
 pub use config::{ClientConfig, ServerConfig};
 pub use handshake::{
     authenticate_client, authenticate_server, authenticate_server_attested, AuthenticatedSession,
-    PeerIdentity,
+    AuthenticationTimeouts, AuthenticationTransport, PeerIdentity,
 };
 pub use key::{
     generate_key_pair, provision_key_pair, write_key_pair, KeyPair, PrivateKey, PublicKey,

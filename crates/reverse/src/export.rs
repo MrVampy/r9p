@@ -17,7 +17,10 @@ use r9p::{
         serve_connection, serve_file_tree_connection, ConnectionHandler, FileTree, ServerConfig,
     },
 };
-use r9p_auth::{authenticate_client, ClientConfig, SecureStream};
+use r9p_auth::{
+    authenticate_client, authenticate_server, ClientConfig, SecureStream,
+    ServerConfig as SessionAuthConfig,
+};
 
 use crate::configure_transport_socket;
 
@@ -139,6 +142,42 @@ impl ReverseExport {
         Self::start_server(config, move |stream, server| {
             let handler = Arc::new(handler_factory()?);
             serve_connection(stream, server, handler)
+        })
+    }
+
+    pub fn start_authenticated<T, F>(
+        config: ReverseExportConfig,
+        session_auth: SessionAuthConfig,
+        authentication_timeout: Duration,
+        tree_factory: F,
+    ) -> Result<Self>
+    where
+        T: FileTree + Send + 'static,
+        F: Fn() -> Result<T> + Send + Sync + 'static,
+    {
+        Self::start_server(config, move |stream, mut server| {
+            let session = authenticate_server(stream, &session_auth, authentication_timeout)?;
+            server.session_uname = Some(session.peer.principal().as_bytes().to_vec());
+            let tree = tree_factory()?;
+            serve_file_tree_connection(session.stream, server, tree)
+        })
+    }
+
+    pub fn start_authenticated_handler<H, F>(
+        config: ReverseExportConfig,
+        session_auth: SessionAuthConfig,
+        authentication_timeout: Duration,
+        handler_factory: F,
+    ) -> Result<Self>
+    where
+        H: ConnectionHandler,
+        F: Fn() -> Result<H> + Send + Sync + 'static,
+    {
+        Self::start_server(config, move |stream, mut server| {
+            let session = authenticate_server(stream, &session_auth, authentication_timeout)?;
+            server.session_uname = Some(session.peer.principal().as_bytes().to_vec());
+            let handler = Arc::new(handler_factory()?);
+            serve_connection(session.stream, server, handler)
         })
     }
 

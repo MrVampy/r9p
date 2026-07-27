@@ -228,6 +228,13 @@ broker discards peers whose TCP close is already observable. Status snapshots
 report pool, handshake, bridge, rejection, and failure counters to embedding
 applications.
 
+Applications that need an end-service identity boundary over the placement
+link use `ReverseExport::start_authenticated` or
+`ReverseExport::start_authenticated_handler`. The broker-to-exporter
+authentication then proves the placement peer, while a second p9any/Noise
+session carried transparently through that stream proves the final service
+client. The broker still does not parse 9P or learn application policy.
+
 Reverse transport sockets use bounded TCP keepalive in addition to disabling
 Nagle. This makes an application-idle pool detect a hard peer outage and enter
 the existing reconnect loop instead of retaining apparently established

@@ -212,7 +212,7 @@ fn proxy_session(
         let _ = local.shutdown();
         return;
     }
-    let session = match authenticate_client(
+    let stream = match authenticate_client(
         upstream,
         &config.auth,
         &config.principal,
@@ -227,7 +227,7 @@ fn proxy_session(
             return;
         }
     };
-    let _ = bridge(local, session.stream);
+    let _ = bridge(local, stream);
     counters.completed_sessions.fetch_add(1, Ordering::AcqRel);
 }
 

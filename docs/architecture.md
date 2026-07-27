@@ -66,6 +66,12 @@ Backends still own namespace meaning, permissions, content, and application
 effects. A `FileTree` reset clears backend session-local state when `Tversion`
 starts a new session.
 
+Dynamic ordinary files can use `FidReadSnapshots` for bounded, coherent byte
+reads across multiple `Tread` ranges on one opened fid. The backend still
+chooses which files have snapshot semantics; waits, streams, and other live
+files remain live. The shared helper owns byte accounting, range slicing, and
+fid retirement without importing path or application policy into the core.
+
 The core owns `Twstat` fields whose mutability is fixed by 9P2000. Immutable
 fields and file-type changes are rejected before backend dispatch. The backend
 then validates its complete mutable-field policy before changing storage and

@@ -2,6 +2,7 @@ mod config;
 mod connection;
 mod file_tree_handler;
 mod handlers;
+mod read_snapshot;
 mod session;
 mod stream;
 mod types;
@@ -11,6 +12,7 @@ pub use config::ServerConfig;
 pub use connection::{serve_connection, ConnectionHandler, ConnectionStream};
 pub use file_tree_handler::serve_file_tree_connection;
 pub use handlers::perform_file_tree_request;
+pub use read_snapshot::FidReadSnapshots;
 pub use session::Session;
 pub use stream::{Broadcaster, Stream};
 pub use types::{

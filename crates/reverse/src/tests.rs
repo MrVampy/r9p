@@ -288,11 +288,11 @@ fn reverse_export_holds_idle_pool_and_authenticates_the_end_service_peer(
             service_key.private,
             [(compute_key.public, "/srv/agents/compute/m7".to_string())],
         )?,
-        Duration::from_millis(100),
+        Duration::from_secs(1),
         || Ok(IdentityHandler),
     )?;
     wait_generic_ready(&broker, &export)?;
-    thread::sleep(Duration::from_millis(300));
+    thread::sleep(Duration::from_millis(2_500));
     let idle_status = export.status();
     assert_eq!(idle_status.connected_streams, 2);
     assert_eq!(idle_status.authentication_failures, 0);

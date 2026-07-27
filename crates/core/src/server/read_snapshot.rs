@@ -91,8 +91,8 @@ mod tests {
         let mut snapshots = FidReadSnapshots::new(64);
         snapshots.capture(7, b"first version".to_vec())?;
 
-        assert_eq!(snapshots.read(7, 0, 6)?, b"first");
-        assert_eq!(snapshots.read(7, 6, 64)?, b" version");
+        assert_eq!(snapshots.read(7, 0, 5)?, b"first");
+        assert_eq!(snapshots.read(7, 5, 64)?, b" version");
         assert_eq!(snapshots.read(7, 13, 1)?, b"");
         assert_eq!(snapshots.read(7, 0, 64)?, b"first version");
         assert_eq!(snapshots.len(), 1);

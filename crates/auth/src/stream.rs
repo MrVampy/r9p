@@ -62,25 +62,6 @@ impl<S: MultiplexTransport> SecureStream<S> {
 }
 
 impl SecureStream<TcpStream> {
-    pub fn wait_readable(&self, timeout: Duration) -> io::Result<bool> {
-        if timeout.is_zero() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "stream-readability observation timeout must be nonzero",
-            ));
-        }
-        {
-            let state = lock(&self.read_state, "encrypted 9P read state")?;
-            if state.offset < state.plaintext.len() {
-                return Ok(true);
-            }
-        }
-        Ok(!matches!(
-            self.observe_transport_readiness(timeout)?,
-            TransportReadiness::Idle
-        ))
-    }
-
     pub fn peer_closed(&self, timeout: Duration) -> io::Result<bool> {
         if timeout.is_zero() {
             return Err(io::Error::new(
@@ -88,26 +69,19 @@ impl SecureStream<TcpStream> {
                 "peer-close observation timeout must be nonzero",
             ));
         }
-        Ok(matches!(
-            self.observe_transport_readiness(timeout)?,
-            TransportReadiness::Closed
-        ))
-    }
-
-    fn observe_transport_readiness(&self, timeout: Duration) -> io::Result<TransportReadiness> {
         let previous = self.transport_stream.read_timeout()?;
         self.transport_stream.set_read_timeout(Some(timeout))?;
         let mut byte = [0_u8; 1];
         let observed = match self.transport_stream.peek(&mut byte) {
-            Ok(0) => Ok(TransportReadiness::Closed),
-            Ok(_) => Ok(TransportReadiness::Data),
+            Ok(0) => Ok(true),
+            Ok(_) => Ok(false),
             Err(error)
                 if matches!(
                     error.kind(),
                     io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                 ) =>
             {
-                Ok(TransportReadiness::Idle)
+                Ok(false)
             }
             Err(error) => Err(error),
         };
@@ -117,13 +91,6 @@ impl SecureStream<TcpStream> {
             (Err(error), _) | (_, Err(error)) => Err(error),
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TransportReadiness {
-    Idle,
-    Data,
-    Closed,
 }
 
 impl<S: MultiplexTransport> SecureStream<S> {

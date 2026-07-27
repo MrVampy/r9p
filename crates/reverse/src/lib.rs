@@ -6,11 +6,13 @@
 //! 9P messages or acquire filesystem authority.
 
 mod broker;
+mod claim;
 mod export;
 mod session_proxy;
 
 use std::{io, net::TcpStream, time::Duration};
 
+use claim::{receive_session_claim, send_session_claim};
 use socket2::{SockRef, TcpKeepalive};
 
 pub use broker::{BrokerConfig, BrokerStatus, ProxyEndpoint, ReverseBroker};

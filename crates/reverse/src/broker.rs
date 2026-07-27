@@ -17,7 +17,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use r9p::error::{Error, Result};
 use r9p_auth::{authenticate_server, SecureStream, ServerConfig};
 
-use crate::configure_transport_socket;
+use crate::{configure_transport_socket, send_session_claim};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProxyEndpoint {
@@ -447,7 +447,8 @@ impl Drop for CounterSlot {
     }
 }
 
-pub(crate) fn bridge(local: LocalStream, remote: SecureStream) -> io::Result<()> {
+pub(crate) fn bridge(local: LocalStream, mut remote: SecureStream) -> io::Result<()> {
+    send_session_claim(&mut remote)?;
     let mut local_reader = local.try_clone()?;
     let mut local_writer = local;
     let mut remote_reader = remote.try_clone()?;

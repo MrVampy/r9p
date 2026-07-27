@@ -8,6 +8,7 @@ use std::{
 use r9p_auth::{ClientConfig, ServerConfig};
 use r9p_reverse::{
     BrokerConfig, FilesystemExport, FilesystemExportConfig, ProxyEndpoint, ReverseBroker,
+    SessionProxy, SessionProxyConfig,
 };
 
 use crate::{
@@ -60,6 +61,23 @@ pub(crate) fn reverse_export_cmd(global: Config, args: Vec<String>) -> CliResult
     park_forever();
 }
 
+pub(crate) fn session_proxy_cmd(global: Config, args: Vec<String>) -> CliResult<()> {
+    let config = parse_session_proxy_config(global, args)?;
+    let proxy = SessionProxy::start(SessionProxyConfig {
+        bind: config.bind,
+        upstream: config.upstream,
+        auth: ClientConfig::read(&config.auth_config)?,
+        principal: config.principal.clone(),
+        max_sessions: config.max_sessions,
+        connect_timeout: config.connect_timeout,
+        authentication_timeout: config.auth_timeout,
+    })?;
+    println!("proxy_endpoint\t{}", proxy.endpoint());
+    println!("upstream_endpoint\t{}", config.upstream);
+    println!("principal\t{}", config.principal);
+    park_forever();
+}
+
 #[derive(Debug, Eq, PartialEq)]
 struct ReverseBrokerCliConfig {
     reverse_bind: SocketAddr,
@@ -85,6 +103,17 @@ struct ReverseExportCliConfig {
     reconnect_max_delay: Duration,
     msize: u32,
     max_fids: usize,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct SessionProxyCliConfig {
+    bind: ProxyEndpoint,
+    upstream: SocketAddr,
+    auth_config: PathBuf,
+    principal: String,
+    max_sessions: usize,
+    connect_timeout: Duration,
+    auth_timeout: Duration,
 }
 
 fn parse_broker_config(global: Config, args: Vec<String>) -> CliResult<ReverseBrokerCliConfig> {
@@ -221,6 +250,69 @@ fn parse_export_config(global: Config, args: Vec<String>) -> CliResult<ReverseEx
     })
 }
 
+fn parse_session_proxy_config(
+    global: Config,
+    args: Vec<String>,
+) -> CliResult<SessionProxyCliConfig> {
+    reject_client_globals(&global, "session-proxy")?;
+    let mut bind = Some(ProxyEndpoint::tcp(loopback_ephemeral()));
+    let mut upstream = None;
+    let mut auth_config = global.auth_config;
+    let mut principal = None;
+    let mut max_sessions = DEFAULT_POOL;
+    let mut connect_timeout = DEFAULT_CONNECT_TIMEOUT;
+    let mut auth_timeout = DEFAULT_AUTH_TIMEOUT;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--bind" => {
+                bind = Some(parse_proxy_endpoint(value(&args, &mut index, "bind")?)?);
+            }
+            "--connect" => {
+                upstream = Some(parse_socket(value(&args, &mut index, "upstream")?)?);
+            }
+            "--auth-config" => {
+                set_auth_config(&mut auth_config, value(&args, &mut index, "auth config")?)?;
+            }
+            "--principal" => {
+                set_once(
+                    &mut principal,
+                    value(&args, &mut index, "principal")?,
+                    "principal",
+                )?;
+            }
+            "--max-sessions" => {
+                max_sessions = parse_positive(
+                    value(&args, &mut index, "maximum sessions")?,
+                    "maximum sessions",
+                )?
+            }
+            "--connect-timeout" => {
+                connect_timeout = parse_duration(value(
+                    &args,
+                    &mut index,
+                    "connect timeout",
+                )?)?
+            }
+            "--auth-timeout" => {
+                auth_timeout = parse_duration(value(&args, &mut index, "auth timeout")?)?
+            }
+            "-h" | "--help" => reverse_usage(0),
+            option => return Err(cli_error(format!("unknown session-proxy option {option}"))),
+        }
+        index += 1;
+    }
+    Ok(SessionProxyCliConfig {
+        bind: bind.ok_or_else(|| cli_error("missing --bind"))?,
+        upstream: upstream.ok_or_else(|| cli_error("missing --connect"))?,
+        auth_config: auth_config.ok_or_else(|| cli_error("missing --auth-config"))?,
+        principal: principal.ok_or_else(|| cli_error("missing --principal"))?,
+        max_sessions,
+        connect_timeout,
+        auth_timeout,
+    })
+}
+
 fn reject_client_globals(global: &Config, command: &str) -> CliResult<()> {
     if global.address.is_some() || !global.aname.is_empty() || global.machine {
         return Err(cli_error(format!(
@@ -316,6 +408,9 @@ fn reverse_usage(code: i32) -> ! {
     );
     eprintln!(
         "       r9p reverse-export --connect address --principal name --auth-config path [--pool count] [--reconnect-min-delay seconds] [--reconnect-max-delay seconds] [--writable] root"
+    );
+    eprintln!(
+        "       r9p session-proxy --bind loopback-address|unix!/path --connect address --principal name --auth-config path [--max-sessions count]"
     );
     std::process::exit(code);
 }
@@ -415,6 +510,38 @@ mod tests {
         );
         assert!(parsed.writable);
         assert_eq!(parsed.root, PathBuf::from("/home/test/workspace"));
+    }
+
+    #[test]
+    fn parses_session_proxy() {
+        let parsed = parse_session_proxy_config(
+            global(),
+            [
+                "--bind",
+                "127.0.0.6:9671",
+                "--connect",
+                "127.0.0.1:9641",
+                "--principal",
+                "/srv/agents/compute/m7",
+                "--auth-config",
+                "/run/auth/client.conf",
+                "--max-sessions",
+                "4",
+            ]
+            .map(str::to_string)
+            .to_vec(),
+        )
+        .expect("session proxy config");
+        assert_eq!(
+            parsed.bind,
+            ProxyEndpoint::tcp(SocketAddr::from(([127, 0, 0, 6], 9671)))
+        );
+        assert_eq!(
+            parsed.upstream,
+            SocketAddr::from(([127, 0, 0, 1], 9641))
+        );
+        assert_eq!(parsed.principal, "/srv/agents/compute/m7");
+        assert_eq!(parsed.max_sessions, 4);
     }
 
     #[test]

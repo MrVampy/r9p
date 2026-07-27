@@ -118,6 +118,7 @@ r9p serve [--bind address] [--max-fids count] [--writable] root
 r9p export [--bind address] [--max-fids count] [--writable] [--descriptor machine] [--descriptor-file path] [--auth-config path] [--descriptor-field key=value] root
 r9p reverse-broker --reverse-bind address [--proxy-bind loopback-address] --principal name --auth-config path [--pool count]
 r9p reverse-export --connect address --principal name --auth-config path [--pool count] [--reconnect-min-delay seconds] [--reconnect-max-delay seconds] [--writable] root
+r9p session-proxy --bind loopback-address|unix!/path --connect address --principal name --auth-config path [--max-sessions count]
 r9p auth-keygen --private path --public path
 ```
 
@@ -246,6 +247,13 @@ naming, leases, capability admission, and direct-versus-relay choice remain the
 responsibility of the governing namespace. The loopback proxy restriction is
 intentional: exposing another network listener without its own end-to-end
 admission boundary would turn a placement mechanism into an ambient proxy.
+
+`session-proxy` is the forward counterpart for a host-local consumer that must
+use an authenticated remote session without receiving the transport private
+key. It accepts only a loopback TCP or local Unix endpoint. Each bounded local
+connection receives a fresh authenticated upstream session under the one fixed
+principal selected by host configuration. It does not resolve service names,
+select namespace paths, inspect 9P, or provide remote access.
 
 ### Transparent namespace referrals
 

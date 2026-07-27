@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::{Read, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
     sync::atomic::AtomicBool,
@@ -18,11 +19,13 @@ use r9p::{
     },
     stat::Stat,
 };
-use r9p_auth::{authenticate_client, generate_key_pair, ClientConfig, ServerConfig};
+use r9p_auth::{
+    authenticate_client, authenticate_server, generate_key_pair, ClientConfig, ServerConfig,
+};
 
 use super::{
     BrokerConfig, FilesystemExport, FilesystemExportConfig, ProxyEndpoint, ReverseBroker,
-    ReverseExport, ReverseExportConfig,
+    ReverseExport, ReverseExportConfig, SessionProxy, SessionProxyConfig,
 };
 
 #[test]
@@ -61,6 +64,59 @@ fn reverse_transport_socket_disables_nagle() -> Result<(), Box<dyn std::error::E
             super::KEEPALIVE_RETRIES
         );
     }
+    Ok(())
+}
+
+#[test]
+fn session_proxy_terminates_client_auth_behind_a_local_endpoint(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let service_key = generate_key_pair()?;
+    let compute_key = generate_key_pair()?;
+    let upstream = std::net::TcpListener::bind(address(Ipv4Addr::LOCALHOST, 0))?;
+    let upstream_endpoint = upstream.local_addr()?;
+    let service_auth = ServerConfig::new(
+        "r9p-session-proxy-test",
+        service_key.private,
+        [(
+            compute_key.public,
+            "/srv/agents/compute/m7".to_string(),
+        )],
+    )?;
+    let server = thread::spawn(move || -> Result<(), r9p::Error> {
+        let (stream, _) = upstream.accept()?;
+        let session = authenticate_server(stream, &service_auth, Duration::from_secs(2))?;
+        assert_eq!(session.peer.principal(), "/srv/agents/compute/m7");
+        let mut stream = session.stream;
+        let mut request = [0_u8; 4];
+        stream.read_exact(&mut request)?;
+        assert_eq!(&request, b"ping");
+        stream.write_all(b"pong")?;
+        stream.shutdown()?;
+        Ok(())
+    });
+    let proxy = SessionProxy::start(SessionProxyConfig {
+        bind: ProxyEndpoint::tcp(address(Ipv4Addr::LOCALHOST, 0)),
+        upstream: upstream_endpoint,
+        auth: ClientConfig::new(
+            "r9p-session-proxy-test",
+            compute_key.private,
+            service_key.public,
+        )?,
+        principal: "/srv/agents/compute/m7".to_string(),
+        max_sessions: 2,
+        connect_timeout: Duration::from_secs(2),
+        authentication_timeout: Duration::from_secs(2),
+    })?;
+    let endpoint = proxy
+        .endpoint()
+        .as_tcp()
+        .ok_or("session proxy did not expose TCP")?;
+    let mut local = std::net::TcpStream::connect(endpoint)?;
+    local.write_all(b"ping")?;
+    let mut response = [0_u8; 4];
+    local.read_exact(&mut response)?;
+    assert_eq!(&response, b"pong");
+    server.join().map_err(|_| "session proxy server panicked")??;
     Ok(())
 }
 

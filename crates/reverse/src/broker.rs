@@ -447,7 +447,7 @@ impl Drop for CounterSlot {
     }
 }
 
-fn bridge(local: LocalStream, remote: SecureStream) -> io::Result<()> {
+pub(crate) fn bridge(local: LocalStream, remote: SecureStream) -> io::Result<()> {
     let mut local_reader = local.try_clone()?;
     let mut local_writer = local;
     let mut remote_reader = remote.try_clone()?;
@@ -474,7 +474,7 @@ fn io_error(context: &str, error: io::Error) -> Error {
     Error::from(format!("{context}: {error}"))
 }
 
-enum ProxyListener {
+pub(crate) enum ProxyListener {
     Tcp(TcpListener),
     #[cfg(unix)]
     Unix {
@@ -484,7 +484,7 @@ enum ProxyListener {
 }
 
 impl ProxyListener {
-    fn bind(endpoint: &ProxyEndpoint) -> Result<Self> {
+    pub(crate) fn bind(endpoint: &ProxyEndpoint) -> Result<Self> {
         match endpoint {
             ProxyEndpoint::Tcp(address) => TcpListener::bind(address)
                 .map(Self::Tcp)
@@ -508,7 +508,7 @@ impl ProxyListener {
         Err(Error::from("Unix proxy endpoints are not supported"))
     }
 
-    fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+    pub(crate) fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
         match self {
             Self::Tcp(listener) => listener.set_nonblocking(nonblocking),
             #[cfg(unix)]
@@ -516,7 +516,7 @@ impl ProxyListener {
         }
     }
 
-    fn local_endpoint(&self) -> Result<ProxyEndpoint> {
+    pub(crate) fn local_endpoint(&self) -> Result<ProxyEndpoint> {
         match self {
             Self::Tcp(listener) => listener
                 .local_addr()
@@ -527,7 +527,7 @@ impl ProxyListener {
         }
     }
 
-    fn accept(&self) -> io::Result<LocalStream> {
+    pub(crate) fn accept(&self) -> io::Result<LocalStream> {
         match self {
             Self::Tcp(listener) => listener
                 .accept()
@@ -539,7 +539,7 @@ impl ProxyListener {
         }
     }
 
-    fn wake(endpoint: &ProxyEndpoint) -> io::Result<()> {
+    pub(crate) fn wake(endpoint: &ProxyEndpoint) -> io::Result<()> {
         match endpoint {
             ProxyEndpoint::Tcp(address) => TcpStream::connect(address).map(|_| ()),
             #[cfg(unix)]
@@ -553,14 +553,14 @@ impl ProxyListener {
     }
 }
 
-enum LocalStream {
+pub(crate) enum LocalStream {
     Tcp(TcpStream),
     #[cfg(unix)]
     Unix(UnixStream),
 }
 
 impl LocalStream {
-    fn configure(&self) -> io::Result<()> {
+    pub(crate) fn configure(&self) -> io::Result<()> {
         match self {
             Self::Tcp(stream) => configure_transport_socket(stream),
             #[cfg(unix)]
@@ -576,7 +576,7 @@ impl LocalStream {
         }
     }
 
-    fn shutdown(&self) -> io::Result<()> {
+    pub(crate) fn shutdown(&self) -> io::Result<()> {
         match self {
             Self::Tcp(stream) => stream.shutdown(Shutdown::Both),
             #[cfg(unix)]

@@ -18,7 +18,7 @@ use commands::{
         create_write_from_cmd, read_cmd, read_to_cmd, rpc_cmd, write_at_cmd, write_cmd,
         write_from_cmd, write_from_trunc_cmd, ReadMode, WriteMode,
     },
-    reverse::{reverse_broker_cmd, reverse_export_cmd},
+    reverse::{reverse_broker_cmd, reverse_export_cmd, session_proxy_cmd},
     script::machine_script_cmd,
     serve::{export_cmd, serve_cmd},
     session::session_cmd,
@@ -73,6 +73,7 @@ fn run() -> CliResult<()> {
         "export" => export_cmd(config, args),
         "reverse-broker" => reverse_broker_cmd(config, args),
         "reverse-export" => reverse_export_cmd(config, args),
+        "session-proxy" => session_proxy_cmd(config, args),
         "stat" => stat_cmd(config, args),
         "rdwr" => rdwr_cmd(config, args),
         "rpc" => rpc_cmd(config, args),
@@ -278,6 +279,9 @@ pub(crate) fn usage() -> ! {
     );
     eprintln!(
         "  reverse-export --connect address --principal name --auth-config path [--pool count] [--reconnect-min-delay seconds] [--reconnect-max-delay seconds] [--writable] root"
+    );
+    eprintln!(
+        "  session-proxy --bind loopback-address|unix!/path --connect address --principal name --auth-config path [--max-sessions count]"
     );
     eprintln!("  create name...");
     eprintln!("  mkdir name...");

@@ -7,6 +7,7 @@
 
 mod broker;
 mod export;
+mod session_proxy;
 
 use std::{io, net::TcpStream, time::Duration};
 
@@ -17,6 +18,7 @@ pub use export::{
     FilesystemExport, FilesystemExportConfig, ReverseExport, ReverseExportConfig,
     ReverseExportStatus,
 };
+pub use session_proxy::{SessionProxy, SessionProxyConfig, SessionProxyStatus};
 
 const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
 #[cfg(target_os = "linux")]

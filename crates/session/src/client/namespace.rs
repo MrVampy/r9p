@@ -827,10 +827,7 @@ fn same_route_identity(left: &NamespaceReferral, right: &NamespaceReferral) -> b
 }
 
 fn route_transport_failed(error: &Error) -> bool {
-    matches!(
-        error.errno,
-        libc::ENOTCONN | libc::ECONNABORTED | libc::ECONNRESET | libc::EPIPE
-    )
+    error.is_definitive_transport_failure()
 }
 
 fn walk_remote(target: &RoutedTarget) -> Result<Fid> {

@@ -24,6 +24,22 @@ impl Error {
     pub fn message(&self) -> &str {
         &self.message
     }
+
+    /// Returns true only when the current transport can no longer carry
+    /// requests.
+    ///
+    /// Timeouts and temporary backpressure are intentionally excluded. They
+    /// may be operation failures without proving that the attachment is dead.
+    pub fn is_definitive_transport_failure(&self) -> bool {
+        matches!(
+            self.errno,
+            libc::EPIPE | libc::ECONNRESET | libc::ECONNABORTED | libc::ENOTCONN | libc::ESHUTDOWN
+        ) || (self.errno == libc::EIO
+            && (self.message.contains("9P frame")
+                || self.message.contains("9P reader stopped")
+                || self.message.contains("9P transport closed")
+                || self.message.contains("clone 9P stream")))
+    }
 }
 
 impl fmt::Display for Error {
@@ -256,5 +272,17 @@ mod tests {
         ));
         assert_eq!(error.errno, libc::ECONNREFUSED);
         assert!(error.message().contains("Connection refused"));
+    }
+
+    #[test]
+    fn definitive_transport_failure_excludes_timeouts() {
+        assert!(
+            client_error(P9Error::from("9P transport closed before response"))
+                .is_definitive_transport_failure()
+        );
+        assert!(
+            !client_error(P9Error::from("9P response timeout after 1 seconds"))
+                .is_definitive_transport_failure()
+        );
     }
 }

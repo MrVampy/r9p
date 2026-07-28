@@ -413,6 +413,60 @@ mod tests {
     }
 
     #[test]
+    fn peer_eof_closes_the_full_transport() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .map_err(|error| io_error("bind test listener", error))?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| io_error("read listener address", error))?;
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener
+                .accept()
+                .map_err(|error| io_error("accept test connection", error))?;
+            handshake(&mut stream)?;
+            match read_tmessage(&mut stream)? {
+                TMessage::Read { .. } => {}
+                other => {
+                    return Err(Error::from(format!(
+                        "expected pending Tread, got {other:?}"
+                    )))
+                }
+            }
+            stream
+                .shutdown(Shutdown::Write)
+                .map_err(|error| io_error("close server write half", error))?;
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .map_err(|error| io_error("set server read timeout", error))?;
+            let mut byte = [0_u8; 1];
+            match stream.read(&mut byte) {
+                Ok(0) => Ok(()),
+                Ok(_) => Err(Error::from(
+                    "client wrote after the peer closed its write half",
+                )),
+                Err(error) => Err(io_error(
+                    "client reader failure did not close the writer half",
+                    error,
+                )),
+            }
+        });
+        let client = MultiplexedClient::connect(
+            TcpStream::connect(address).map_err(|error| io_error("connect test client", error))?,
+            "glenda",
+            "",
+            8192,
+        )?;
+        let pending = client.submit(|protocol| protocol.read(client.root_fid(), 0, 100))?;
+        let error = pending.wait().expect_err("pending call survived peer EOF");
+        assert!(String::from_utf8_lossy(error.message()).contains("transport closed"));
+
+        server
+            .join()
+            .map_err(|_| Error::from("peer EOF shutdown server panicked"))??;
+        Ok(())
+    }
+
+    #[test]
     fn flush_releases_original_waiter() -> Result<()> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .map_err(|error| io_error("bind test listener", error))?;

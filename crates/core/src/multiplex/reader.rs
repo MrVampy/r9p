@@ -54,14 +54,14 @@ pub(super) fn reader_loop<S: super::MultiplexTransport>(
             Ok(protocol) => protocol.msize(),
             Err(error) => {
                 fail_all(&responses, error);
-                return;
+                break;
             }
         };
         let response = match read_response(&mut reader, max_frame_size) {
             Ok(response) => response,
             Err(error) => {
                 fail_all(&responses, error);
-                return;
+                break;
             }
         };
         let response = match lock(&protocol, "lock 9P protocol client")
@@ -71,7 +71,7 @@ pub(super) fn reader_loop<S: super::MultiplexTransport>(
             Err(error) if error.message() == b"9P client state: unknown response tag" => continue,
             Err(error) => {
                 fail_all(&responses, error);
-                return;
+                break;
             }
         };
         let tag = response_tag(&response);
@@ -79,13 +79,14 @@ pub(super) fn reader_loop<S: super::MultiplexTransport>(
             Ok(mut responses) => responses.remove(tag),
             Err(error) => {
                 fail_all(&responses, error);
-                return;
+                break;
             }
         };
         if let Some(sender) = sender {
             let _ = sender.send(Ok(response));
         }
     }
+    let _ = reader.shutdown_transport();
 }
 
 pub(super) fn call_op_sync<S: Read + Write>(

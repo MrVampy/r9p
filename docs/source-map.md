@@ -74,6 +74,11 @@ This map defines the local sources agents should inspect before making source-sp
     session authentication configuration paths.
 - `crates/session/src/opened_fid.rs`
   - Retained-fid operations over the same transparent namespace client.
+- `crates/session/src/resumable_fid.rs`
+  - Opt-in reattach and rewalk for a file whose read and write offsets are
+    application-level replay cursors.
+  - It retries only after definitive transport failure and does not make
+    ordinary file writes idempotent.
 - `crates/core/src/stat.rs`
   - 9P stat record shape and mode helpers.
 - `crates/core/tests/memory_tree.rs`
@@ -85,6 +90,8 @@ This map defines the local sources agents should inspect before making source-sp
   - The `r9p` binary and one-shot client command dispatch.
   - `r9p con` retains two fids on one multiplexed 9P connection so stdin and
     stdout remain one logical application session.
+  - `r9p con --resume` uses the same two lanes across renewed attachments only
+    for an explicitly replay-safe offset stream.
   - Ordinary path commands use the transparent namespace client;
     `--authority-auth` supplies caller-local authority bindings.
 - `crates/cli/tests/cli_machine.rs`

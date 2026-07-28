@@ -9,6 +9,7 @@ mod error;
 pub mod feed;
 mod opened_fid;
 mod request;
+mod resumable_fid;
 mod transport;
 
 pub use authority::AuthorityBindings;
@@ -24,6 +25,7 @@ pub use error::{errno_for_9p_error, p9_error, Error, Result, WriteThenReadError}
 pub use opened_fid::OpenedFid;
 pub use r9p::{ORDWR, OREAD, OTRUNC, OWRITE};
 pub use request::{with_fuse_unique, RequestTracker};
+pub use resumable_fid::ResumableFid;
 
 /// Parses a canonical namespace path into 9P path elements.
 ///

@@ -285,7 +285,7 @@ pub(crate) fn usage() -> ! {
     );
     eprintln!("  create name...");
     eprintln!("  mkdir name...");
-    eprintln!("  con [-r] name");
+    eprintln!("  con [--resume] [-r] name");
     eprintln!("without -a/--bind, name elem/path means /path on server unix!$NAMESPACE/elem");
     std::process::exit(2);
 }

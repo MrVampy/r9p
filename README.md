@@ -116,7 +116,7 @@ r9p mount [--source namespace-path] [--uname uname] [--aname aname] [--attr-time
 r9p mount ensure|status|stop --mountpoint path [--unit name --unit-scope user|system] [--status-file path] [--expect-endpoint endpoint] [--expect-change-feed path] [--expect-status-file path] [--attempts count] [-- mount args...]
 r9p serve [--bind address] [--max-fids count] [--writable] root
 r9p export [--bind address] [--max-fids count] [--writable] [--descriptor machine] [--descriptor-file path] [--auth-config path] [--descriptor-field key=value] root
-r9p reverse-broker --reverse-bind address [--proxy-bind loopback-address] --principal name --auth-config path [--pool count]
+r9p reverse-broker --reverse-bind address [--proxy-bind address] [--proxy-exposure local|authenticated-network] --principal name --auth-config path [--pool count]
 r9p reverse-export --connect address --principal name --auth-config path [--pool count] [--reconnect-min-delay seconds] [--reconnect-max-delay seconds] [--writable] root
 r9p session-proxy --bind loopback-address|unix!/path --connect address --principal name --auth-config path [--max-sessions count]
 r9p auth-keygen --private path --public path
@@ -218,9 +218,9 @@ namespace principals remains application policy.
 `reverse-export` changes connection placement, not the 9P protocol or the
 exported tree. The filesystem-owning host authenticates outward to a
 `reverse-broker` and serves an ordinary 9P session on every connected stream.
-The broker exposes a loopback-only proxy endpoint and copies bytes between one
-local client and one authenticated reverse stream. It does not parse 9P,
-resolve service names, admit capabilities, or own the exported files.
+The broker exposes a local proxy endpoint by default and copies bytes between
+one client and one authenticated reverse stream. It does not parse 9P, resolve
+service names, admit capabilities, or own the exported files.
 
 The pool and all listener work are bounded. Failed exporter connections use a
 capped exponential retry delay with deterministic worker phasing; successful
@@ -244,9 +244,13 @@ streams for the host kernel's long default timeout.
 This is a runtime adapter, not a registration system. A service may publish the
 broker's ordinary endpoint using its existing registry lifecycle, but service
 naming, leases, capability admission, and direct-versus-relay choice remain the
-responsibility of the governing namespace. The loopback proxy restriction is
-intentional: exposing another network listener without its own end-to-end
-admission boundary would turn a placement mechanism into an ambient proxy.
+responsibility of the governing namespace. Local proxy exposure remains the
+default. `--proxy-exposure authenticated-network` accepts only a concrete
+non-loopback TCP endpoint and is valid only when the reverse exporter uses
+`ReverseExport::start_authenticated` or
+`ReverseExport::start_authenticated_handler`, so the final service
+authenticates every client through the placement stream. Without that
+end-to-end boundary, network exposure would create an ambient proxy.
 
 `session-proxy` is the forward counterpart for a host-local consumer that must
 use an authenticated remote session without receiving the transport private

@@ -7,8 +7,8 @@ use std::{
 
 use r9p_auth::{ClientConfig, ServerConfig};
 use r9p_reverse::{
-    BrokerConfig, FilesystemExport, FilesystemExportConfig, ProxyEndpoint, ReverseBroker,
-    SessionProxy, SessionProxyConfig,
+    BrokerConfig, FilesystemExport, FilesystemExportConfig, ProxyEndpoint, ProxyExposure,
+    ReverseBroker, SessionProxy, SessionProxyConfig,
 };
 
 use crate::{
@@ -29,6 +29,7 @@ pub(crate) fn reverse_broker_cmd(global: Config, args: Vec<String>) -> CliResult
     let broker = ReverseBroker::start(BrokerConfig {
         reverse_bind: config.reverse_bind,
         proxy_bind: config.proxy_bind,
+        proxy_exposure: config.proxy_exposure,
         auth: ServerConfig::read(&config.auth_config)?,
         peer_principal: config.principal.clone(),
         max_waiting_streams: config.pool,
@@ -82,6 +83,7 @@ pub(crate) fn session_proxy_cmd(global: Config, args: Vec<String>) -> CliResult<
 struct ReverseBrokerCliConfig {
     reverse_bind: SocketAddr,
     proxy_bind: ProxyEndpoint,
+    proxy_exposure: ProxyExposure,
     auth_config: PathBuf,
     principal: String,
     pool: usize,
@@ -120,6 +122,7 @@ fn parse_broker_config(global: Config, args: Vec<String>) -> CliResult<ReverseBr
     reject_client_globals(&global, "reverse-broker")?;
     let mut reverse_bind = None;
     let mut proxy_bind = Some(ProxyEndpoint::tcp(loopback_ephemeral()));
+    let mut proxy_exposure = ProxyExposure::Local;
     let mut auth_config = global.auth_config;
     let mut principal = None;
     let mut pool = DEFAULT_POOL;
@@ -137,6 +140,9 @@ fn parse_broker_config(global: Config, args: Vec<String>) -> CliResult<ReverseBr
                     &mut index,
                     "proxy bind",
                 )?)?);
+            }
+            "--proxy-exposure" => {
+                proxy_exposure = parse_proxy_exposure(value(&args, &mut index, "proxy exposure")?)?;
             }
             "--auth-config" => {
                 set_auth_config(&mut auth_config, value(&args, &mut index, "auth config")?)?;
@@ -163,9 +169,11 @@ fn parse_broker_config(global: Config, args: Vec<String>) -> CliResult<ReverseBr
     }
     let reverse_bind = reverse_bind.ok_or_else(|| cli_error("missing --reverse-bind"))?;
     let proxy_bind = proxy_bind.ok_or_else(|| cli_error("missing --proxy-bind"))?;
+    validate_proxy_exposure(&proxy_bind, proxy_exposure)?;
     Ok(ReverseBrokerCliConfig {
         reverse_bind,
         proxy_bind,
+        proxy_exposure,
         auth_config: auth_config.ok_or_else(|| cli_error("missing --auth-config"))?,
         principal: principal.ok_or_else(|| cli_error("missing --principal"))?,
         pool,
@@ -288,11 +296,7 @@ fn parse_session_proxy_config(
                 )?
             }
             "--connect-timeout" => {
-                connect_timeout = parse_duration(value(
-                    &args,
-                    &mut index,
-                    "connect timeout",
-                )?)?
+                connect_timeout = parse_duration(value(&args, &mut index, "connect timeout")?)?
             }
             "--auth-timeout" => {
                 auth_timeout = parse_duration(value(&args, &mut index, "auth timeout")?)?
@@ -302,8 +306,10 @@ fn parse_session_proxy_config(
         }
         index += 1;
     }
+    let bind = bind.ok_or_else(|| cli_error("missing --bind"))?;
+    validate_local_proxy_endpoint(&bind)?;
     Ok(SessionProxyCliConfig {
-        bind: bind.ok_or_else(|| cli_error("missing --bind"))?,
+        bind,
         upstream: upstream.ok_or_else(|| cli_error("missing --connect"))?,
         auth_config: auth_config.ok_or_else(|| cli_error("missing --auth-config"))?,
         principal: principal.ok_or_else(|| cli_error("missing --principal"))?,
@@ -364,11 +370,45 @@ fn parse_proxy_endpoint(value: &str) -> CliResult<ProxyEndpoint> {
         }
         return Ok(ProxyEndpoint::unix(path));
     }
-    let endpoint = parse_socket(value)?;
-    if !endpoint.ip().is_loopback() {
-        return Err(cli_error("reverse TCP proxy bind must be loopback"));
+    parse_socket(value).map(ProxyEndpoint::tcp)
+}
+
+fn parse_proxy_exposure(value: &str) -> CliResult<ProxyExposure> {
+    match value {
+        "local" => Ok(ProxyExposure::Local),
+        "authenticated-network" => Ok(ProxyExposure::AuthenticatedNetwork),
+        _ => Err(cli_error(format!("invalid proxy exposure {value}"))),
     }
-    Ok(ProxyEndpoint::tcp(endpoint))
+}
+
+fn validate_proxy_exposure(endpoint: &ProxyEndpoint, exposure: ProxyExposure) -> CliResult<()> {
+    let valid = match (endpoint, exposure) {
+        (ProxyEndpoint::Tcp(address), ProxyExposure::Local) => address.ip().is_loopback(),
+        (ProxyEndpoint::Unix(_), ProxyExposure::Local) => true,
+        (ProxyEndpoint::Tcp(address), ProxyExposure::AuthenticatedNetwork) => {
+            !address.ip().is_loopback()
+                && !address.ip().is_unspecified()
+                && !address.ip().is_multicast()
+                && address.port() != 0
+        }
+        (ProxyEndpoint::Unix(_), ProxyExposure::AuthenticatedNetwork) => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(cli_error(
+            "proxy endpoint does not match its declared exposure",
+        ))
+    }
+}
+
+fn validate_local_proxy_endpoint(endpoint: &ProxyEndpoint) -> CliResult<()> {
+    match endpoint {
+        ProxyEndpoint::Tcp(address) if !address.ip().is_loopback() => {
+            Err(cli_error("session proxy TCP bind must be loopback"))
+        }
+        _ => Ok(()),
+    }
 }
 
 fn parse_positive(value: &str, label: &str) -> CliResult<usize> {
@@ -404,7 +444,7 @@ fn park_forever() -> ! {
 
 fn reverse_usage(code: i32) -> ! {
     eprintln!(
-        "usage: r9p reverse-broker --reverse-bind address [--proxy-bind loopback-address|unix!/path] --principal name --auth-config path [--pool count]"
+        "usage: r9p reverse-broker --reverse-bind address [--proxy-bind address|unix!/path] [--proxy-exposure local|authenticated-network] --principal name --auth-config path [--pool count]"
     );
     eprintln!(
         "       r9p reverse-export --connect address --principal name --auth-config path [--pool count] [--reconnect-min-delay seconds] [--reconnect-max-delay seconds] [--writable] root"
@@ -459,6 +499,7 @@ mod tests {
             parsed.proxy_bind,
             ProxyEndpoint::tcp(SocketAddr::from(([127, 0, 0, 1], 9641)))
         );
+        assert_eq!(parsed.proxy_exposure, ProxyExposure::Local);
         assert_eq!(parsed.pool, 4);
     }
 
@@ -536,10 +577,7 @@ mod tests {
             parsed.bind,
             ProxyEndpoint::tcp(SocketAddr::from(([127, 0, 0, 6], 9671)))
         );
-        assert_eq!(
-            parsed.upstream,
-            SocketAddr::from(([127, 0, 0, 1], 9641))
-        );
+        assert_eq!(parsed.upstream, SocketAddr::from(([127, 0, 0, 1], 9641)));
         assert_eq!(parsed.principal, "/srv/agents/compute/m7");
         assert_eq!(parsed.max_sessions, 4);
     }
@@ -562,5 +600,32 @@ mod tests {
             .to_vec(),
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parses_authenticated_network_reverse_proxy() {
+        let parsed = parse_broker_config(
+            global(),
+            [
+                "--reverse-bind",
+                "0.0.0.0:9640",
+                "--proxy-bind",
+                "192.168.0.30:9641",
+                "--proxy-exposure",
+                "authenticated-network",
+                "--principal",
+                "laptop-workspace",
+                "--auth-config",
+                "/run/auth/server.conf",
+            ]
+            .map(str::to_string)
+            .to_vec(),
+        )
+        .expect("network broker config");
+        assert_eq!(
+            parsed.proxy_bind,
+            ProxyEndpoint::tcp(SocketAddr::from(([192, 168, 0, 30], 9641)))
+        );
+        assert_eq!(parsed.proxy_exposure, ProxyExposure::AuthenticatedNetwork);
     }
 }

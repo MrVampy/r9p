@@ -46,8 +46,10 @@ This map defines the local sources agents should inspect before making source-sp
   - Generic authenticated reverse-connect runtime adapter.
   - An application-owned tree or filesystem owner connects outward and serves
     ordinary 9P over a bounded pool; the broker pairs those streams with a
-    local TCP or Unix client endpoint without interpreting 9P or owning
-    namespace policy.
+    local endpoint by default. An explicit authenticated-network exposure may
+    use a concrete TCP endpoint only when every bridged session has its own
+    final service authentication boundary. The broker does not interpret 9P
+    or own namespace policy.
   - `ReverseExport` owns the generic outbound lifecycle and accepts a fresh
     `FileTree` or asynchronous `ConnectionHandler` factory per session.
     Its authenticated variants establish an independent final service-client

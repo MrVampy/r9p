@@ -57,6 +57,12 @@ second session proves the final service client and supplies the server's fixed
 attach identity. This closes the loopback proxy boundary without making the
 broker an application admission or protocol relay.
 
+The broker proxy is local by default. `ProxyExposure::AuthenticatedNetwork`
+admits a concrete non-loopback TCP listener only for a deployment that uses
+the authenticated reverse-export variants above. This is an explicit claim
+that the bridged end service authenticates every final client. It does not move
+identity admission or namespace policy into the broker.
+
 The server core owns wire-level fid lifecycle. It records open modes and
 directory offsets, rejects operations that violate 9P sequencing, and reserves
 fid transitions across split request completion. Clone walks share a source

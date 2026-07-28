@@ -24,8 +24,8 @@ use r9p_auth::{
 };
 
 use super::{
-    BrokerConfig, FilesystemExport, FilesystemExportConfig, ProxyEndpoint, ReverseBroker,
-    ReverseExport, ReverseExportConfig, SessionProxy, SessionProxyConfig,
+    BrokerConfig, FilesystemExport, FilesystemExportConfig, ProxyEndpoint, ProxyExposure,
+    ReverseBroker, ReverseExport, ReverseExportConfig, SessionProxy, SessionProxyConfig,
 };
 
 #[test]
@@ -77,23 +77,22 @@ fn session_proxy_terminates_client_auth_behind_a_local_endpoint(
     let service_auth = ServerConfig::new(
         "r9p-session-proxy-test",
         service_key.private,
-        [(
-            compute_key.public,
-            "/srv/agents/compute/m7".to_string(),
-        )],
+        [(compute_key.public, "/srv/agents/compute/m7".to_string())],
     )?;
-    let server = thread::spawn(move || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let (stream, _) = upstream.accept()?;
-        let session = authenticate_server(stream, &service_auth, Duration::from_secs(2))?;
-        assert_eq!(session.peer.principal(), "/srv/agents/compute/m7");
-        let mut stream = session.stream;
-        let mut request = [0_u8; 4];
-        stream.read_exact(&mut request)?;
-        assert_eq!(&request, b"ping");
-        stream.write_all(b"pong")?;
-        stream.shutdown()?;
-        Ok(())
-    });
+    let server = thread::spawn(
+        move || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            let (stream, _) = upstream.accept()?;
+            let session = authenticate_server(stream, &service_auth, Duration::from_secs(2))?;
+            assert_eq!(session.peer.principal(), "/srv/agents/compute/m7");
+            let mut stream = session.stream;
+            let mut request = [0_u8; 4];
+            stream.read_exact(&mut request)?;
+            assert_eq!(&request, b"ping");
+            stream.write_all(b"pong")?;
+            stream.shutdown()?;
+            Ok(())
+        },
+    );
     let proxy = SessionProxy::start(SessionProxyConfig {
         bind: ProxyEndpoint::tcp(address(Ipv4Addr::LOCALHOST, 0)),
         upstream: upstream_endpoint,
@@ -116,7 +115,9 @@ fn session_proxy_terminates_client_auth_behind_a_local_endpoint(
     let mut response = [0_u8; 4];
     local.read_exact(&mut response)?;
     assert_eq!(&response, b"pong");
-    server.join().map_err(|_| "session proxy server panicked")??;
+    server
+        .join()
+        .map_err(|_| "session proxy server panicked")??;
     Ok(())
 }
 
@@ -127,6 +128,7 @@ fn reverse_export_serves_a_writable_file_tree() -> Result<(), Box<dyn std::error
     let broker = ReverseBroker::start(BrokerConfig {
         reverse_bind: address(Ipv4Addr::LOCALHOST, 0),
         proxy_bind: ProxyEndpoint::tcp(address(Ipv4Addr::LOCALHOST, 0)),
+        proxy_exposure: ProxyExposure::Local,
         auth: ServerConfig::new(
             "r9p-reverse-test",
             server.private,
@@ -198,6 +200,7 @@ fn reverse_export_serves_an_application_owned_tree() -> Result<(), Box<dyn std::
     let broker = ReverseBroker::start(BrokerConfig {
         reverse_bind: address(Ipv4Addr::LOCALHOST, 0),
         proxy_bind: ProxyEndpoint::tcp(address(Ipv4Addr::LOCALHOST, 0)),
+        proxy_exposure: ProxyExposure::Local,
         auth: ServerConfig::new(
             "r9p-reverse-tree-test",
             server.private,
@@ -251,6 +254,7 @@ fn reverse_export_holds_idle_pool_and_authenticates_the_end_service_peer(
     let broker = ReverseBroker::start(BrokerConfig {
         reverse_bind: address(Ipv4Addr::LOCALHOST, 0),
         proxy_bind: ProxyEndpoint::tcp(address(Ipv4Addr::LOCALHOST, 0)),
+        proxy_exposure: ProxyExposure::Local,
         auth: ServerConfig::new(
             "r9p-reverse-placement-test",
             broker_key.private.clone(),
@@ -337,6 +341,7 @@ fn reverse_broker_exposes_a_unix_proxy_endpoint() -> Result<(), Box<dyn std::err
     let broker = ReverseBroker::start(BrokerConfig {
         reverse_bind: address(Ipv4Addr::LOCALHOST, 0),
         proxy_bind: ProxyEndpoint::unix(&socket),
+        proxy_exposure: ProxyExposure::Local,
         auth: ServerConfig::new(
             "r9p-reverse-unix-test",
             server.private,
@@ -393,6 +398,7 @@ fn reverse_broker_discards_closed_idle_streams() -> Result<(), Box<dyn std::erro
     let broker = ReverseBroker::start(BrokerConfig {
         reverse_bind: address(Ipv4Addr::LOCALHOST, 0),
         proxy_bind: ProxyEndpoint::tcp(address(Ipv4Addr::LOCALHOST, 0)),
+        proxy_exposure: ProxyExposure::Local,
         auth: server_config,
         peer_principal: "laptop".to_string(),
         max_waiting_streams: 2,

@@ -25,6 +25,12 @@ pub enum ProxyEndpoint {
     Unix(PathBuf),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProxyExposure {
+    Local,
+    AuthenticatedNetwork,
+}
+
 impl ProxyEndpoint {
     pub const fn tcp(address: SocketAddr) -> Self {
         Self::Tcp(address)
@@ -62,6 +68,7 @@ impl fmt::Display for ProxyEndpoint {
 pub struct BrokerConfig {
     pub reverse_bind: SocketAddr,
     pub proxy_bind: ProxyEndpoint,
+    pub proxy_exposure: ProxyExposure,
     pub auth: ServerConfig,
     pub peer_principal: String,
     pub max_waiting_streams: usize,
@@ -197,13 +204,20 @@ impl Drop for ReverseBroker {
 }
 
 fn validate_config(config: &BrokerConfig) -> Result<()> {
-    let proxy_is_local = match &config.proxy_bind {
-        ProxyEndpoint::Tcp(address) => address.ip().is_loopback(),
-        ProxyEndpoint::Unix(path) => {
+    let proxy_is_admitted = match (&config.proxy_bind, config.proxy_exposure) {
+        (ProxyEndpoint::Tcp(address), ProxyExposure::Local) => address.ip().is_loopback(),
+        (ProxyEndpoint::Unix(path), ProxyExposure::Local) => {
             path.is_absolute() && path.file_name().is_some() && path.as_os_str().len() <= 4096
         }
+        (ProxyEndpoint::Tcp(address), ProxyExposure::AuthenticatedNetwork) => {
+            !address.ip().is_loopback()
+                && !address.ip().is_unspecified()
+                && !address.ip().is_multicast()
+                && address.port() != 0
+        }
+        (ProxyEndpoint::Unix(_), ProxyExposure::AuthenticatedNetwork) => false,
     };
-    if !proxy_is_local
+    if !proxy_is_admitted
         || config.peer_principal.is_empty()
         || config.peer_principal.len() > 255
         || config
@@ -216,10 +230,66 @@ fn validate_config(config: &BrokerConfig) -> Result<()> {
         || config.proxy_wait_timeout.is_zero()
     {
         return Err(Error::from(
-            "reverse broker requires a network reverse bind, local proxy endpoint, bounded queue, principal, and finite timeouts",
+            "reverse broker requires a network reverse bind, an admitted proxy exposure, bounded queue, principal, and finite timeouts",
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+    use r9p_auth::generate_key_pair;
+
+    fn config(proxy_bind: ProxyEndpoint, proxy_exposure: ProxyExposure) -> Result<BrokerConfig> {
+        let broker = generate_key_pair()?;
+        let exporter = generate_key_pair()?;
+        Ok(BrokerConfig {
+            reverse_bind: SocketAddr::from(([0, 0, 0, 0], 9640)),
+            proxy_bind,
+            proxy_exposure,
+            auth: ServerConfig::new(
+                "reverse-proxy-exposure-test",
+                broker.private,
+                [(exporter.public, "exporter".to_string())],
+            )?,
+            peer_principal: "exporter".to_string(),
+            max_waiting_streams: 2,
+            authentication_timeout: Duration::from_secs(2),
+            proxy_wait_timeout: Duration::from_secs(2),
+        })
+    }
+
+    #[test]
+    fn authenticated_network_exposure_requires_a_concrete_network_endpoint() -> Result<()> {
+        validate_config(&config(
+            ProxyEndpoint::tcp(SocketAddr::from(([192, 0, 2, 1], 9641))),
+            ProxyExposure::AuthenticatedNetwork,
+        )?)?;
+        for endpoint in [
+            SocketAddr::from(([127, 0, 0, 1], 9641)),
+            SocketAddr::from(([0, 0, 0, 0], 9641)),
+            SocketAddr::from(([224, 0, 0, 1], 9641)),
+            SocketAddr::from(([192, 0, 2, 1], 0)),
+        ] {
+            assert!(validate_config(&config(
+                ProxyEndpoint::tcp(endpoint),
+                ProxyExposure::AuthenticatedNetwork,
+            )?)
+            .is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn local_exposure_rejects_a_network_endpoint() -> Result<()> {
+        assert!(validate_config(&config(
+            ProxyEndpoint::tcp(SocketAddr::from(([192, 0, 2, 1], 9641))),
+            ProxyExposure::Local,
+        )?)
+        .is_err());
+        Ok(())
+    }
 }
 
 fn spawn_reverse_acceptor(
@@ -364,8 +434,8 @@ fn spawn_proxy_acceptor(
                     .name("r9p-reverse-bridge".to_string())
                     .spawn(move || {
                         let _bridge_slot = bridge_slot;
-                        let _ = send_session_claim(&mut remote)
-                            .and_then(|()| bridge(local, remote));
+                        let _ =
+                            send_session_claim(&mut remote).and_then(|()| bridge(local, remote));
                         bridge_counters
                             .completed_bridges
                             .fetch_add(1, Ordering::AcqRel);

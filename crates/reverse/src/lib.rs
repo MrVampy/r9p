@@ -1,9 +1,11 @@
 //! Authenticated reverse-connect transport for 9P.
 //!
 //! The filesystem-owning host establishes the network connection outward and
-//! then serves ordinary 9P on the authenticated stream.  A broker pairs that
-//! stream with a loopback 9P client connection.  The broker does not interpret
-//! 9P messages or acquire filesystem authority.
+//! then serves ordinary 9P on the authenticated stream. A broker pairs that
+//! stream with a local client connection by default. An embedding application
+//! may explicitly expose a concrete network listener only when every bridged
+//! session has its own end-service authentication boundary. The broker does
+//! not interpret 9P messages or acquire filesystem authority.
 
 mod broker;
 mod claim;
@@ -15,7 +17,7 @@ use std::{io, net::TcpStream, time::Duration};
 use claim::{receive_session_claim, send_session_claim};
 use socket2::{SockRef, TcpKeepalive};
 
-pub use broker::{BrokerConfig, BrokerStatus, ProxyEndpoint, ReverseBroker};
+pub use broker::{BrokerConfig, BrokerStatus, ProxyEndpoint, ProxyExposure, ReverseBroker};
 pub use export::{
     FilesystemExport, FilesystemExportConfig, ReverseExport, ReverseExportConfig,
     ReverseExportStatus,

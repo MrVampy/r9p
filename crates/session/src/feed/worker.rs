@@ -1,5 +1,5 @@
 use super::{
-    feed_poll_path, parse_namespace_change_record, parse_namespace_path, select_feed_records,
+    feed_catch_up_path, parse_namespace_change_record, parse_namespace_path, select_feed_records,
     FeedEvent, FeedEventBus, FeedState, FeedWake,
 };
 use crate::{Client, ClientSession, Error, NamespaceCache, Result, StaleReason, OREAD};
@@ -16,12 +16,12 @@ use std::{
 #[derive(Clone, Debug)]
 pub struct FeedWorkerConfig {
     pub path: String,
-    pub stream_path: Option<String>,
+    pub stream_path: String,
     pub cursor_template: Option<String>,
     pub cache: Option<NamespaceCache>,
     pub event_bus: Option<FeedEventBus>,
     pub wake: Option<FeedWake>,
-    pub poll_interval: Duration,
+    pub reconnect_delay: Duration,
     pub lookup_timeout: Duration,
     pub read_timeout: Duration,
     pub control_timeout: Duration,
@@ -84,91 +84,62 @@ fn feed_loop(
                     "9P client session unavailable: {}",
                     error.message()
                 ));
-                sleep_interruptible(config.poll_interval, &stop);
+                sleep_interruptible(config.reconnect_delay, &stop);
                 continue;
             }
         };
-        if let Some(stream_path) = config.stream_path.as_deref() {
-            if let Some(event_id) = since_event_id.as_deref() {
-                let catch_up_path = feed_poll_path(
-                    &config.path,
-                    Some(event_id),
-                    config.cursor_template.as_deref(),
-                );
-                match consume_once(&attachment, &config, &catch_up_path, Some(event_id), &state) {
-                    Ok(next_event_id) => {
-                        if next_event_id.is_some() {
-                            since_event_id = next_event_id;
-                        }
-                    }
-                    Err(error) if error.errno == libc::ETIMEDOUT => {}
-                    Err(error) => {
-                        state
-                            .set_degraded(format!("stream catch-up degraded: {}", error.message()));
-                    }
-                }
-            }
-            match consume_stream_until_error(&attachment, &config, stream_path, &state, &stop) {
+        if let Some(event_id) = since_event_id.as_deref() {
+            let catch_up_path = feed_catch_up_path(
+                &config.path,
+                Some(event_id),
+                config.cursor_template.as_deref(),
+            );
+            match consume_catch_up(&attachment, &config, &catch_up_path, Some(event_id), &state) {
                 Ok(next_event_id) => {
                     if next_event_id.is_some() {
                         since_event_id = next_event_id;
                     }
-                    if stop.load(Ordering::SeqCst) {
-                        break;
-                    }
                 }
+                Err(error) if error.errno == libc::ETIMEDOUT => {}
                 Err(error) => {
-                    since_event_id = state.snapshot().last_event_id.or(since_event_id);
-                    state.set_degraded(format!("stream feed degraded: {}", error.message()));
+                    state.set_degraded(format!("stream catch-up degraded: {}", error.message()));
                 }
             }
-            if stop.load(Ordering::SeqCst) {
-                break;
-            }
-            match client.reconnect_after(&attachment) {
-                Ok(_) => {}
-                Err(error) => {
-                    state.set_degraded(format!(
-                        "stream feed reconnect degraded: {}",
-                        error.message()
-                    ));
-                    sleep_interruptible(config.poll_interval, &stop);
-                }
-            }
-            continue;
         }
-        let poll_path = feed_poll_path(
-            &config.path,
-            since_event_id.as_deref(),
-            config.cursor_template.as_deref(),
-        );
-        match consume_once(
-            &attachment,
-            &config,
-            &poll_path,
-            since_event_id.as_deref(),
-            &state,
-        ) {
+        match consume_stream_until_error(&attachment, &config, &config.stream_path, &state, &stop) {
             Ok(next_event_id) => {
                 if next_event_id.is_some() {
                     since_event_id = next_event_id;
                 }
-            }
-            Err(error) if error.errno == libc::ETIMEDOUT => {
-                state.set_connected("poll", None, None);
+                if stop.load(Ordering::SeqCst) {
+                    break;
+                }
             }
             Err(error) => {
-                state.set_degraded(error.message().to_string());
+                since_event_id = state.snapshot().last_event_id.or(since_event_id);
+                state.set_degraded(format!("stream feed degraded: {}", error.message()));
             }
         }
-        sleep_interruptible(config.poll_interval, &stop);
+        if stop.load(Ordering::SeqCst) {
+            break;
+        }
+        match client.reconnect_after(&attachment) {
+            Ok(_) => {}
+            Err(error) => {
+                state.set_degraded(format!(
+                    "stream feed reconnect degraded: {}",
+                    error.message()
+                ));
+                sleep_interruptible(config.reconnect_delay, &stop);
+            }
+        }
     }
     if let Some(wake) = &config.wake {
         wake.close();
     }
 }
 
-fn consume_once(
+fn consume_catch_up(
     client: &Client,
     config: &FeedWorkerConfig,
     path: &str,
@@ -181,11 +152,16 @@ fn consume_once(
     let data = read?;
     clunk?;
     if data.is_empty() {
-        state.set_connected("poll", None, None);
+        state.set_connected("catch_up", None, None);
         return Ok(None);
     }
 
-    process_feed_data(&data, FeedReadMode::Poll { since_event_id }, config, state)
+    process_feed_data(
+        &data,
+        FeedReadMode::CatchUp { since_event_id },
+        config,
+        state,
+    )
 }
 
 fn consume_stream_until_error(
@@ -228,14 +204,14 @@ fn consume_stream_until_error(
 #[derive(Clone, Copy)]
 enum FeedReadMode<'a> {
     Stream,
-    Poll { since_event_id: Option<&'a str> },
+    CatchUp { since_event_id: Option<&'a str> },
 }
 
 impl FeedReadMode<'_> {
     fn source(self) -> &'static str {
         match self {
             FeedReadMode::Stream => "stream",
-            FeedReadMode::Poll { .. } => "poll",
+            FeedReadMode::CatchUp { .. } => "catch_up",
         }
     }
 }
@@ -253,7 +229,7 @@ fn process_feed_data(
         .collect::<Vec<_>>();
     let (records, cursor_advanced_to) = match mode {
         FeedReadMode::Stream => (records, None),
-        FeedReadMode::Poll { since_event_id } => {
+        FeedReadMode::CatchUp { since_event_id } => {
             let selected =
                 select_feed_records(records, since_event_id, config.cursor_template.is_some());
             if selected.cursor_missed {

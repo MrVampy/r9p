@@ -79,6 +79,11 @@ This map defines the local sources agents should inspect before making source-sp
     application-level replay cursors.
   - It retries only after definitive transport failure and does not make
     ordinary file writes idempotent.
+- `crates/session/src/feed/`
+  - Generic namespace-change subscription over a mandatory blocking 9P stream.
+  - The recent or cursor path is a one-shot catch-up source after connection
+    loss, never a periodic polling source. The configured delay bounds
+    reconnect attempts only.
 - `crates/core/src/stat.rs`
   - 9P stat record shape and mode helpers.
 - `crates/core/tests/memory_tree.rs`
@@ -99,6 +104,9 @@ This map defines the local sources agents should inspect before making source-sp
 - `crates/fuse/src/`
   - Canonical Linux FUSE bridge over the `r9p` client primitives, exposed as
     `r9p mount`.
+  - Its direct change-feed adapter uses the same stream-primary and
+    cursor-catch-up contract; session-hosted mounts consume the session feed's
+    event bus.
 - `crates/fs/src/`
   - Local filesystem-backed 9P server adapter used by `r9p serve` and
     `r9p export`; read-only by default with an explicit writable mode.

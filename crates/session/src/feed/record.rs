@@ -43,7 +43,7 @@ pub fn scope_matches(configured_scope: Option<&str>, event_scope: &str) -> bool 
             .unwrap_or(true)
 }
 
-pub fn feed_poll_path(
+pub fn feed_catch_up_path(
     base_path: &str,
     since_event_id: Option<&str>,
     cursor_template: Option<&str>,
@@ -148,7 +148,7 @@ fn parse_positional_record(fields: &[&str]) -> Option<NamespaceChange> {
 #[cfg(test)]
 mod tests {
     use super::{
-        feed_poll_path, parse_namespace_change_record, parse_namespace_path, scope_matches,
+        feed_catch_up_path, parse_namespace_change_record, parse_namespace_path, scope_matches,
         select_feed_records, NamespaceChange,
     };
 
@@ -195,9 +195,9 @@ mod tests {
     }
 
     #[test]
-    fn feed_poll_path_advances_with_since_cursor() {
+    fn feed_catch_up_path_advances_with_since_cursor() {
         assert_eq!(
-            feed_poll_path(
+            feed_catch_up_path(
                 "/feeds/namespace",
                 Some("event-7"),
                 Some("/feeds/namespace-after/{event_id}"),
@@ -205,11 +205,11 @@ mod tests {
             "/feeds/namespace-after/event-7"
         );
         assert_eq!(
-            feed_poll_path("/feeds/namespace", Some("event-7"), None),
+            feed_catch_up_path("/feeds/namespace", Some("event-7"), None),
             "/feeds/namespace"
         );
         assert_eq!(
-            feed_poll_path("/feeds/namespace", None, None),
+            feed_catch_up_path("/feeds/namespace", None, None),
             "/feeds/namespace"
         );
     }

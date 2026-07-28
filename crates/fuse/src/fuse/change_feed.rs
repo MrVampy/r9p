@@ -13,7 +13,7 @@ use crate::error::{Error, Result};
 use r9p::fid::Fid;
 use session::{
     feed::{
-        feed_poll_path, parse_namespace_change_record, parse_namespace_path, scope_matches,
+        feed_catch_up_path, parse_namespace_change_record, parse_namespace_path, scope_matches,
         select_feed_records, FeedEvent, FeedEventReceiver, NamespaceChange,
     },
     Client, OREAD,
@@ -60,7 +60,9 @@ impl R9pFuse {
             self.status.set_change_feed("disabled", None, None, None);
             return Ok(None);
         };
-        let stream_path = self.config.change_feed_stream_path.clone();
+        let stream_path = self.config.change_feed_stream_path.clone().ok_or_else(|| {
+            Error::new(libc::EINVAL, "change feed requires a blocking stream path")
+        })?;
         let mut file = file
             .try_clone()
             .map_err(|error| Error::io("clone /dev/fuse for change feed", error))?;
@@ -229,7 +231,7 @@ fn change_feed_loop(
     fs: &mut R9pFuse,
     file: &mut File,
     path: String,
-    stream_path: Option<String>,
+    stream_path: String,
     stop: Arc<AtomicBool>,
 ) {
     fs.status.set_change_feed("connecting", None, None, None);
@@ -253,7 +255,7 @@ fn change_feed_loop(
                     error.message(),
                 );
                 fs.apply_coarse_invalidation(file, "change feed degraded");
-                sleep_interruptible(fs.config.change_feed_poll_interval, &stop);
+                sleep_interruptible(fs.config.change_feed_reconnect_delay, &stop);
                 continue;
             }
         };
@@ -276,69 +278,66 @@ fn change_feed_loop(
                         error.message(),
                     );
                     fs.apply_coarse_invalidation(file, "change feed data reconnect failed");
-                    sleep_interruptible(fs.config.change_feed_poll_interval, &stop);
+                    sleep_interruptible(fs.config.change_feed_reconnect_delay, &stop);
                     continue;
                 }
             }
         }
-        if let Some(stream_path) = stream_path.as_deref() {
-            match consume_stream_until_error(
-                fs,
-                file,
-                stream_path,
-                &stop,
-                &client,
-                &mut since_event_id,
-            ) {
-                Ok(()) => {
-                    if stop.load(Ordering::SeqCst) {
-                        break;
-                    }
-                }
+        if since_event_id.is_some() {
+            match consume_catch_up_once(fs, file, &path, &client, &mut since_event_id) {
+                Ok(()) => {}
+                Err(error) if is_feed_read_timeout(&error) => {}
                 Err(error) => {
                     fs.status.set_change_feed(
                         "degraded",
-                        Some("stream"),
+                        Some("catch_up"),
                         None,
                         Some(error.message().to_string()),
                     );
                     fs.record_mount_diagnostic(
-                        "change_feed_stream_disconnected",
+                        "change_feed_catch_up_failed",
                         error.errno,
                         error.message(),
                     );
-                    fs.apply_coarse_invalidation(file, "change feed stream degraded");
+                    fs.apply_coarse_invalidation(file, "change feed catch-up degraded");
                     if feed_error_requires_data_reconnect(&error) {
                         feed_client = None;
                         data_client_stale = true;
-                        sleep_interruptible(fs.config.change_feed_poll_interval, &stop);
+                        sleep_interruptible(fs.config.change_feed_reconnect_delay, &stop);
                         continue;
                     }
                 }
             }
         }
-        match consume_poll_once(fs, file, &path, &client, &mut since_event_id) {
-            Ok(()) => {}
+        match consume_stream_until_error(
+            fs,
+            file,
+            &stream_path,
+            &stop,
+            &client,
+            &mut since_event_id,
+        ) {
+            Ok(()) => break,
             Err(error) => {
                 fs.status.set_change_feed(
                     "degraded",
-                    Some("poll"),
+                    Some("stream"),
                     None,
                     Some(error.message().to_string()),
                 );
                 fs.record_mount_diagnostic(
-                    "change_feed_disconnected",
+                    "change_feed_stream_disconnected",
                     error.errno,
                     error.message(),
                 );
-                fs.apply_coarse_invalidation(file, "change feed degraded");
+                fs.apply_coarse_invalidation(file, "change feed stream degraded");
                 if feed_error_requires_data_reconnect(&error) {
                     feed_client = None;
                     data_client_stale = true;
                 }
             }
         }
-        sleep_interruptible(fs.config.change_feed_poll_interval, &stop);
+        sleep_interruptible(fs.config.change_feed_reconnect_delay, &stop);
     }
 }
 
@@ -351,7 +350,7 @@ fn change_feed_client(fs: &R9pFuse, slot: &mut Option<Client>) -> Result<Client>
     Ok(client)
 }
 
-fn consume_poll_once(
+fn consume_catch_up_once(
     fs: &mut R9pFuse,
     file: &mut File,
     path: &str,
@@ -359,16 +358,16 @@ fn consume_poll_once(
     since_event_id: &mut Option<String>,
 ) -> Result<()> {
     fs.status.set_change_feed("connecting", None, None, None);
-    let poll_path = feed_poll_path(
+    let catch_up_path = feed_catch_up_path(
         path,
         since_event_id.as_deref(),
         fs.config.change_feed_cursor_template.as_deref(),
     );
-    let fid = match open_feed(client, &poll_path, fs.lookup_timeout()) {
+    let fid = match open_feed(client, &catch_up_path, fs.lookup_timeout()) {
         Ok(fid) => fid,
-        Err(error) if is_feed_poll_timeout(&error) => {
+        Err(error) if is_feed_read_timeout(&error) => {
             fs.status
-                .set_change_feed("connected", Some("poll"), None, None);
+                .set_change_feed("connected", Some("catch_up"), None, None);
             return Ok(());
         }
         Err(error) => return Err(error),
@@ -377,22 +376,22 @@ fn consume_poll_once(
         Ok(data) if data.is_empty() => {
             let _ = client.clunk_timeout(fid, fs.control_timeout());
             fs.status
-                .set_change_feed("connected", Some("poll"), None, None);
+                .set_change_feed("connected", Some("catch_up"), None, None);
         }
         Ok(data) => {
             let _ = client.clunk_timeout(fid, fs.control_timeout());
             if let Some(event_id) =
-                apply_feed_chunk(fs, file, &data, FeedReadMode::Poll { since_event_id })?
+                apply_feed_chunk(fs, file, &data, FeedReadMode::CatchUp { since_event_id })?
             {
                 *since_event_id = Some(event_id);
             }
             fs.status
-                .set_change_feed("connected", Some("poll"), None, None);
+                .set_change_feed("connected", Some("catch_up"), None, None);
         }
         Err(error) if error.errno == libc::ETIMEDOUT => {
             let _ = client.clunk_timeout(fid, fs.control_timeout());
             fs.status
-                .set_change_feed("connected", Some("poll"), None, None);
+                .set_change_feed("connected", Some("catch_up"), None, None);
         }
         Err(error) => {
             let _ = client.clunk_timeout(fid, fs.control_timeout());
@@ -439,12 +438,12 @@ fn consume_stream_until_error(
     Ok(())
 }
 
-fn is_feed_poll_timeout(error: &Error) -> bool {
+fn is_feed_read_timeout(error: &Error) -> bool {
     error.errno == libc::ETIMEDOUT
 }
 
 fn feed_error_requires_data_reconnect(error: &Error) -> bool {
-    is_transport_error(error) && !is_feed_poll_timeout(error)
+    is_transport_error(error) && !is_feed_read_timeout(error)
 }
 
 fn open_feed(client: &Client, path: &str, timeout: Duration) -> Result<Fid> {
@@ -459,7 +458,7 @@ fn open_feed(client: &Client, path: &str, timeout: Duration) -> Result<Fid> {
 
 enum FeedReadMode<'a> {
     Stream,
-    Poll {
+    CatchUp {
         since_event_id: &'a mut Option<String>,
     },
 }
@@ -468,7 +467,7 @@ impl FeedReadMode<'_> {
     fn source(&self) -> &'static str {
         match self {
             FeedReadMode::Stream => "stream",
-            FeedReadMode::Poll { .. } => "poll",
+            FeedReadMode::CatchUp { .. } => "catch_up",
         }
     }
 }
@@ -487,7 +486,7 @@ fn apply_feed_chunk(
         .collect::<Vec<_>>();
     let (records, cursor_advanced_to) = match mode {
         FeedReadMode::Stream => (records, None),
-        FeedReadMode::Poll { since_event_id } => {
+        FeedReadMode::CatchUp { since_event_id } => {
             let selected = select_feed_records(
                 records,
                 since_event_id.as_ref().map(String::as_str),
@@ -525,17 +524,17 @@ fn sleep_interruptible(duration: Duration, stop: &AtomicBool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{feed_error_requires_data_reconnect, is_feed_poll_timeout};
+    use super::{feed_error_requires_data_reconnect, is_feed_read_timeout};
     use crate::error::Error;
 
     #[test]
-    fn feed_poll_timeout_does_not_stale_data_client() {
+    fn feed_read_timeout_does_not_stale_data_client() {
         let timeout = Error::new(libc::ETIMEDOUT, "9P response timeout after 5.000s");
-        assert!(is_feed_poll_timeout(&timeout));
+        assert!(is_feed_read_timeout(&timeout));
         assert!(!feed_error_requires_data_reconnect(&timeout));
 
         let reset = Error::new(libc::ECONNRESET, "connection reset by peer");
-        assert!(!is_feed_poll_timeout(&reset));
+        assert!(!is_feed_read_timeout(&reset));
         assert!(feed_error_requires_data_reconnect(&reset));
     }
 }

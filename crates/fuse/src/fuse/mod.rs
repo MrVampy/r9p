@@ -57,7 +57,7 @@ pub struct R9pFuse {
 impl R9pFuse {
     pub fn mount(mut config: Config) -> Result<()> {
         block_termination_signals();
-        normalize_config(&mut config);
+        normalize_config(&mut config)?;
         let client = ClientSession::connect(&config.connection(), config.connect_timeout)?;
         Self::mount_prepared(config, client, None)
     }
@@ -68,7 +68,7 @@ impl R9pFuse {
         feed_events: Option<FeedEventReceiver>,
     ) -> Result<()> {
         block_termination_signals();
-        normalize_config(&mut config);
+        normalize_config(&mut config)?;
         Self::mount_prepared(config, client, feed_events)
     }
 

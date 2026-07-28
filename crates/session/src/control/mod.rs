@@ -38,7 +38,7 @@ pub struct ControlConfig {
     pub change_feed_path: Option<String>,
     pub change_feed_stream_path: Option<String>,
     pub change_feed_cursor_template: Option<String>,
-    pub change_feed_poll_interval: Duration,
+    pub change_feed_reconnect_delay: Duration,
     pub change_feed_backpressure_limit: usize,
 }
 
@@ -53,6 +53,25 @@ pub struct ControlRuntime {
 
 impl ControlRuntime {
     pub fn start(config: &ControlConfig) -> Result<Self> {
+        let feed_paths = match (
+            config.change_feed_path.clone(),
+            config.change_feed_stream_path.clone(),
+        ) {
+            (Some(path), Some(stream_path)) => Some((path, stream_path)),
+            (None, None) if config.change_feed_cursor_template.is_none() => None,
+            _ => {
+                return Err(Error::new(
+                    libc::EINVAL,
+                    "change feed requires both catch-up and blocking stream paths",
+                ))
+            }
+        };
+        if feed_paths.is_some() && config.change_feed_reconnect_delay.is_zero() {
+            return Err(Error::new(
+                libc::EINVAL,
+                "change feed reconnect delay must be positive",
+            ));
+        }
         let client = ClientSession::connect(
             &ConnectionConfig {
                 address: config.address.clone(),
@@ -68,27 +87,28 @@ impl ControlRuntime {
         let feed_state = FeedState::new();
         let cache = NamespaceCache::new();
         let feed_events = FeedEventBus::new(config.change_feed_backpressure_limit);
-        let feed_handle = if let Some(path) = config.change_feed_path.clone() {
-            Some(start_feed_worker(
+        let feed_handle = match feed_paths {
+            Some((path, stream_path)) => Some(start_feed_worker(
                 client.clone(),
                 FeedWorkerConfig {
                     path,
-                    stream_path: config.change_feed_stream_path.clone(),
+                    stream_path,
                     cursor_template: config.change_feed_cursor_template.clone(),
                     cache: Some(cache.clone()),
                     event_bus: Some(feed_events.clone()),
                     wake: None,
-                    poll_interval: config.change_feed_poll_interval,
+                    reconnect_delay: config.change_feed_reconnect_delay,
                     lookup_timeout: config.request_timeout,
                     read_timeout: config.request_timeout,
                     control_timeout: config.request_timeout,
                     backpressure_limit: config.change_feed_backpressure_limit,
                 },
                 feed_state.clone(),
-            )?)
-        } else {
-            feed_state.set_disabled();
-            None
+            )?),
+            None => {
+                feed_state.set_disabled();
+                None
+            }
         };
         Ok(Self {
             client,

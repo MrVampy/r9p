@@ -43,7 +43,7 @@ fn session_control_verbs_use_local_socket() -> TestResult<()> {
             .arg("/events/namespace/recent")
             .arg("--change-feed-stream")
             .arg("/events/namespace/stream")
-            .arg("--change-feed-poll-interval")
+            .arg("--change-feed-reconnect-delay")
             .arg("0.01")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped()),

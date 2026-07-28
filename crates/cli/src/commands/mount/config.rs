@@ -51,7 +51,7 @@ pub(super) fn parse_mount_config(global: Config, args: Vec<String>) -> CliResult
         change_feed_stream_path: None,
         change_feed_cursor_template: None,
         change_feed_scope: None,
-        change_feed_poll_interval: Duration::ZERO,
+        change_feed_reconnect_delay: Duration::ZERO,
         change_feed_backpressure_limit: 0,
         allow_other: false,
         debug: false,
@@ -175,10 +175,10 @@ pub(super) fn parse_mount_config(global: Config, args: Vec<String>) -> CliResult
                         .clone(),
                 );
             }
-            "--change-feed-poll-interval" => {
+            "--change-feed-reconnect-delay" => {
                 index += 1;
-                config.change_feed_poll_interval =
-                    parse_duration(args.get(index), "missing change feed poll interval")?;
+                config.change_feed_reconnect_delay =
+                    parse_duration(args.get(index), "missing change feed reconnect delay")?;
             }
             "--change-feed-backpressure" => {
                 index += 1;
@@ -318,7 +318,7 @@ fn parse_u16_limit(
 
 fn mount_usage(code: i32) -> ! {
     eprintln!(
-        "usage: r9p mount [--source namespace-path] [--aname aname] [--uname uname] [--msize msize] [--allow-other] [--attr-timeout seconds] [--entry-timeout seconds] [--request-timeout seconds] [--connect-timeout seconds] [--lookup-timeout seconds] [--read-timeout seconds] [--write-timeout seconds] [--mutation-timeout seconds] [--control-timeout seconds] [--interrupt-timeout seconds] [--max-workers count] [--max-background count] [--congestion-threshold count] [--diagnostics-file path] [--diagnostics-capacity count] [--status-file path] [--change-feed namespace-path] [--change-feed-stream namespace-path] [--change-feed-cursor-template path-with-{{event_id}}] [--change-feed-scope scope] [--change-feed-poll-interval seconds] [--change-feed-backpressure count] endpoint mountpoint\nusage: r9p mount ensure|status|stop --mountpoint path [--unit name --unit-scope user|system] [--status-file path] [--expect-endpoint endpoint] [--expect-change-feed path] [--expect-status-file path] [--attempts count] [-- mount args...]"
+        "usage: r9p mount [--source namespace-path] [--aname aname] [--uname uname] [--msize msize] [--allow-other] [--attr-timeout seconds] [--entry-timeout seconds] [--request-timeout seconds] [--connect-timeout seconds] [--lookup-timeout seconds] [--read-timeout seconds] [--write-timeout seconds] [--mutation-timeout seconds] [--control-timeout seconds] [--interrupt-timeout seconds] [--max-workers count] [--max-background count] [--congestion-threshold count] [--diagnostics-file path] [--diagnostics-capacity count] [--status-file path] [--change-feed namespace-path] [--change-feed-stream namespace-path] [--change-feed-cursor-template path-with-{{event_id}}] [--change-feed-scope scope] [--change-feed-reconnect-delay seconds] [--change-feed-backpressure count] endpoint mountpoint\nusage: r9p mount ensure|status|stop --mountpoint path [--unit name --unit-scope user|system] [--status-file path] [--expect-endpoint endpoint] [--expect-change-feed path] [--expect-status-file path] [--attempts count] [-- mount args...]"
     );
     std::process::exit(code);
 }

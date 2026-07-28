@@ -103,7 +103,7 @@ fn mount_config(
         change_feed_stream_path: None,
         change_feed_cursor_template: None,
         change_feed_scope: None,
-        change_feed_poll_interval: Duration::ZERO,
+        change_feed_reconnect_delay: Duration::ZERO,
         change_feed_backpressure_limit: 0,
         allow_other: false,
         debug: false,

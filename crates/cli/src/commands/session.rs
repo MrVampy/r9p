@@ -31,7 +31,7 @@ fn session_serve_cmd(config: Config, mut args: Vec<String>) -> CliResult<()> {
     let change_feed_path = take_change_feed_path(&mut args)?;
     let change_feed_stream_path = take_change_feed_stream_path(&mut args)?;
     let change_feed_cursor_template = take_change_feed_cursor_template(&mut args)?;
-    let change_feed_poll_interval = take_change_feed_poll_interval(&mut args)?;
+    let change_feed_reconnect_delay = take_change_feed_reconnect_delay(&mut args)?;
     let change_feed_backpressure_limit = take_change_feed_backpressure(&mut args)?;
     let mount = take_session_mount_config(&mut args)?;
     let address = match (config.address.clone(), args.as_slice()) {
@@ -59,7 +59,7 @@ fn session_serve_cmd(config: Config, mut args: Vec<String>) -> CliResult<()> {
         change_feed_path,
         change_feed_stream_path,
         change_feed_cursor_template,
-        change_feed_poll_interval,
+        change_feed_reconnect_delay,
         change_feed_backpressure_limit,
     };
     if !args.is_empty() {
@@ -209,9 +209,9 @@ fn take_change_feed_cursor_template(args: &mut Vec<String>) -> CliResult<Option<
     Ok(value)
 }
 
-fn take_change_feed_poll_interval(args: &mut Vec<String>) -> CliResult<Duration> {
-    take_optional_value(args, "--change-feed-poll-interval")?
-        .map(|value| parse_duration_secs(&value, "change feed poll interval"))
+fn take_change_feed_reconnect_delay(args: &mut Vec<String>) -> CliResult<Duration> {
+    take_optional_value(args, "--change-feed-reconnect-delay")?
+        .map(|value| parse_duration_secs(&value, "change feed reconnect delay"))
         .transpose()
         .map(|value| value.unwrap_or_else(|| Duration::from_secs(1)))
 }

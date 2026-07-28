@@ -144,6 +144,14 @@ bounded `max_background` and congestion settings. This makes recursive walks
 and slow peer operations apply backpressure at the mount boundary instead of
 spawning unbounded per-request threads in the client process.
 
+Namespace-change observation is stream-primary. Enabling a change feed requires
+both a recent or cursor-addressed catch-up path and a blocking stream path. The
+client blocks on the stream for new records. After transport loss it reads the
+catch-up path once from its last event ID, then reopens the stream. There is no
+periodic snapshot fallback; the configured delay is reconnect backoff, not an
+observation cadence. Read deadlines remain bounded liveness and shutdown
+limits.
+
 The adapter advertises only capabilities it implements. In particular it does
 not claim exportfs stale-handle support, because forgotten nodeids are retired,
 and it leaves umask application to Linux rather than claiming `DONT_MASK`.

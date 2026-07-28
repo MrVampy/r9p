@@ -61,7 +61,7 @@ fn parses_final_mount_options() {
             "/feeds/namespace-after/{event_id}".to_string(),
             "--change-feed-scope".to_string(),
             "session:mount-a".to_string(),
-            "--change-feed-poll-interval".to_string(),
+            "--change-feed-reconnect-delay".to_string(),
             "0.75".to_string(),
             "--change-feed-backpressure".to_string(),
             "128".to_string(),
@@ -117,7 +117,10 @@ fn parses_final_mount_options() {
         Some("/feeds/namespace-after/{event_id}")
     );
     assert_eq!(config.change_feed_scope.as_deref(), Some("session:mount-a"));
-    assert_eq!(config.change_feed_poll_interval, Duration::from_millis(750));
+    assert_eq!(
+        config.change_feed_reconnect_delay,
+        Duration::from_millis(750)
+    );
     assert_eq!(config.change_feed_backpressure_limit, 128);
     assert_eq!(config.attr_timeout, Duration::from_millis(1500));
     assert_eq!(config.entry_timeout, Duration::from_secs(2));

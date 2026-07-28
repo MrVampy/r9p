@@ -8,7 +8,7 @@ use super::change_feed;
 
 pub const DEFAULT_MAX_WORKERS: usize = 10;
 pub const DEFAULT_MAX_BACKGROUND: u16 = 12;
-pub const DEFAULT_CHANGE_FEED_POLL_INTERVAL: Duration = Duration::from_secs(1);
+pub const DEFAULT_CHANGE_FEED_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 pub const DEFAULT_ATTR_TIMEOUT: Duration = Duration::from_secs(1);
 pub const DEFAULT_ENTRY_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -46,7 +46,7 @@ pub struct Config {
     pub change_feed_stream_path: Option<String>,
     pub change_feed_cursor_template: Option<String>,
     pub change_feed_scope: Option<String>,
-    pub change_feed_poll_interval: Duration,
+    pub change_feed_reconnect_delay: Duration,
     pub change_feed_backpressure_limit: usize,
     pub allow_other: bool,
     pub debug: bool,
@@ -75,7 +75,7 @@ pub(super) fn parse_source_path(path: &str) -> Result<Vec<Vec<u8>>> {
     Ok(session::parse_namespace_path(path.as_bytes())?)
 }
 
-pub(super) fn normalize_config(config: &mut Config) {
+pub(super) fn normalize_config(config: &mut Config) -> Result<()> {
     if config.lookup_timeout.is_zero() {
         config.lookup_timeout = config.request_timeout;
     }
@@ -100,8 +100,8 @@ pub(super) fn normalize_config(config: &mut Config) {
     if config.diagnostics_capacity == 0 {
         config.diagnostics_capacity = DEFAULT_DIAGNOSTICS_CAPACITY;
     }
-    if config.change_feed_poll_interval.is_zero() {
-        config.change_feed_poll_interval = DEFAULT_CHANGE_FEED_POLL_INTERVAL;
+    if config.change_feed_reconnect_delay.is_zero() {
+        config.change_feed_reconnect_delay = DEFAULT_CHANGE_FEED_RECONNECT_DELAY;
     }
     if config.change_feed_backpressure_limit == 0 {
         config.change_feed_backpressure_limit = change_feed::DEFAULT_CHANGE_FEED_BACKPRESSURE_LIMIT;
@@ -111,5 +111,16 @@ pub(super) fn normalize_config(config: &mut Config) {
     }
     if config.congestion_threshold == 0 || config.congestion_threshold > config.max_background {
         config.congestion_threshold = default_congestion_threshold(config.max_background);
+    }
+    match (
+        config.change_feed_path.as_ref(),
+        config.change_feed_stream_path.as_ref(),
+    ) {
+        (None, None) if config.change_feed_cursor_template.is_none() => Ok(()),
+        (Some(_), Some(_)) => Ok(()),
+        _ => Err(Error::new(
+            libc::EINVAL,
+            "change feed requires both catch-up and blocking stream paths",
+        )),
     }
 }

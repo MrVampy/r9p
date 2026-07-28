@@ -1,4 +1,4 @@
-use super::config::DEFAULT_CHANGE_FEED_POLL_INTERVAL;
+use super::config::DEFAULT_CHANGE_FEED_RECONNECT_DELAY;
 use super::dispatch::supported_init_flags;
 use super::ops::encode_dirents;
 use super::util::{
@@ -244,20 +244,20 @@ fn mount_config_normalization_keeps_worker_and_background_limits_nonzero() {
         change_feed_stream_path: None,
         change_feed_cursor_template: None,
         change_feed_scope: None,
-        change_feed_poll_interval: Duration::ZERO,
+        change_feed_reconnect_delay: Duration::ZERO,
         change_feed_backpressure_limit: 0,
         allow_other: false,
         debug: false,
     };
 
-    normalize_config(&mut config);
+    normalize_config(&mut config).expect("normalize config");
 
     assert_eq!(config.lookup_timeout, Duration::from_secs(5));
     assert_eq!(config.interrupt_timeout, Duration::from_secs(1));
     assert_eq!(config.max_workers, DEFAULT_MAX_WORKERS);
     assert_eq!(
-        config.change_feed_poll_interval,
-        DEFAULT_CHANGE_FEED_POLL_INTERVAL
+        config.change_feed_reconnect_delay,
+        DEFAULT_CHANGE_FEED_RECONNECT_DELAY
     );
     assert_eq!(
         config.change_feed_backpressure_limit,
@@ -267,6 +267,14 @@ fn mount_config_normalization_keeps_worker_and_background_limits_nonzero() {
     assert_eq!(
         config.congestion_threshold,
         default_congestion_threshold(DEFAULT_MAX_BACKGROUND)
+    );
+
+    config.change_feed_path = Some("/events/namespace/recent".to_string());
+    assert_eq!(
+        normalize_config(&mut config)
+            .expect_err("change feed without blocking stream must fail")
+            .errno,
+        libc::EINVAL
     );
 }
 

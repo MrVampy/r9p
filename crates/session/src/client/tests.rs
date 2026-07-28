@@ -12,7 +12,7 @@ use r9p::{
 use std::{
     env, fs,
     io::{self, Read, Write},
-    net::TcpListener,
+    net::{Shutdown, TcpListener, TcpStream},
     os::unix::net::UnixListener,
     path::{Path, PathBuf},
     process,
@@ -228,6 +228,61 @@ fn ordinary_namespace_operations_cross_referrals_transparently() {
     let stat = client
         .stat_path_timeout("/sources/x/value", Duration::from_secs(1))
         .expect("bounded path stat should reuse the direct service");
+    assert_eq!(stat.name, b"value");
+    client.shutdown().expect("namespace should shut down");
+
+    drop(client);
+    root.join().expect("root server should not panic");
+    service.join().expect("service server should not panic");
+}
+
+#[test]
+fn read_only_path_recovers_a_restarted_referral_session() {
+    let service_listener = TcpListener::bind("127.0.0.1:0").expect("service listener");
+    let service_address = service_listener.local_addr().expect("service address");
+    let service = thread::spawn(move || {
+        let (first_stream, _) = service_listener.accept().expect("first service accept");
+        let shutdown_stream = first_stream
+            .try_clone()
+            .expect("clone first service stream");
+        let _ = handle_configured_connection(
+            first_stream,
+            ClosingStatTree {
+                shutdown_stream: Some(shutdown_stream),
+            },
+            ServerConfig::default(),
+        );
+
+        let (second_stream, _) = service_listener.accept().expect("second service accept");
+        handle_configured_connection(second_stream, ValueTree, ServerConfig::default())
+            .expect("replacement service connection");
+    });
+
+    let root_listener = TcpListener::bind("127.0.0.1:0").expect("root listener");
+    let root_address = root_listener.local_addr().expect("root address");
+    let root = thread::spawn(move || {
+        let (stream, _) = root_listener.accept().expect("root accept");
+        handle_configured_connection(
+            stream,
+            ReferralRoot {
+                endpoint: service_address.to_string().into_bytes(),
+            },
+            ServerConfig {
+                variant: Variant::R,
+                ..ServerConfig::default()
+            },
+        )
+        .expect("root connection");
+    });
+
+    let client = Client::connect_with_timeout(
+        &connection(root_address.to_string()),
+        Duration::from_secs(1),
+    )
+    .expect("namespace client should connect");
+    let stat = client
+        .stat_path_timeout("/sources/x/value", Duration::from_secs(1))
+        .expect("read-only path operation should reconnect through the same referral");
     assert_eq!(stat.name, b"value");
     client.shutdown().expect("namespace should shut down");
 
@@ -487,6 +542,52 @@ impl FileTree for ValueTree {
             let mut stat = Stat::new("value", qid, 0o444);
             stat.length = u64::try_from(b"direct-service-value".len()).unwrap_or(u64::MAX);
             Ok(stat)
+        } else {
+            Ok(root_stat())
+        }
+    }
+}
+
+struct ClosingStatTree {
+    shutdown_stream: Option<TcpStream>,
+}
+
+impl FileTree for ClosingStatTree {
+    fn attach(&mut self, _fid: Fid, _uname: &[u8], _aname: &[u8]) -> P9Result<Qid> {
+        Ok(ROOT_QID)
+    }
+
+    fn walk(
+        &mut self,
+        _fid: Fid,
+        _newfid: Fid,
+        start: Qid,
+        names: &[Vec<u8>],
+    ) -> P9Result<Vec<Qid>> {
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+        if start == ROOT_QID && names.len() == 1 && names[0].as_slice() == b"value" {
+            Ok(vec![Qid::file(2)])
+        } else {
+            Err(P9Error::from("file does not exist"))
+        }
+    }
+
+    fn open(&mut self, _fid: Fid, qid: Qid, _mode: u8) -> P9Result<OpenFile> {
+        Ok(OpenFile { qid, iounit: 0 })
+    }
+
+    fn read(&mut self, _fid: Fid, _qid: Qid, _offset: u64, _count: u32) -> P9Result<ReadData> {
+        Ok(ReadData::Directory(Vec::new()))
+    }
+
+    fn stat(&mut self, qid: Qid) -> P9Result<Stat> {
+        if qid == Qid::file(2) {
+            if let Some(stream) = self.shutdown_stream.take() {
+                let _ = stream.shutdown(Shutdown::Both);
+            }
+            Ok(Stat::new("value", qid, 0o444))
         } else {
             Ok(root_stat())
         }

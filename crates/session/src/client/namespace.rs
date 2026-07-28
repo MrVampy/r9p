@@ -523,6 +523,7 @@ impl Client {
         match walk_remote(&target) {
             Ok(fid) => Ok((target, fid)),
             Err(error) if self.should_refresh_routes_after(&error) => {
+                self.invalidate_failed_route(&target, &error)?;
                 self.refresh_routes(self.state.connect_timeout)?;
                 let target = self.routed_target(namespace_path, self.state.connect_timeout)?;
                 let fid = walk_remote(&target)?;
@@ -541,6 +542,7 @@ impl Client {
         match walk_remote_timeout(&target, timeout) {
             Ok(fid) => Ok((target, fid)),
             Err(error) if self.should_refresh_routes_after(&error) => {
+                self.invalidate_failed_route(&target, &error)?;
                 self.refresh_routes(timeout)?;
                 let target = self.routed_target(namespace_path, timeout)?;
                 let fid = walk_remote_timeout(&target, timeout)?;
@@ -561,6 +563,95 @@ impl Client {
                     | libc::ECONNRESET
                     | libc::EPIPE
             )
+    }
+
+    fn invalidate_failed_route(&self, target: &RoutedTarget, error: &Error) -> Result<()> {
+        let Some(route_mount) = target.route_mount.as_deref() else {
+            return Ok(());
+        };
+        if !route_transport_failed(error) {
+            return Ok(());
+        }
+        self.invalidate_route_client(route_mount, &target.client)
+    }
+
+    pub(super) fn route_failure_context(
+        &self,
+        fid: Fid,
+    ) -> Result<(DirectClient, Option<Vec<u8>>)> {
+        let binding = self.binding(fid)?;
+        Ok((binding.client, binding.route_mount))
+    }
+
+    pub(super) fn recover_read_only_route(
+        &self,
+        failed_fid: Fid,
+        failed_client: &DirectClient,
+        route_mount: Option<&[u8]>,
+        error: &Error,
+        timeout: Duration,
+    ) -> Result<bool> {
+        let Some(route_mount) = route_mount else {
+            return Ok(false);
+        };
+        if !route_transport_failed(error) {
+            return Ok(false);
+        }
+        self.discard_binding(failed_fid)?;
+        self.invalidate_route_client(route_mount, failed_client)?;
+        self.refresh_routes(timeout)?;
+        Ok(true)
+    }
+
+    fn discard_binding(&self, fid: Fid) -> Result<()> {
+        self.state
+            .fids
+            .lock()
+            .map_err(|_| Error::new(libc::EIO, "namespace fid lock poisoned"))?
+            .bindings
+            .remove(&fid);
+        Ok(())
+    }
+
+    fn invalidate_route_client(
+        &self,
+        route_mount: &[u8],
+        failed_client: &DirectClient,
+    ) -> Result<()> {
+        let route = self
+            .state
+            .routes
+            .lock()
+            .map_err(|_| Error::new(libc::EIO, "namespace route lock poisoned"))?
+            .iter()
+            .find(|route| route.referral.mount_path == route_mount)
+            .cloned();
+        let Some(route) = route else {
+            return Ok(());
+        };
+        let removed = {
+            let mut current = route
+                .client
+                .lock()
+                .map_err(|_| Error::new(libc::EIO, "namespace route client lock poisoned"))?;
+            if current
+                .as_ref()
+                .is_some_and(|client| client.same_connection(failed_client))
+            {
+                current.take();
+                true
+            } else {
+                false
+            }
+        };
+        if removed {
+            self.state
+                .connected_routes
+                .lock()
+                .map_err(|_| Error::new(libc::EIO, "namespace connection lock poisoned"))?
+                .retain(|client| !client.same_connection(failed_client));
+        }
+        Ok(())
     }
 
     fn routed_target(&self, namespace_path: &[Vec<u8>], timeout: Duration) -> Result<RoutedTarget> {
@@ -729,6 +820,13 @@ fn same_route_identity(left: &NamespaceReferral, right: &NamespaceReferral) -> b
         && left.exported_root == right.exported_root
         && left.authority_boundary == right.authority_boundary
         && left.generation == right.generation
+}
+
+fn route_transport_failed(error: &Error) -> bool {
+    matches!(
+        error.errno,
+        libc::ENOTCONN | libc::ECONNABORTED | libc::ECONNRESET | libc::EPIPE
+    )
 }
 
 fn walk_remote(target: &RoutedTarget) -> Result<Fid> {

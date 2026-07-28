@@ -11,9 +11,9 @@ const PATH_READ_CHUNK: u32 = 64 * 1024;
 
 impl Client {
     pub fn stat_path_timeout(&self, path: &str, timeout: Duration) -> Result<Stat> {
-        let fid = self.walk_path_timeout(path, timeout)?;
-        let result = self.stat_timeout(fid, timeout);
-        finish_fid_timeout(self, fid, timeout, result)
+        read_only_path_timeout(self, path, timeout, |client, fid| {
+            client.stat_timeout(fid, timeout)
+        })
     }
 
     pub fn stat_path(&self, path: &str) -> Result<Stat> {
@@ -52,10 +52,10 @@ impl Client {
         timeout: Duration,
     ) -> Result<Vec<u8>> {
         validate_response_bound(max_response_bytes)?;
-        let mut fid = self.open_path_timeout(path, OREAD, timeout)?;
-        let response = fid.read_full_timeout(0, max_response_bytes, timeout)?;
-        fid.close()?;
-        Ok(response)
+        read_only_path_timeout(self, path, timeout, |client, fid| {
+            client.open_timeout(fid, OREAD, timeout)?;
+            client.read_full_timeout(fid, 0, max_response_bytes, timeout)
+        })
     }
 
     pub fn read_path_range(&self, path: &str, offset: u64, count: u32) -> Result<Vec<u8>> {
@@ -164,6 +164,36 @@ impl Client {
     pub fn remove_path(&self, path: &str) -> Result<()> {
         let fid = self.walk_path(path)?;
         self.remove(fid)
+    }
+}
+
+fn read_only_path_timeout<T>(
+    client: &Client,
+    path: &str,
+    timeout: Duration,
+    operation: impl Fn(&Client, r9p::Fid) -> Result<T>,
+) -> Result<T> {
+    let mut retry_available = true;
+    loop {
+        let fid = client.walk_path_timeout(path, timeout)?;
+        let (route_client, route_mount) = client.route_failure_context(fid)?;
+        let result = operation(client, fid);
+        let result = finish_fid_timeout(client, fid, timeout, result);
+        match result {
+            Err(error)
+                if retry_available
+                    && client.recover_read_only_route(
+                        fid,
+                        &route_client,
+                        route_mount.as_deref(),
+                        &error,
+                        timeout,
+                    )? =>
+            {
+                retry_available = false;
+            }
+            result => return result,
+        }
     }
 }
 

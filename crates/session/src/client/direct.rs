@@ -11,6 +11,7 @@ use r9p::{
     stat::Stat,
 };
 use std::{
+    sync::Arc,
     thread,
     time::{Duration, Instant},
 };
@@ -20,6 +21,7 @@ const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(200);
 #[derive(Clone)]
 pub(super) struct DirectClient {
     inner: MultiplexedClient<crate::transport::ClientStream>,
+    identity: Arc<()>,
 }
 
 impl DirectClient {
@@ -59,7 +61,14 @@ impl DirectClient {
         let inner = inner.with_call_observer(move |tag| -> Box<dyn Send> {
             Box::new(tracked_requests.track_current(tag, tracked_inner.clone()))
         });
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            identity: Arc::new(()),
+        })
+    }
+
+    pub fn same_connection(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.identity, &other.identity)
     }
 
     pub fn root_fid(&self) -> Fid {

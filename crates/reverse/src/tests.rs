@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
     sync::atomic::AtomicBool,
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use r9p::{
@@ -465,39 +465,34 @@ fn wait_ready(
     broker: &ReverseBroker,
     export: &FilesystemExport,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while Instant::now() < deadline {
-        if broker.is_ready() && export.connected_streams() > 0 {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(10));
+    if broker.wait_until_ready(Duration::from_secs(3))
+        && export.wait_for_connected(Duration::from_secs(3))
+    {
+        Ok(())
+    } else {
+        Err("reverse export did not become ready".into())
     }
-    Err("reverse export did not become ready".into())
 }
 
 fn wait_generic_ready(
     broker: &ReverseBroker,
     export: &ReverseExport,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while Instant::now() < deadline {
-        if broker.is_ready() && export.connected_streams() > 0 {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(10));
+    if broker.wait_until_ready(Duration::from_secs(3))
+        && export.wait_for_connected(Duration::from_secs(3))
+    {
+        Ok(())
+    } else {
+        Err("generic reverse export did not become ready".into())
     }
-    Err("generic reverse export did not become ready".into())
 }
 
 fn wait_for_waiting_stream(broker: &ReverseBroker) -> Result<(), Box<dyn std::error::Error>> {
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while Instant::now() < deadline {
-        if broker.is_ready() {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(10));
+    if broker.wait_until_ready(Duration::from_secs(3)) {
+        Ok(())
+    } else {
+        Err("reverse export did not replenish its pool".into())
     }
-    Err("reverse export did not replenish its pool".into())
 }
 
 fn address(ip: Ipv4Addr, port: u16) -> SocketAddr {

@@ -5,10 +5,10 @@ use std::{
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError},
-        Arc,
+        Arc, Condvar, Mutex, MutexGuard,
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[cfg(unix)]
@@ -97,6 +97,8 @@ pub struct BrokerStatus {
 
 #[derive(Default)]
 struct BrokerCounters {
+    readiness: Mutex<()>,
+    changed: Condvar,
     waiting_streams: AtomicUsize,
     active_handshakes: AtomicUsize,
     active_bridges: AtomicUsize,
@@ -112,12 +114,6 @@ impl ReverseBroker {
         let reverse_listener = TcpListener::bind(config.reverse_bind)
             .map_err(|error| io_error("bind reverse listener", error))?;
         let proxy_listener = ProxyListener::bind(&config.proxy_bind)?;
-        reverse_listener
-            .set_nonblocking(true)
-            .map_err(|error| io_error("configure reverse listener", error))?;
-        proxy_listener
-            .set_nonblocking(true)
-            .map_err(|error| io_error("configure proxy listener", error))?;
         let reverse_endpoint = reverse_listener
             .local_addr()
             .map_err(|error| io_error("inspect reverse listener", error))?;
@@ -167,6 +163,10 @@ impl ReverseBroker {
         self.waiting_streams() > 0
     }
 
+    pub fn wait_until_ready(&self, timeout: Duration) -> bool {
+        self.counters.wait_until_ready(&self.shutdown, timeout)
+    }
+
     pub fn status(&self) -> BrokerStatus {
         BrokerStatus {
             waiting_streams: self.counters.waiting_streams.load(Ordering::Acquire),
@@ -191,7 +191,7 @@ impl ReverseBroker {
 
 impl Drop for ReverseBroker {
     fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Release);
+        self.counters.begin_shutdown(&self.shutdown);
         let _ = TcpStream::connect(self.reverse_endpoint);
         let _ = ProxyListener::wake(&self.proxy_endpoint);
         for thread in self.threads.drain(..) {
@@ -305,10 +305,7 @@ fn spawn_reverse_acceptor(
             while !shutdown.load(Ordering::Acquire) {
                 let stream = match listener.accept() {
                     Ok((stream, _)) => stream,
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(25));
-                        continue;
-                    }
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                     Err(_) => break,
                 };
                 if shutdown.load(Ordering::Acquire) {
@@ -354,16 +351,12 @@ fn spawn_reverse_acceptor(
                             let _ = session.stream.shutdown();
                             return;
                         }
-                        handshake_counters
-                            .waiting_streams
-                            .fetch_add(1, Ordering::AcqRel);
+                        handshake_counters.waiting_stream_added();
                         match sender.try_send(session.stream) {
                             Ok(()) => {}
                             Err(TrySendError::Full(stream))
                             | Err(TrySendError::Disconnected(stream)) => {
-                                handshake_counters
-                                    .waiting_streams
-                                    .fetch_sub(1, Ordering::AcqRel);
+                                handshake_counters.waiting_stream_removed();
                                 let _ = stream.shutdown();
                             }
                         }
@@ -393,10 +386,7 @@ fn spawn_proxy_acceptor(
             while !shutdown.load(Ordering::Acquire) {
                 let local = match listener.accept() {
                     Ok(stream) => stream,
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(25));
-                        continue;
-                    }
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                     Err(_) => break,
                 };
                 if shutdown.load(Ordering::Acquire) {
@@ -467,7 +457,7 @@ fn receive_live_stream(
             Ok(stream) => stream,
             Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => return None,
         };
-        counters.waiting_streams.fetch_sub(1, Ordering::AcqRel);
+        counters.waiting_stream_removed();
         match stream.peer_closed(Duration::from_millis(2)) {
             Ok(true) | Err(_) => {
                 let _ = stream.shutdown();
@@ -476,6 +466,60 @@ fn receive_live_stream(
         }
     }
     None
+}
+
+impl BrokerCounters {
+    fn wait_until_ready(&self, shutdown: &AtomicBool, timeout: Duration) -> bool {
+        let deadline = Instant::now().checked_add(timeout);
+        let mut gate = self.lock_readiness();
+        loop {
+            if self.waiting_streams.load(Ordering::Acquire) > 0 {
+                return true;
+            }
+            if shutdown.load(Ordering::Acquire) {
+                return false;
+            }
+            let Some(deadline) = deadline else {
+                return false;
+            };
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let (next, wait) = self
+                .changed
+                .wait_timeout(gate, remaining)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            gate = next;
+            if wait.timed_out() && self.waiting_streams.load(Ordering::Acquire) == 0 {
+                return false;
+            }
+        }
+    }
+
+    fn waiting_stream_added(&self) {
+        let _gate = self.lock_readiness();
+        self.waiting_streams.fetch_add(1, Ordering::AcqRel);
+        self.changed.notify_all();
+    }
+
+    fn waiting_stream_removed(&self) {
+        let _gate = self.lock_readiness();
+        self.waiting_streams.fetch_sub(1, Ordering::AcqRel);
+        self.changed.notify_all();
+    }
+
+    fn begin_shutdown(&self, shutdown: &AtomicBool) {
+        let _gate = self.lock_readiness();
+        shutdown.store(true, Ordering::Release);
+        self.changed.notify_all();
+    }
+
+    fn lock_readiness(&self) -> MutexGuard<'_, ()> {
+        self.readiness
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 }
 
 enum CounterKind {
@@ -577,14 +621,6 @@ impl ProxyListener {
     #[cfg(not(unix))]
     fn bind_unix(_path: &Path) -> Result<Self> {
         Err(Error::from("Unix proxy endpoints are not supported"))
-    }
-
-    pub(crate) fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
-        match self {
-            Self::Tcp(listener) => listener.set_nonblocking(nonblocking),
-            #[cfg(unix)]
-            Self::Unix { listener, .. } => listener.set_nonblocking(nonblocking),
-        }
     }
 
     pub(crate) fn local_endpoint(&self) -> Result<ProxyEndpoint> {

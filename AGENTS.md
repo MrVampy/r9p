@@ -27,6 +27,10 @@
 - `r9p` must remain backend-neutral. No Racme, coordinator, FUSE, editor, plumber, or host-filesystem semantics belong in the core crate.
 - `r9p` must remain runtime-neutral at the core. No socket ownership, tokio requirement, thread policy, BEAM port loop, TLS policy, or FUSE lifecycle belongs in the reusable protocol core.
 - Runtime adapters and convenience facades are allowed only when they are clearly layered above the protocol core.
+- Runtime adapters are event-driven. Block on descriptor readiness, channels,
+  condition variables, or explicit protocol notifications. Retry deadlines and
+  bounded liveness timeouts are valid semantics; periodic sleeps used to
+  discover work are not.
 - Acme-specific behavior belongs in Racme's Acme adapter, not in `r9p`.
 - FUSE/POSIX translation belongs in `crates/fuse`, not in the reusable
   `crates/core` protocol crate.

@@ -3,10 +3,10 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc, Condvar, Mutex, MutexGuard,
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use fs::{LocalTree, LocalTreeConfig};
@@ -66,10 +66,17 @@ pub struct ReverseExport {
 struct ExportState {
     shutdown: Arc<AtomicBool>,
     connected_streams: Arc<AtomicUsize>,
+    lifecycle: Arc<ExportLifecycle>,
     connection_failures: Arc<AtomicU64>,
     authentication_failures: Arc<AtomicU64>,
     completed_sessions: Arc<AtomicU64>,
     active_streams: Arc<Mutex<Vec<Option<r9p_auth::SecureStream>>>>,
+}
+
+#[derive(Default)]
+struct ExportLifecycle {
+    gate: Mutex<()>,
+    changed: Condvar,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -115,6 +122,10 @@ impl FilesystemExport {
 
     pub fn connected_streams(&self) -> usize {
         self.inner.connected_streams()
+    }
+
+    pub fn wait_for_connected(&self, timeout: Duration) -> bool {
+        self.inner.wait_for_connected(timeout)
     }
 
     pub fn status(&self) -> ReverseExportStatus {
@@ -189,6 +200,7 @@ impl ReverseExport {
         let state = ExportState {
             shutdown: Arc::new(AtomicBool::new(false)),
             connected_streams: Arc::new(AtomicUsize::new(0)),
+            lifecycle: Arc::new(ExportLifecycle::default()),
             connection_failures: Arc::new(AtomicU64::new(0)),
             authentication_failures: Arc::new(AtomicU64::new(0)),
             completed_sessions: Arc::new(AtomicU64::new(0)),
@@ -218,6 +230,10 @@ impl ReverseExport {
         self.state.connected_streams.load(Ordering::Acquire)
     }
 
+    pub fn wait_for_connected(&self, timeout: Duration) -> bool {
+        self.state.wait_for_connected(timeout)
+    }
+
     pub fn status(&self) -> ReverseExportStatus {
         ReverseExportStatus {
             connected_streams: self.state.connected_streams.load(Ordering::Acquire),
@@ -230,13 +246,11 @@ impl ReverseExport {
 
 impl Drop for ReverseExport {
     fn drop(&mut self) {
+        self.state.begin_shutdown();
         if let Ok(streams) = self.state.active_streams.lock() {
-            self.state.shutdown.store(true, Ordering::Release);
             for stream in streams.iter().flatten() {
                 let _ = stream.shutdown();
             }
-        } else {
-            self.state.shutdown.store(true, Ordering::Release);
         }
         for thread in self.threads.drain(..) {
             let _ = thread.join();
@@ -285,10 +299,7 @@ fn export_loop<F>(
                 Ok(stream) => stream,
                 Err(_) => {
                     state.connection_failures.fetch_add(1, Ordering::AcqRel);
-                    sleep_until_retry(
-                        &state.shutdown,
-                        retry_delay(&config, worker_index, failed_attempts),
-                    );
+                    state.wait_before_retry(retry_delay(&config, worker_index, failed_attempts));
                     failed_attempts = failed_attempts.saturating_add(1);
                     continue;
                 }
@@ -302,10 +313,7 @@ fn export_loop<F>(
             Ok(stream) => stream,
             Err(_) => {
                 state.authentication_failures.fetch_add(1, Ordering::AcqRel);
-                sleep_until_retry(
-                    &state.shutdown,
-                    retry_delay(&config, worker_index, failed_attempts),
-                );
+                state.wait_before_retry(retry_delay(&config, worker_index, failed_attempts));
                 failed_attempts = failed_attempts.saturating_add(1);
                 continue;
             }
@@ -328,16 +336,14 @@ fn export_loop<F>(
             let _ = stream.shutdown();
             return;
         }
-        state.connected_streams.fetch_add(1, Ordering::AcqRel);
-        if receive_session_claim(&mut stream).is_ok()
-            && !state.shutdown.load(Ordering::Acquire)
-        {
+        state.stream_connected();
+        if receive_session_claim(&mut stream).is_ok() && !state.shutdown.load(Ordering::Acquire) {
             let _ = serve(stream, config.server.clone());
         }
         if let Ok(mut streams) = state.active_streams.lock() {
             streams[worker_index] = None;
         }
-        state.connected_streams.fetch_sub(1, Ordering::AcqRel);
+        state.stream_disconnected();
         state.completed_sessions.fetch_add(1, Ordering::AcqRel);
     }
 }
@@ -362,12 +368,70 @@ fn retry_delay(
     base.saturating_add(phase).min(config.reconnect_max_delay)
 }
 
-fn sleep_until_retry(shutdown: &AtomicBool, duration: Duration) {
-    let quantum = Duration::from_millis(25);
-    let mut remaining = duration;
-    while !shutdown.load(Ordering::Acquire) && !remaining.is_zero() {
-        let delay = remaining.min(quantum);
-        thread::sleep(delay);
-        remaining = remaining.saturating_sub(delay);
+impl ExportState {
+    fn wait_for_connected(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now().checked_add(timeout);
+        let mut gate = self.lock_lifecycle();
+        loop {
+            if self.connected_streams.load(Ordering::Acquire) > 0 {
+                return true;
+            }
+            if self.shutdown.load(Ordering::Acquire) {
+                return false;
+            }
+            let Some(deadline) = deadline else {
+                return false;
+            };
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let (next, wait) = self
+                .lifecycle
+                .changed
+                .wait_timeout(gate, remaining)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            gate = next;
+            if wait.timed_out() && self.connected_streams.load(Ordering::Acquire) == 0 {
+                return false;
+            }
+        }
+    }
+
+    fn wait_before_retry(&self, duration: Duration) {
+        if duration.is_zero() || self.shutdown.load(Ordering::Acquire) {
+            return;
+        }
+        let gate = self.lock_lifecycle();
+        let _wait = self
+            .lifecycle
+            .changed
+            .wait_timeout_while(gate, duration, |_| !self.shutdown.load(Ordering::Acquire))
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    }
+
+    fn stream_connected(&self) {
+        let _gate = self.lock_lifecycle();
+        self.connected_streams.fetch_add(1, Ordering::AcqRel);
+        self.lifecycle.changed.notify_all();
+    }
+
+    fn stream_disconnected(&self) {
+        let _gate = self.lock_lifecycle();
+        self.connected_streams.fetch_sub(1, Ordering::AcqRel);
+        self.lifecycle.changed.notify_all();
+    }
+
+    fn begin_shutdown(&self) {
+        let _gate = self.lock_lifecycle();
+        self.shutdown.store(true, Ordering::Release);
+        self.lifecycle.changed.notify_all();
+    }
+
+    fn lock_lifecycle(&self) -> MutexGuard<'_, ()> {
+        self.lifecycle
+            .gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }

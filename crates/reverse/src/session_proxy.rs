@@ -59,9 +59,6 @@ impl SessionProxy {
     pub fn start(config: SessionProxyConfig) -> Result<Self> {
         validate_config(&config)?;
         let listener = ProxyListener::bind(&config.bind)?;
-        listener
-            .set_nonblocking(true)
-            .map_err(|error| io_error("configure session proxy listener", error))?;
         let endpoint = listener.local_endpoint()?;
         let counters = Arc::new(SessionProxyCounters::default());
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -121,10 +118,7 @@ fn validate_config(config: &SessionProxyConfig) -> Result<()> {
     if !local_bind
         || config.principal.is_empty()
         || config.principal.len() > 255
-        || config
-            .principal
-            .bytes()
-            .any(|byte| byte.is_ascii_control())
+        || config.principal.bytes().any(|byte| byte.is_ascii_control())
         || config.max_sessions == 0
         || config.max_sessions > 256
         || config.connect_timeout.is_zero()
@@ -149,10 +143,7 @@ fn spawn_acceptor(
             while !shutdown.load(Ordering::Acquire) {
                 let local = match listener.accept() {
                     Ok(stream) => stream,
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(25));
-                        continue;
-                    }
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                     Err(_) => break,
                 };
                 if shutdown.load(Ordering::Acquire) {
@@ -189,25 +180,17 @@ fn spawn_acceptor(
         .map_err(|error| Error::from(format!("spawn session proxy acceptor: {error}")))
 }
 
-fn proxy_session(
-    local: LocalStream,
-    config: &SessionProxyConfig,
-    counters: &SessionProxyCounters,
-) {
+fn proxy_session(local: LocalStream, config: &SessionProxyConfig, counters: &SessionProxyCounters) {
     let upstream = match TcpStream::connect_timeout(&config.upstream, config.connect_timeout) {
         Ok(stream) => stream,
         Err(_) => {
-            counters
-                .connection_failures
-                .fetch_add(1, Ordering::AcqRel);
+            counters.connection_failures.fetch_add(1, Ordering::AcqRel);
             let _ = local.shutdown();
             return;
         }
     };
     if configure_transport_socket(&upstream).is_err() {
-        counters
-            .connection_failures
-            .fetch_add(1, Ordering::AcqRel);
+        counters.connection_failures.fetch_add(1, Ordering::AcqRel);
         let _ = upstream.shutdown(Shutdown::Both);
         let _ = local.shutdown();
         return;
@@ -249,12 +232,6 @@ impl SessionSlot {
 
 impl Drop for SessionSlot {
     fn drop(&mut self) {
-        self.counters
-            .active_sessions
-            .fetch_sub(1, Ordering::AcqRel);
+        self.counters.active_sessions.fetch_sub(1, Ordering::AcqRel);
     }
-}
-
-fn io_error(context: &str, error: io::Error) -> Error {
-    Error::from(format!("{context}: {error}"))
 }

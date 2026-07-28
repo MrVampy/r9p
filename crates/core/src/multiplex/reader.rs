@@ -14,25 +14,53 @@ use std::{
 use super::util::{fail_all, lock, response_tag};
 
 pub(super) type ReplyResult = std::result::Result<ClientResponse, Error>;
-pub(super) type Waiters = BTreeMap<Tag, Sender<ReplyResult>>;
+
+#[derive(Default)]
+pub(super) struct ResponseState {
+    waiters: BTreeMap<Tag, Sender<ReplyResult>>,
+    terminal_error: Option<Error>,
+}
+
+impl ResponseState {
+    pub(super) fn register(&mut self, tag: Tag, sender: Sender<ReplyResult>) -> Result<()> {
+        if let Some(error) = &self.terminal_error {
+            return Err(error.clone());
+        }
+        if self.waiters.insert(tag, sender).is_some() {
+            return Err(Error::from(format!("duplicate waiter for tag {tag}")));
+        }
+        Ok(())
+    }
+
+    pub(super) fn remove(&mut self, tag: Tag) -> Option<Sender<ReplyResult>> {
+        self.waiters.remove(&tag)
+    }
+
+    pub(super) fn terminate(&mut self, error: Error) -> Vec<Sender<ReplyResult>> {
+        if self.terminal_error.is_none() {
+            self.terminal_error = Some(error);
+        }
+        std::mem::take(&mut self.waiters).into_values().collect()
+    }
+}
 
 pub(super) fn reader_loop<S: super::MultiplexTransport>(
     mut reader: S,
     protocol: Arc<Mutex<ProtocolClient>>,
-    waiters: Arc<Mutex<Waiters>>,
+    responses: Arc<Mutex<ResponseState>>,
 ) {
     loop {
         let max_frame_size = match lock(&protocol, "lock 9P protocol client") {
             Ok(protocol) => protocol.msize(),
             Err(error) => {
-                fail_all(&waiters, error);
+                fail_all(&responses, error);
                 return;
             }
         };
         let response = match read_response(&mut reader, max_frame_size) {
             Ok(response) => response,
             Err(error) => {
-                fail_all(&waiters, error);
+                fail_all(&responses, error);
                 return;
             }
         };
@@ -42,15 +70,15 @@ pub(super) fn reader_loop<S: super::MultiplexTransport>(
             Ok(response) => response,
             Err(error) if error.message() == b"9P client state: unknown response tag" => continue,
             Err(error) => {
-                fail_all(&waiters, error);
+                fail_all(&responses, error);
                 return;
             }
         };
         let tag = response_tag(&response);
-        let sender = match lock(&waiters, "lock 9P waiter table") {
-            Ok(mut waiters) => waiters.remove(&tag),
+        let sender = match lock(&responses, "lock 9P response state") {
+            Ok(mut responses) => responses.remove(tag),
             Err(error) => {
-                fail_all(&waiters, error);
+                fail_all(&responses, error);
                 return;
             }
         };

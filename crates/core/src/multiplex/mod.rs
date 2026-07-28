@@ -228,6 +228,47 @@ mod tests {
     }
 
     #[test]
+    fn peer_eof_is_terminal_for_later_calls() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .map_err(|error| io_error("bind test listener", error))?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| io_error("read listener address", error))?;
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener
+                .accept()
+                .map_err(|error| io_error("accept test connection", error))?;
+            handshake(&mut stream)?;
+            match read_tmessage(&mut stream)? {
+                TMessage::Read { .. } => Ok(()),
+                other => Err(Error::from(format!(
+                    "expected pending Tread, got {other:?}"
+                ))),
+            }
+        });
+        let client = MultiplexedClient::connect(
+            TcpStream::connect(address).map_err(|error| io_error("connect test client", error))?,
+            "glenda",
+            "",
+            8192,
+        )?;
+        let pending = client.submit(|protocol| protocol.read(client.root_fid(), 0, 100))?;
+        let first_error = pending.wait().expect_err("pending call survived peer EOF");
+        assert!(String::from_utf8_lossy(first_error.message()).contains("transport closed"));
+
+        let later_error = client
+            .submit(|protocol| protocol.stat(client.root_fid()))
+            .err()
+            .ok_or("dead transport admitted a later call")?;
+        assert_eq!(later_error, first_error);
+
+        server
+            .join()
+            .map_err(|_| Error::from("peer EOF server panicked"))??;
+        Ok(())
+    }
+
+    #[test]
     fn flush_releases_original_waiter() -> Result<()> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .map_err(|error| io_error("bind test listener", error))?;

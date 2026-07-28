@@ -14,7 +14,6 @@ use crate::{
     stat::Stat,
 };
 use std::{
-    collections::BTreeMap,
     net::TcpStream,
     sync::{
         mpsc::{self, Receiver, RecvTimeoutError},
@@ -31,8 +30,8 @@ type CallObserver = dyn Fn(Tag) -> Box<dyn Send> + Send + Sync + 'static;
 type CallObserverGuard = Box<dyn Send>;
 
 use super::{
-    reader::{call_message_sync, call_op_sync, reader_loop, ReplyResult, Waiters},
-    util::lock,
+    reader::{call_message_sync, call_op_sync, reader_loop, ReplyResult, ResponseState},
+    util::{fail_all, lock},
     MultiplexTransport,
 };
 
@@ -53,7 +52,7 @@ impl<S: MultiplexTransport> Clone for MultiplexedClient<S> {
 struct MultiplexedInner<S: MultiplexTransport> {
     protocol: Arc<Mutex<ProtocolClient>>,
     variant: codec::Variant,
-    waiters: Arc<Mutex<Waiters>>,
+    responses: Arc<Mutex<ResponseState>>,
     writer: Mutex<S>,
     reader: Mutex<Option<JoinHandle<()>>>,
     root_fid: Fid,
@@ -152,16 +151,16 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
         };
 
         let protocol = Arc::new(Mutex::new(protocol));
-        let waiters = Arc::new(Mutex::new(BTreeMap::new()));
+        let responses = Arc::new(Mutex::new(ResponseState::default()));
         let reader_protocol = Arc::clone(&protocol);
-        let reader_waiters = Arc::clone(&waiters);
-        let handle = thread::spawn(move || reader_loop(reader, reader_protocol, reader_waiters));
+        let reader_responses = Arc::clone(&responses);
+        let handle = thread::spawn(move || reader_loop(reader, reader_protocol, reader_responses));
 
         Ok(Self {
             inner: Arc::new(MultiplexedInner {
                 protocol,
                 variant: negotiated_variant,
-                waiters,
+                responses,
                 writer: Mutex::new(stream),
                 reader: Mutex::new(Some(handle)),
                 root_fid,
@@ -216,9 +215,16 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
     /// Shuts down this client's shared transport, interrupting every pending
     /// call on the connection.
     pub fn shutdown(&self) -> Result<()> {
-        lock(&self.inner.writer, "lock 9P writer")?
-            .shutdown_transport()
-            .map_err(|error| io_error("shutdown 9P transport", error))
+        let result = lock(&self.inner.writer, "lock 9P writer").and_then(|writer| {
+            writer
+                .shutdown_transport()
+                .map_err(|error| io_error("shutdown 9P transport", error))
+        });
+        fail_all(
+            &self.inner.responses,
+            Error::from("9P transport closed by client"),
+        );
+        result
     }
 
     pub fn submit_op(&self, op: Op) -> Result<PendingCall> {
@@ -251,19 +257,21 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
             }
         };
         let (sender, receiver) = mpsc::channel();
+        if let Err(error) = lock(&self.inner.responses, "lock 9P response state")
+            .and_then(|mut responses| responses.register(tag, sender))
         {
-            let mut waiters = lock(&self.inner.waiters, "lock 9P waiter table")?;
-            if waiters.insert(tag, sender).is_some() {
-                return Err(Error::from(format!("duplicate waiter for tag {tag}")));
-            }
+            let _ = lock(&self.inner.protocol, "lock 9P protocol client")
+                .map(|mut protocol| protocol.abandon(tag));
+            return Err(error);
         }
 
-        let write_result = lock(&self.inner.writer, "lock 9P writer")?
-            .write_all(&frame)
-            .map_err(|error| io_error("write 9P frame", error));
+        let write_result = lock(&self.inner.writer, "lock 9P writer").and_then(|mut writer| {
+            writer
+                .write_all(&frame)
+                .map_err(|error| io_error("write 9P frame", error))
+        });
         if let Err(error) = write_result {
-            let _ = lock(&self.inner.waiters, "lock 9P waiter table")
-                .map(|mut waiters| waiters.remove(&tag));
+            fail_all(&self.inner.responses, error.clone());
             let _ = lock(&self.inner.protocol, "lock 9P protocol client")
                 .map(|mut protocol| protocol.abandon(tag));
             return Err(error);
@@ -911,9 +919,9 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
     }
 
     fn cancel_waiter(&self, tag: Tag, error: Error) {
-        let sender = lock(&self.inner.waiters, "lock 9P waiter table")
+        let sender = lock(&self.inner.responses, "lock 9P response state")
             .ok()
-            .and_then(|mut waiters| waiters.remove(&tag));
+            .and_then(|mut responses| responses.remove(tag));
         if let Some(sender) = sender {
             let _ = sender.send(Err(error));
         }
@@ -936,6 +944,10 @@ impl<S: MultiplexTransport> Drop for MultiplexedInner<S> {
         if let Ok(writer) = self.writer.lock() {
             let _ = writer.shutdown_transport();
         }
+        fail_all(
+            &self.responses,
+            Error::from("9P transport closed by client"),
+        );
         if let Ok(mut reader) = self.reader.lock() {
             if let Some(handle) = reader.take() {
                 let _ = handle.join();

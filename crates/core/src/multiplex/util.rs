@@ -5,14 +5,15 @@ use crate::{
 };
 use std::sync::{Mutex, MutexGuard};
 
-use super::reader::Waiters;
+use super::reader::ResponseState;
 
-pub(super) fn fail_all(waiters: &Mutex<Waiters>, error: Error) {
-    if let Ok(mut waiters) = waiters.lock() {
-        let pending = std::mem::take(&mut *waiters);
-        for sender in pending.into_values() {
-            let _ = sender.send(Err(error.clone()));
-        }
+pub(super) fn fail_all(responses: &Mutex<ResponseState>, error: Error) {
+    let pending = match responses.lock() {
+        Ok(mut responses) => responses.terminate(error.clone()),
+        Err(poisoned) => poisoned.into_inner().terminate(error.clone()),
+    };
+    for sender in pending {
+        let _ = sender.send(Err(error.clone()));
     }
 }
 

@@ -178,13 +178,14 @@ fn is_transport_message(message: &str) -> bool {
     (message.starts_with("connect ") && message.contains("(os error "))
         || message.contains("9P frame")
         || message.contains("9P reader stopped")
+        || message.contains("9P transport closed")
         || message.contains("9P response timeout")
         || message.contains("clone 9P stream")
         || message.contains("lock 9P")
 }
 
 fn transport_errno(message: &str) -> Option<i32> {
-    if message.contains("9P reader stopped") {
+    if message.contains("9P reader stopped") || message.contains("9P transport closed") {
         return Some(libc::ENOTCONN);
     }
     if message.contains("9P response timeout") {
@@ -239,6 +240,13 @@ mod tests {
         let error = client_error(P9Error::from("9P reader stopped before response"));
         assert_eq!(error.errno, libc::ENOTCONN);
         assert!(error.message().contains("9P reader stopped"));
+    }
+
+    #[test]
+    fn closed_transport_maps_to_transport_errno() {
+        let error = client_error(P9Error::from("9P transport closed before response"));
+        assert_eq!(error.errno, libc::ENOTCONN);
+        assert!(error.message().contains("9P transport closed"));
     }
 
     #[test]

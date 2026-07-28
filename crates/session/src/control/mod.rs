@@ -77,6 +77,7 @@ impl ControlRuntime {
                     cursor_template: config.change_feed_cursor_template.clone(),
                     cache: Some(cache.clone()),
                     event_bus: Some(feed_events.clone()),
+                    wake: None,
                     poll_interval: config.change_feed_poll_interval,
                     lookup_timeout: config.request_timeout,
                     read_timeout: config.request_timeout,

@@ -1,6 +1,6 @@
 use super::{
     feed_poll_path, parse_namespace_change_record, parse_namespace_path, select_feed_records,
-    FeedEvent, FeedEventBus, FeedState,
+    FeedEvent, FeedEventBus, FeedState, FeedWake,
 };
 use crate::{Client, ClientSession, Error, NamespaceCache, Result, StaleReason, OREAD};
 use r9p::fid::Fid;
@@ -20,6 +20,7 @@ pub struct FeedWorkerConfig {
     pub cursor_template: Option<String>,
     pub cache: Option<NamespaceCache>,
     pub event_bus: Option<FeedEventBus>,
+    pub wake: Option<FeedWake>,
     pub poll_interval: Duration,
     pub lookup_timeout: Duration,
     pub read_timeout: Duration,
@@ -76,13 +77,38 @@ fn feed_loop(
     state.set_connecting();
     let mut since_event_id = None;
     while !stop.load(Ordering::SeqCst) {
-        let Ok(client) = client.snapshot() else {
-            state.set_degraded("9P client session unavailable");
-            sleep_interruptible(config.poll_interval, &stop);
-            continue;
+        let attachment = match client.snapshot() {
+            Ok(client) => client,
+            Err(error) => {
+                state.set_degraded(format!(
+                    "9P client session unavailable: {}",
+                    error.message()
+                ));
+                sleep_interruptible(config.poll_interval, &stop);
+                continue;
+            }
         };
         if let Some(stream_path) = config.stream_path.as_deref() {
-            match consume_stream_until_error(&client, &config, stream_path, &state, &stop) {
+            if let Some(event_id) = since_event_id.as_deref() {
+                let catch_up_path = feed_poll_path(
+                    &config.path,
+                    Some(event_id),
+                    config.cursor_template.as_deref(),
+                );
+                match consume_once(&attachment, &config, &catch_up_path, Some(event_id), &state) {
+                    Ok(next_event_id) => {
+                        if next_event_id.is_some() {
+                            since_event_id = next_event_id;
+                        }
+                    }
+                    Err(error) if error.errno == libc::ETIMEDOUT => {}
+                    Err(error) => {
+                        state
+                            .set_degraded(format!("stream catch-up degraded: {}", error.message()));
+                    }
+                }
+            }
+            match consume_stream_until_error(&attachment, &config, stream_path, &state, &stop) {
                 Ok(next_event_id) => {
                     if next_event_id.is_some() {
                         since_event_id = next_event_id;
@@ -92,9 +118,24 @@ fn feed_loop(
                     }
                 }
                 Err(error) => {
+                    since_event_id = state.snapshot().last_event_id.or(since_event_id);
                     state.set_degraded(format!("stream feed degraded: {}", error.message()));
                 }
             }
+            if stop.load(Ordering::SeqCst) {
+                break;
+            }
+            match client.reconnect_after(&attachment) {
+                Ok(_) => {}
+                Err(error) => {
+                    state.set_degraded(format!(
+                        "stream feed reconnect degraded: {}",
+                        error.message()
+                    ));
+                    sleep_interruptible(config.poll_interval, &stop);
+                }
+            }
+            continue;
         }
         let poll_path = feed_poll_path(
             &config.path,
@@ -102,7 +143,7 @@ fn feed_loop(
             config.cursor_template.as_deref(),
         );
         match consume_once(
-            &client,
+            &attachment,
             &config,
             &poll_path,
             since_event_id.as_deref(),
@@ -121,6 +162,9 @@ fn feed_loop(
             }
         }
         sleep_interruptible(config.poll_interval, &stop);
+    }
+    if let Some(wake) = &config.wake {
+        wake.close();
     }
 }
 
@@ -152,6 +196,9 @@ fn consume_stream_until_error(
     stop: &AtomicBool,
 ) -> Result<Option<String>> {
     let fid = open_feed(client, path, config.lookup_timeout)?;
+    if let Some(wake) = &config.wake {
+        wake.notify();
+    }
     let mut last_event_id = None;
     while !stop.load(Ordering::SeqCst) {
         match client.read_timeout(fid, 0, 64 * 1024, config.read_timeout) {
@@ -270,6 +317,9 @@ fn process_feed_data(
 }
 
 fn publish_feed_event(config: &FeedWorkerConfig, event: FeedEvent, state: &FeedState) {
+    if let Some(wake) = &config.wake {
+        wake.notify();
+    }
     let Some(bus) = &config.event_bus else {
         return;
     };

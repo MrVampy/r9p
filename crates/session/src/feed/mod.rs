@@ -3,7 +3,7 @@ mod record;
 mod state;
 mod worker;
 
-pub use event::{FeedEvent, FeedEventBus, FeedEventReceiver};
+pub use event::{FeedEvent, FeedEventBus, FeedEventReceiver, FeedWake};
 pub use record::{
     feed_poll_path, parse_namespace_change_record, parse_namespace_path, scope_matches,
     select_feed_records, NamespaceChange, SelectedFeedRecords,

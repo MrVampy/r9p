@@ -326,15 +326,7 @@ fn connect_should_retry(error: &Error, timeout: Duration, started: Instant) -> b
 }
 
 fn connect_error_is_transient(error: &Error) -> bool {
-    matches!(
-        error.errno,
-        libc::ENOENT
-            | libc::ECONNREFUSED
-            | libc::ECONNRESET
-            | libc::ECONNABORTED
-            | libc::EAGAIN
-            | libc::ETIMEDOUT
-    )
+    error.is_transient_connection_failure()
 }
 
 fn connect_retry_sleep(timeout: Duration, started: Instant) -> Duration {

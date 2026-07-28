@@ -40,6 +40,20 @@ impl Error {
                 || self.message.contains("9P transport closed")
                 || self.message.contains("clone 9P stream")))
     }
+
+    /// Returns true when a later connection attempt may succeed without a
+    /// configuration or authority change.
+    pub fn is_transient_connection_failure(&self) -> bool {
+        matches!(
+            self.errno,
+            libc::ENOENT
+                | libc::ECONNREFUSED
+                | libc::ECONNRESET
+                | libc::ECONNABORTED
+                | libc::EAGAIN
+                | libc::ETIMEDOUT
+        )
+    }
 }
 
 impl fmt::Display for Error {
@@ -219,7 +233,7 @@ fn transport_errno(message: &str) -> Option<i32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{client_error, errno_for_9p_error};
+    use super::{client_error, errno_for_9p_error, Error};
     use r9p::error::Error as P9Error;
 
     #[test]
@@ -284,5 +298,11 @@ mod tests {
             !client_error(P9Error::from("9P response timeout after 1 seconds"))
                 .is_definitive_transport_failure()
         );
+    }
+
+    #[test]
+    fn transient_connection_failure_excludes_admission_denial() {
+        assert!(Error::new(libc::ECONNREFUSED, "refused").is_transient_connection_failure());
+        assert!(!Error::new(libc::EACCES, "denied").is_transient_connection_failure());
     }
 }

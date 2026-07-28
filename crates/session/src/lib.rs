@@ -20,7 +20,7 @@ pub use client::Client;
 pub use client_session::ClientSession;
 pub use connection_config::ConnectionConfig;
 pub use epoch::SessionEpoch;
-pub use error::{errno_for_9p_error, p9_error, Error, Result};
+pub use error::{errno_for_9p_error, p9_error, Error, Result, WriteThenReadError};
 pub use opened_fid::OpenedFid;
 pub use r9p::{ORDWR, OREAD, OTRUNC, OWRITE};
 pub use request::{with_fuse_unique, RequestTracker};

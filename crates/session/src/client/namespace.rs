@@ -1,5 +1,7 @@
 use super::direct::DirectClient;
-use crate::{AuthorityBindings, ConnectionConfig, Error, RequestTracker, Result};
+use crate::{
+    AuthorityBindings, ConnectionConfig, Error, RequestTracker, Result, WriteThenReadError,
+};
 use r9p::{
     fid::Fid, multiplex::DelimitedRead, qid::Qid, referral::NamespaceReferral, stat::Stat, Variant,
     NOFID,
@@ -377,8 +379,8 @@ impl Client {
         data: &[u8],
         read: DelimitedRead,
         timeout: Duration,
-    ) -> Result<(u32, Vec<u8>)> {
-        let binding = self.binding(fid)?;
+    ) -> std::result::Result<(u32, Vec<u8>), WriteThenReadError> {
+        let binding = self.binding(fid).map_err(WriteThenReadError::Rejected)?;
         binding.client.write_then_read_delimited_timeout(
             binding.remote_fid,
             write_offset,

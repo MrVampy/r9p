@@ -1,6 +1,6 @@
 use crate::{
     error::client_error, request::RequestTracker, transport::connect_stream, ConnectionConfig,
-    Error, Result,
+    Error, Result, WriteThenReadError,
 };
 use r9p::{
     codec::Variant,
@@ -255,10 +255,10 @@ impl DirectClient {
         data: &[u8],
         read: DelimitedRead,
         timeout: Duration,
-    ) -> Result<(u32, Vec<u8>)> {
+    ) -> std::result::Result<(u32, Vec<u8>), WriteThenReadError> {
         self.inner
             .write_then_read_delimited_timeout(fid, write_offset, data, read, timeout)
-            .map_err(client_error)
+            .map_err(WriteThenReadError::from)
     }
 
     pub fn clunk_timeout(&self, fid: Fid, timeout: Duration) -> Result<()> {

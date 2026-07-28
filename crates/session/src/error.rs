@@ -3,6 +3,56 @@ use std::{fmt, io};
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug)]
+pub enum WriteThenReadError {
+    Rejected(Error),
+    DeliveryUnknown(Error),
+}
+
+impl WriteThenReadError {
+    pub fn is_delivery_unknown(&self) -> bool {
+        matches!(self, Self::DeliveryUnknown(_))
+    }
+
+    pub fn error(&self) -> &Error {
+        match self {
+            Self::Rejected(error) | Self::DeliveryUnknown(error) => error,
+        }
+    }
+
+    pub fn into_error(self) -> Error {
+        match self {
+            Self::Rejected(error) | Self::DeliveryUnknown(error) => error,
+        }
+    }
+}
+
+impl fmt::Display for WriteThenReadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Rejected(error) => write!(formatter, "9P write rejected: {error}"),
+            Self::DeliveryUnknown(error) => {
+                write!(formatter, "9P write delivery unknown: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for WriteThenReadError {}
+
+impl From<r9p::multiplex::WriteThenReadError> for WriteThenReadError {
+    fn from(error: r9p::multiplex::WriteThenReadError) -> Self {
+        match error {
+            r9p::multiplex::WriteThenReadError::Rejected(error) => {
+                Self::Rejected(client_error(error))
+            }
+            r9p::multiplex::WriteThenReadError::DeliveryUnknown(error) => {
+                Self::DeliveryUnknown(client_error(error))
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct Error {
     pub errno: i32,
     message: String,

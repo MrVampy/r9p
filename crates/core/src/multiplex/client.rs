@@ -14,6 +14,7 @@ use crate::{
     stat::Stat,
 };
 use std::{
+    fmt,
     net::TcpStream,
     sync::{
         mpsc::{self, Receiver, RecvTimeoutError},
@@ -62,6 +63,39 @@ struct MultiplexedInner<S: MultiplexTransport> {
 pub struct PendingCall {
     tag: Tag,
     receiver: Receiver<ReplyResult>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WriteThenReadError {
+    Rejected(Error),
+    DeliveryUnknown(Error),
+}
+
+impl WriteThenReadError {
+    pub fn into_error(self) -> Error {
+        match self {
+            Self::Rejected(error) | Self::DeliveryUnknown(error) => error,
+        }
+    }
+}
+
+impl fmt::Display for WriteThenReadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Rejected(error) => write!(formatter, "9P write rejected: {error}"),
+            Self::DeliveryUnknown(error) => {
+                write!(formatter, "9P write delivery unknown: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for WriteThenReadError {}
+
+impl From<WriteThenReadError> for Error {
+    fn from(error: WriteThenReadError) -> Self {
+        error.into_error()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -589,19 +623,24 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
         read_offset: u64,
         read_count: u32,
         timeout: Duration,
-    ) -> Result<(u32, Vec<u8>)> {
+    ) -> std::result::Result<(u32, Vec<u8>), WriteThenReadError> {
         let max = usize::try_from(self.max_write_payload()).unwrap_or(usize::MAX);
         let mut total = 0_u32;
         while data.len() > max {
             let chunk = &data[..max];
-            let count = self.write_once_timeout(fid, write_offset, chunk, timeout)?;
+            let count = self
+                .write_once_timeout(fid, write_offset, chunk, timeout)
+                .map_err(WriteThenReadError::DeliveryUnknown)?;
             if usize::try_from(count).ok() != Some(chunk.len()) {
-                return Err(Error::from("short 9P write before pipelined read"));
+                return Err(WriteThenReadError::DeliveryUnknown(Error::from(
+                    "short 9P write before pipelined read",
+                )));
             }
-            total = total
-                .checked_add(count)
-                .ok_or_else(|| Error::from("aggregate write count overflow"))?;
-            write_offset = checked_advance_offset(write_offset, u64::from(count))?;
+            total = total.checked_add(count).ok_or_else(|| {
+                WriteThenReadError::DeliveryUnknown(Error::from("aggregate write count overflow"))
+            })?;
+            write_offset = checked_advance_offset(write_offset, u64::from(count))
+                .map_err(WriteThenReadError::DeliveryUnknown)?;
             data = &data[max..];
         }
 
@@ -613,9 +652,9 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
             read_count,
             timeout,
         )?;
-        total = total
-            .checked_add(count)
-            .ok_or_else(|| Error::from("aggregate write count overflow"))?;
+        total = total.checked_add(count).ok_or_else(|| {
+            WriteThenReadError::DeliveryUnknown(Error::from("aggregate write count overflow"))
+        })?;
         Ok((total, response))
     }
 
@@ -628,7 +667,7 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
         data: &[u8],
         read: DelimitedRead,
         timeout: Duration,
-    ) -> Result<(u32, Vec<u8>)> {
+    ) -> std::result::Result<(u32, Vec<u8>), WriteThenReadError> {
         let (written, first) = self.write_then_read_timeout(
             fid,
             write_offset,
@@ -646,7 +685,8 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
                 Some(bytes) => Ok(bytes),
                 None => self.read_timeout(fid, offset, remaining, timeout),
             },
-        )?;
+        )
+        .map_err(WriteThenReadError::DeliveryUnknown)?;
         Ok((written, response))
     }
 
@@ -671,18 +711,20 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
         read_offset: u64,
         read_count: u32,
         timeout: Duration,
-    ) -> Result<(u32, Vec<u8>)> {
+    ) -> std::result::Result<(u32, Vec<u8>), WriteThenReadError> {
         let read_count = codec::clamp_read_count(self.msize(), read_count);
         let (write, read) = {
-            let mut protocol = lock(&self.inner.protocol, "lock 9P protocol client")?;
+            let mut protocol = lock(&self.inner.protocol, "lock 9P protocol client")
+                .map_err(WriteThenReadError::Rejected)?;
             let write = protocol
                 .write(fid, write_offset, data.to_vec())
-                .map_err(protocol_error)?;
+                .map_err(protocol_error)
+                .map_err(WriteThenReadError::Rejected)?;
             let read = match protocol.read(fid, read_offset, read_count) {
                 Ok(read) => read,
                 Err(error) => {
                     protocol.abandon(write.tag);
-                    return Err(protocol_error(error));
+                    return Err(WriteThenReadError::Rejected(protocol_error(error)));
                 }
             };
             (write, read)
@@ -694,7 +736,7 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
             Err(error) => {
                 let _ = lock(&self.inner.protocol, "lock 9P protocol client")
                     .map(|mut protocol| protocol.abandon(read_tag));
-                return Err(error);
+                return Err(WriteThenReadError::DeliveryUnknown(error));
             }
         };
         let read_pending = match self.submit_op(read) {
@@ -704,21 +746,46 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
                     write_tag,
                     Error::from("pipelined 9P read could not be submitted"),
                 );
-                return Err(error);
+                return Err(WriteThenReadError::DeliveryUnknown(error));
             }
         };
         let _write_guard = self.observe_call(write_tag);
         let _read_guard = self.observe_call(read_tag);
 
-        let write_result = self.wait_pending_timeout(write_pending, timeout, true);
-        let read_result = self.wait_pending_timeout(read_pending, timeout, true);
-        let written = match write_result? {
-            Completion::Write { count } => checked_write_count(count, data.len())?,
-            other => return Err(unexpected("Rwrite", other)),
+        let write_result = self.wait_pending_response_timeout(write_pending, timeout, true);
+        let read_result = self.wait_pending_response_timeout(read_pending, timeout, true);
+        let written = match write_result {
+            Ok(ClientResponse::Completion {
+                tag,
+                completion: Completion::Write { count },
+            }) if tag == write_tag => checked_write_count(count, data.len())
+                .map_err(WriteThenReadError::DeliveryUnknown)?,
+            Ok(ClientResponse::Error { tag, ename }) if tag == write_tag => {
+                return Err(WriteThenReadError::Rejected(Error::new(ename)));
+            }
+            Ok(other) => {
+                return Err(WriteThenReadError::DeliveryUnknown(Error::from(format!(
+                    "expected Rwrite, got {other:?}"
+                ))));
+            }
+            Err(error) => return Err(WriteThenReadError::DeliveryUnknown(error)),
         };
-        let response = match read_result? {
-            Completion::Read { data } => checked_read_data(data, read_count)?,
-            other => return Err(unexpected("Rread", other)),
+        let response = match read_result {
+            Ok(ClientResponse::Completion {
+                tag,
+                completion: Completion::Read { data },
+            }) if tag == read_tag => {
+                checked_read_data(data, read_count).map_err(WriteThenReadError::DeliveryUnknown)?
+            }
+            Ok(ClientResponse::Error { tag, ename }) if tag == read_tag => {
+                return Err(WriteThenReadError::DeliveryUnknown(Error::new(ename)));
+            }
+            Ok(other) => {
+                return Err(WriteThenReadError::DeliveryUnknown(Error::from(format!(
+                    "expected Rread, got {other:?}"
+                ))));
+            }
+            Err(error) => return Err(WriteThenReadError::DeliveryUnknown(error)),
         };
         Ok((written, response))
     }
@@ -887,6 +954,22 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
         flush_on_timeout: bool,
     ) -> Result<Completion> {
         let expected_tag = pending.tag;
+        match self.wait_pending_response_timeout(pending, timeout, flush_on_timeout)? {
+            ClientResponse::Completion { tag, completion } if tag == expected_tag => Ok(completion),
+            ClientResponse::Error { tag, ename } if tag == expected_tag => Err(Error::new(ename)),
+            other => Err(Error::from(format!(
+                "response tag mismatch or unexpected response: {other:?}"
+            ))),
+        }
+    }
+
+    fn wait_pending_response_timeout(
+        &self,
+        pending: PendingCall,
+        timeout: Duration,
+        flush_on_timeout: bool,
+    ) -> Result<ClientResponse> {
+        let expected_tag = pending.tag;
         let response = match pending.receiver.recv_timeout(timeout) {
             Ok(response) => response?,
             Err(RecvTimeoutError::Timeout) => {
@@ -909,13 +992,7 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
                 return Err(Error::from("9P reader stopped before response"));
             }
         };
-        match response {
-            ClientResponse::Completion { tag, completion } if tag == expected_tag => Ok(completion),
-            ClientResponse::Error { tag, ename } if tag == expected_tag => Err(Error::new(ename)),
-            other => Err(Error::from(format!(
-                "response tag mismatch or unexpected response: {other:?}"
-            ))),
-        }
+        Ok(response)
     }
 
     fn cancel_waiter(&self, tag: Tag, error: Error) {

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use r9p::{multiplex::DelimitedRead, Fid};
 
-use crate::{Client, Error, Result};
+use crate::{Client, Error, Result, WriteThenReadError};
 
 /// An opened 9P fid retained for repeated, ordered operations.
 ///
@@ -84,14 +84,10 @@ impl OpenedFid {
         data: &[u8],
         read: DelimitedRead,
         timeout: Duration,
-    ) -> Result<(u32, Vec<u8>)> {
-        self.client.write_then_read_delimited_timeout(
-            self.required_fid()?,
-            write_offset,
-            data,
-            read,
-            timeout,
-        )
+    ) -> std::result::Result<(u32, Vec<u8>), WriteThenReadError> {
+        let fid = self.required_fid().map_err(WriteThenReadError::Rejected)?;
+        self.client
+            .write_then_read_delimited_timeout(fid, write_offset, data, read, timeout)
     }
 
     pub fn close(mut self) -> Result<()> {

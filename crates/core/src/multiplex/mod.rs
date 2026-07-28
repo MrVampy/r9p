@@ -2,7 +2,7 @@ mod client;
 mod reader;
 mod util;
 
-pub use client::{DelimitedRead, MultiplexedClient, PendingCall};
+pub use client::{DelimitedRead, MultiplexedClient, PendingCall, WriteThenReadError};
 
 use std::{
     io::{self, Read, Write},
@@ -175,6 +175,150 @@ mod tests {
         )?;
         assert_eq!(written, 5);
         assert_eq!(response, b"pong\n");
+
+        server
+            .join()
+            .map_err(|_| Error::from("server worker panicked"))??;
+        Ok(())
+    }
+
+    #[test]
+    fn pipelined_rpc_preserves_a_definitive_write_rejection() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .map_err(|error| io_error("bind test listener", error))?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| io_error("read listener address", error))?;
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener
+                .accept()
+                .map_err(|error| io_error("accept test connection", error))?;
+            handshake(&mut stream)?;
+            let write_tag = match read_tmessage(&mut stream)? {
+                TMessage::Write { tag, .. } => tag,
+                other => {
+                    return Err(Error::from(format!(
+                        "expected pipelined Twrite, got {other:?}"
+                    )))
+                }
+            };
+            let read_tag = match read_tmessage(&mut stream)? {
+                TMessage::Read { tag, .. } => tag,
+                other => {
+                    return Err(Error::from(format!(
+                        "expected pipelined Tread, got {other:?}"
+                    )))
+                }
+            };
+            write_response(
+                &mut stream,
+                &RMessage::Error {
+                    tag: write_tag,
+                    ename: b"request rejected".to_vec(),
+                },
+            )?;
+            write_response(
+                &mut stream,
+                &RMessage::Error {
+                    tag: read_tag,
+                    ename: b"response unavailable".to_vec(),
+                },
+            )
+        });
+        let client = MultiplexedClient::connect(
+            TcpStream::connect(address).map_err(|error| io_error("connect test client", error))?,
+            "glenda",
+            "",
+            8192,
+        )?;
+
+        let error = client
+            .write_then_read_delimited_timeout(
+                client.root_fid(),
+                0,
+                b"ping\n",
+                DelimitedRead::new(0, 64, b'\n'),
+                Duration::from_secs(1),
+            )
+            .expect_err("write rejection must be preserved");
+        match error {
+            WriteThenReadError::Rejected(error) => {
+                assert_eq!(error.message(), b"request rejected");
+            }
+            WriteThenReadError::DeliveryUnknown(error) => {
+                return Err(Error::from(format!(
+                    "write rejection became ambiguous: {error}"
+                )));
+            }
+        }
+
+        server
+            .join()
+            .map_err(|_| Error::from("server worker panicked"))??;
+        Ok(())
+    }
+
+    #[test]
+    fn pipelined_rpc_marks_response_loss_after_rwrite_as_unknown() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .map_err(|error| io_error("bind test listener", error))?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| io_error("read listener address", error))?;
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener
+                .accept()
+                .map_err(|error| io_error("accept test connection", error))?;
+            handshake(&mut stream)?;
+            let write_tag = match read_tmessage(&mut stream)? {
+                TMessage::Write { tag, data, .. } => {
+                    let count = u32::try_from(data.len())
+                        .map_err(|_| Error::from("test write length overflow"))?;
+                    (tag, count)
+                }
+                other => {
+                    return Err(Error::from(format!(
+                        "expected pipelined Twrite, got {other:?}"
+                    )))
+                }
+            };
+            match read_tmessage(&mut stream)? {
+                TMessage::Read { .. } => {}
+                other => {
+                    return Err(Error::from(format!(
+                        "expected pipelined Tread, got {other:?}"
+                    )))
+                }
+            }
+            write_response(
+                &mut stream,
+                &RMessage::Write {
+                    tag: write_tag.0,
+                    count: write_tag.1,
+                },
+            )
+        });
+        let client = MultiplexedClient::connect(
+            TcpStream::connect(address).map_err(|error| io_error("connect test client", error))?,
+            "glenda",
+            "",
+            8192,
+        )?;
+
+        let error = client
+            .write_then_read_delimited_timeout(
+                client.root_fid(),
+                0,
+                b"ping\n",
+                DelimitedRead::new(0, 64, b'\n'),
+                Duration::from_secs(1),
+            )
+            .expect_err("lost response must be ambiguous");
+        if !matches!(error, WriteThenReadError::DeliveryUnknown(_)) {
+            return Err(Error::from(format!(
+                "lost response was not ambiguous: {error}"
+            )));
+        }
 
         server
             .join()

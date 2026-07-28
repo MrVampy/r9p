@@ -15,7 +15,7 @@ pub fn mount(config: Config) -> Result<(), Error> {
 
 pub fn mount_with_session(
     config: Config,
-    client: session::ClientSlot,
+    client: session::ClientSession,
     feed_events: Option<session::feed::FeedEventReceiver>,
 ) -> Result<(), Error> {
     fuse::R9pFuse::mount_with_session(config, client, feed_events)

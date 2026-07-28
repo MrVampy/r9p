@@ -28,7 +28,7 @@ use crate::{diagnostics::Diagnostics, error::Result, node::NodeTable};
 use config::{normalize_config, parse_source_path};
 use mount::{block_termination_signals, mount_fuse};
 use recovery::ShapeRecovery;
-use session::{feed::FeedEventReceiver, Client, ClientSlot};
+use session::{feed::FeedEventReceiver, ClientSession};
 use status::MountStatus;
 use std::{
     path::Path,
@@ -42,7 +42,7 @@ pub use config::{
 
 #[derive(Clone)]
 pub struct R9pFuse {
-    client: ClientSlot,
+    client: ClientSession,
     nodes: Arc<Mutex<NodeTable>>,
     source_path: Vec<Vec<u8>>,
     config: Config,
@@ -58,13 +58,13 @@ impl R9pFuse {
     pub fn mount(mut config: Config) -> Result<()> {
         block_termination_signals();
         normalize_config(&mut config);
-        let client = Client::connect_with_timeout(&config.connection(), config.connect_timeout)?;
-        Self::mount_prepared(config, ClientSlot::new(client), None)
+        let client = ClientSession::connect(&config.connection(), config.connect_timeout)?;
+        Self::mount_prepared(config, client, None)
     }
 
     pub fn mount_with_session(
         mut config: Config,
-        client: ClientSlot,
+        client: ClientSession,
         feed_events: Option<FeedEventReceiver>,
     ) -> Result<()> {
         block_termination_signals();
@@ -74,7 +74,7 @@ impl R9pFuse {
 
     fn mount_prepared(
         config: Config,
-        client: ClientSlot,
+        client: ClientSession,
         feed_events: Option<FeedEventReceiver>,
     ) -> Result<()> {
         let source_path = parse_source_path(&config.source_path)?;

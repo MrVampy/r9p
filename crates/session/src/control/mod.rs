@@ -11,7 +11,7 @@ mod tree;
 
 use crate::feed::{start_feed_worker, FeedEventBus, FeedState, FeedWorkerConfig, FeedWorkerHandle};
 use crate::{
-    AuthorityBindings, Client, ClientSlot, ConnectionConfig, Error, NamespaceCache, Result,
+    AuthorityBindings, Client, ClientSession, ConnectionConfig, Error, NamespaceCache, Result,
     SessionEpoch, ORDWR, OREAD,
 };
 pub use request::{parse_request, ControlRequest};
@@ -43,7 +43,7 @@ pub struct ControlConfig {
 }
 
 pub struct ControlRuntime {
-    client: ClientSlot,
+    client: ClientSession,
     feed_state: FeedState,
     cache: NamespaceCache,
     session_epoch: SessionEpoch,
@@ -53,7 +53,7 @@ pub struct ControlRuntime {
 
 impl ControlRuntime {
     pub fn start(config: &ControlConfig) -> Result<Self> {
-        let client = Client::connect_with_timeout(
+        let client = ClientSession::connect(
             &ConnectionConfig {
                 address: config.address.clone(),
                 uname: config.uname.clone(),
@@ -64,8 +64,7 @@ impl ControlRuntime {
             },
             config.connect_timeout,
         )?;
-        let session_epoch = SessionEpoch::new();
-        let client = ClientSlot::new_with_epoch(client, session_epoch.clone());
+        let session_epoch = client.epoch();
         let feed_state = FeedState::new();
         let cache = NamespaceCache::new();
         let feed_events = FeedEventBus::new(config.change_feed_backpressure_limit);
@@ -100,7 +99,7 @@ impl ControlRuntime {
         })
     }
 
-    pub fn client_slot(&self) -> ClientSlot {
+    pub fn client_session(&self) -> ClientSession {
         self.client.clone()
     }
 

@@ -20,7 +20,7 @@ use crate::{
     error::{Error, Result},
     node::{NodeTable, ROOT_NODEID},
 };
-use session::{with_fuse_unique, Client};
+use session::with_fuse_unique;
 use std::{
     fs::File,
     io::Read,
@@ -249,12 +249,7 @@ impl R9pFuse {
         if self.config.debug {
             eprintln!("r9p mount: reconnecting to {}", self.config.address);
         }
-        let tracker = self.client.snapshot()?.tracker();
-        let client = Client::connect_with_tracker_timeout(
-            &self.config.connection(),
-            tracker,
-            self.config.connect_timeout,
-        )?;
+        let client = self.client.reconnect()?;
         let (root_fid, root_stat) = self.source_binding(&client, self.config.lookup_timeout)?;
         let lazy_rebind_count = {
             let mut nodes = self.nodes()?;
@@ -264,7 +259,6 @@ impl R9pFuse {
                 .filter_map(|(nodeid, _)| (nodeid != ROOT_NODEID).then_some(nodeid))
                 .collect::<Vec<_>>();
             let lazy_rebind_count = stale.len();
-            self.client.replace(client)?;
             let _ = nodes.apply_rebind_results(vec![(ROOT_NODEID, root_fid, root_stat)], stale);
             lazy_rebind_count
         };

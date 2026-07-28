@@ -57,7 +57,7 @@ pub(crate) fn start_session_mount(
         None
     };
     let config = mount_config(control, mountpoint, mount);
-    let client = runtime.client_slot();
+    let client = runtime.client_session();
     thread::Builder::new()
         .name("r9p-session-fuse".to_string())
         .spawn(move || {

@@ -1,12 +1,12 @@
 use super::{tree::ControlTree, ControlConfig};
-use crate::{feed::FeedState, ClientSlot, Error, NamespaceCache, Result, SessionEpoch};
+use crate::{feed::FeedState, ClientSession, Error, NamespaceCache, Result, SessionEpoch};
 use r9p::server::{serve_file_tree_connection, ConnectionStream, ServerConfig};
 
 const CONTROL_MSIZE: u32 = 65_536;
 
 pub(super) fn serve_control_connection<S>(
     stream: S,
-    client: ClientSlot,
+    client: ClientSession,
     config: ControlConfig,
     feed_state: FeedState,
     cache: NamespaceCache,

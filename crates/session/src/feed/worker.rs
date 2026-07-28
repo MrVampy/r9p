@@ -2,7 +2,7 @@ use super::{
     feed_poll_path, parse_namespace_change_record, parse_namespace_path, select_feed_records,
     FeedEvent, FeedEventBus, FeedState,
 };
-use crate::{Client, ClientSlot, Error, NamespaceCache, Result, StaleReason, OREAD};
+use crate::{Client, ClientSession, Error, NamespaceCache, Result, StaleReason, OREAD};
 use r9p::fid::Fid;
 use std::{
     sync::{
@@ -51,7 +51,7 @@ impl Drop for FeedWorkerHandle {
 }
 
 pub fn start_feed_worker(
-    client: ClientSlot,
+    client: ClientSession,
     config: FeedWorkerConfig,
     state: FeedState,
 ) -> Result<FeedWorkerHandle> {
@@ -68,7 +68,7 @@ pub fn start_feed_worker(
 }
 
 fn feed_loop(
-    client: ClientSlot,
+    client: ClientSession,
     config: FeedWorkerConfig,
     state: FeedState,
     stop: Arc<AtomicBool>,
@@ -77,7 +77,7 @@ fn feed_loop(
     let mut since_event_id = None;
     while !stop.load(Ordering::SeqCst) {
         let Ok(client) = client.snapshot() else {
-            state.set_degraded("9P client slot unavailable");
+            state.set_degraded("9P client session unavailable");
             sleep_interruptible(config.poll_interval, &stop);
             continue;
         };

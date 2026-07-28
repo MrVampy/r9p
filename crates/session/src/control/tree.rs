@@ -1,5 +1,5 @@
 use super::{json, query, status_json, ControlConfig};
-use crate::{feed::FeedState, ClientSlot, NamespaceCache, SessionEpoch, ORDWR, OREAD};
+use crate::{feed::FeedState, ClientSession, NamespaceCache, SessionEpoch, ORDWR, OREAD};
 use r9p::{
     error::{Error as P9Error, ENOENT, EPERM},
     fid::Fid,
@@ -24,7 +24,7 @@ const USAGE: &str = concat!(
 
 #[derive(Clone)]
 pub(super) struct ControlTree {
-    client: ClientSlot,
+    client: ClientSession,
     config: ControlConfig,
     feed_state: FeedState,
     cache: NamespaceCache,
@@ -45,7 +45,7 @@ enum ControlNode {
 
 impl ControlTree {
     pub(super) fn new(
-        client: ClientSlot,
+        client: ClientSession,
         config: ControlConfig,
         feed_state: FeedState,
         cache: NamespaceCache,

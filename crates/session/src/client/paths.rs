@@ -58,6 +58,40 @@ impl Client {
         })
     }
 
+    pub fn read_path_delimited_timeout(
+        &self,
+        path: &str,
+        max_response_bytes: u32,
+        delimiter: u8,
+        timeout: Duration,
+    ) -> Result<Vec<u8>> {
+        validate_response_bound(max_response_bytes)?;
+        read_only_path_timeout(self, path, timeout, |client, fid| {
+            client.open_timeout(fid, OREAD, timeout)?;
+            client.read_delimited_timeout(fid, 0, max_response_bytes, delimiter, timeout)
+        })
+    }
+
+    /// Reads one delimiter-terminated record from a path whose read may block.
+    ///
+    /// Walk, open, recovery, and clunk remain bounded by `control_timeout`.
+    /// The record read itself has no deadline and can be cancelled by shutting
+    /// down the client session. A definitive failed referral is re-established
+    /// and this read-only path operation is retried once.
+    pub fn read_path_delimited(
+        &self,
+        path: &str,
+        max_response_bytes: u32,
+        delimiter: u8,
+        control_timeout: Duration,
+    ) -> Result<Vec<u8>> {
+        validate_response_bound(max_response_bytes)?;
+        read_only_path_timeout(self, path, control_timeout, |client, fid| {
+            client.open_timeout(fid, OREAD, control_timeout)?;
+            client.read_delimited(fid, 0, max_response_bytes, delimiter)
+        })
+    }
+
     pub fn read_path_range(&self, path: &str, offset: u64, count: u32) -> Result<Vec<u8>> {
         let fid = self.walk_path(path)?;
         let result = (|| {

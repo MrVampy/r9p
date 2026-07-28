@@ -152,37 +152,48 @@ fn connects_namespace_socket() {
 }
 
 #[test]
-fn client_slot_replacement_bumps_session_epoch() {
-    let first_socket = unique_socket_path("slot-first");
-    let first_server = spawn_unix_root_server(&first_socket);
-    let first_client = Client::connect_with_timeout(
-        &connection(format!("unix!{}", first_socket.display())),
-        Duration::ZERO,
-    )
-    .expect("first client should connect");
-    let slot = crate::ClientSlot::new(first_client);
-    let first_epoch = slot.session_epoch().expect("first epoch");
+fn client_session_reconnects_once_and_bumps_its_epoch() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("session listener");
+    let address = listener.local_addr().expect("session address");
+    let server = thread::spawn(move || {
+        let mut handlers = Vec::new();
+        for _ in 0..2 {
+            let (stream, _) = listener.accept().expect("session accept");
+            handlers.push(thread::spawn(move || {
+                handle_connection(stream).expect("session connection")
+            }));
+        }
+        for handler in handlers {
+            handler.join().expect("session handler should not panic");
+        }
+    });
 
-    let second_socket = unique_socket_path("slot-second");
-    let second_server = spawn_unix_root_server(&second_socket);
-    let second_client = Client::connect_with_timeout(
-        &connection(format!("unix!{}", second_socket.display())),
-        Duration::ZERO,
-    )
-    .expect("second client should connect");
+    let session =
+        crate::ClientSession::connect(&connection(address.to_string()), Duration::from_secs(1))
+            .expect("client session should connect");
+    let first = session.snapshot().expect("first attachment");
+    let first_epoch = session.session_epoch().expect("first epoch");
 
-    slot.replace(second_client).expect("replace client");
-    let second_epoch = slot.session_epoch().expect("second epoch");
-
+    let replacement = session
+        .reconnect_after(&first)
+        .expect("failed attachment should be replaced");
+    let second_epoch = session.session_epoch().expect("second epoch");
     assert_ne!(first_epoch, second_epoch);
+    assert!(!replacement.same_session(&first));
 
-    drop(slot);
-    first_server.join().expect("first server should not panic");
-    second_server
-        .join()
-        .expect("second server should not panic");
-    let _ = fs::remove_file(first_socket);
-    let _ = fs::remove_file(second_socket);
+    let shared = session
+        .reconnect_after(&first)
+        .expect("stale reconnect request should reuse the replacement");
+    assert!(shared.same_session(&replacement));
+    assert_eq!(session.session_epoch().expect("shared epoch"), second_epoch);
+
+    session.shutdown().expect("replacement should shut down");
+    first.shutdown().expect("first attachment should shut down");
+    drop(shared);
+    drop(replacement);
+    drop(first);
+    drop(session);
+    server.join().expect("server should not panic");
 }
 
 #[test]

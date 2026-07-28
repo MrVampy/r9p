@@ -62,6 +62,10 @@ struct RoutedTarget {
 }
 
 impl Client {
+    pub fn same_session(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
+    }
+
     pub fn connect_with_timeout(config: &ConnectionConfig, timeout: Duration) -> Result<Self> {
         Self::connect_with_tracker_timeout(config, RequestTracker::default(), timeout)
     }

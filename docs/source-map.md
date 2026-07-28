@@ -62,6 +62,11 @@ This map defines the local sources agents should inspect before making source-sp
     direct referral sessions.
   - Longest-prefix routing, logical-to-remote fid binding, referral refresh,
     shared request tracking, and caller-local path operations.
+- `crates/session/src/client_session.rs`
+  - Renewable root attachment, current-client replacement, session epoch,
+    serialized reconnect, and permanent shutdown.
+  - It never decides whether a consumer operation is safe to replay or how
+    application cursors and opened paths are rebuilt.
 - `crates/session/src/authority.rs`
   - Caller-local bindings from portable authority boundaries to absolute
     session authentication configuration paths.

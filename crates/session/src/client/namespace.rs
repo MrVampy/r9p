@@ -77,6 +77,10 @@ impl PendingRead {
         self.pending.tag()
     }
 
+    pub(crate) fn wait(self) -> Result<Vec<u8>> {
+        self.client.wait_read(self.pending)
+    }
+
     pub(crate) fn wait_timeout(self, timeout: Duration) -> Result<Vec<u8>> {
         self.client.wait_read_timeout(self.pending, timeout)
     }

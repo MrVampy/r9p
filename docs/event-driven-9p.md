@@ -108,6 +108,15 @@ interactive control without introducing another protocol. The read lane is
 still ordinary 9P, uses the same caller identity and namespace contract, and
 must be cancelled through `Tflush` before it is closed.
 
+The normal blocking read must not inherit a short ordinary RPC response
+deadline. Cancelling and resubmitting an idle `Tread` every few seconds is
+timer-driven subscription churn, not useful liveness detection. It can also
+overlap a replacement read with the server worker that is still completing the
+cancelled request. A blocking subscription therefore waits without a response
+deadline and is woken by an event, terminal transport failure, or explicit
+`Tflush`. Connection establishment, cleanup, and reconnect attempts may still
+have finite deadlines.
+
 ## Cancellation
 
 The request tag is the protocol cancellation identity.
@@ -154,8 +163,9 @@ should report a precise resynchronization condition. It should not silently
 return a newer event because that would turn data loss into apparently valid
 progress.
 
-A timeout can bound liveness or shutdown. It must not become a timer used to
-discover whether an event exists.
+A timeout can bound connection establishment, cleanup, or reconnect. It must
+not periodically cancel and recreate a healthy blocking read merely because no
+event exists.
 
 ## Reconnect and Replay
 
@@ -186,7 +196,9 @@ The r9p layers preserve these boundaries:
   demultiplexing.
 - A pending read exposes its tag so cancellation remains protocol-correct.
 - `ConcurrentReadFid` is an explicit opt-in for a replay-safe positional file.
-  It is not appropriate for an implicit per-fid stream.
+  Its no-deadline read is the normal subscription operation; its timeout-bound
+  read is reserved for an application contract that has a real deadline. It is
+  not appropriate for an implicit per-fid stream.
 - `ResumableFid` reconstructs a session only for paths and offsets whose
   application contract permits replay.
 - Feed adapters use blocking live reads and cursor-based catch-up without

@@ -529,7 +529,7 @@ mod tests {
 
         assert_eq!(
             client
-                .wait_read_timeout(first, Duration::from_secs(1))
+                .wait_read(first)
                 .expect_err("first flushed read should not complete")
                 .message(),
             b"9P request flushed"

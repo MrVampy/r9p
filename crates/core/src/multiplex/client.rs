@@ -552,6 +552,27 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
         }
     }
 
+    /// Waits for a submitted read without imposing a response deadline.
+    ///
+    /// This is intended for blocking namespace subscriptions. Transport
+    /// failure and an explicit `Tflush` still wake the waiter.
+    pub fn wait_read(&self, pending: PendingRead) -> Result<Vec<u8>> {
+        let requested = pending.requested;
+        let expected_tag = pending.call.tag;
+        match pending.call.wait()? {
+            ClientResponse::Completion { tag, completion } if tag == expected_tag => {
+                match completion {
+                    Completion::Read { data } => checked_read_data(data, requested),
+                    other => Err(unexpected("Rread", other)),
+                }
+            }
+            ClientResponse::Error { tag, ename } if tag == expected_tag => Err(Error::new(ename)),
+            other => Err(Error::from(format!(
+                "response tag mismatch or unexpected response: {other:?}"
+            ))),
+        }
+    }
+
     pub fn read_full(&self, fid: Fid, mut offset: u64, count: u32) -> Result<Vec<u8>> {
         let mut remaining = count;
         let mut out = Vec::with_capacity(usize::try_from(count).unwrap_or(0));

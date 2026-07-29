@@ -179,6 +179,10 @@ impl DirectClient {
             .map_err(client_error)
     }
 
+    pub(crate) fn wait_read(&self, pending: PendingRead) -> Result<Vec<u8>> {
+        self.inner.wait_read(pending).map_err(client_error)
+    }
+
     pub(crate) fn flush_tag_timeout(&self, tag: Tag, timeout: Duration) -> Result<()> {
         self.inner
             .flush_tag_timeout(tag, timeout)

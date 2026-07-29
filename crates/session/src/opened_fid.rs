@@ -154,6 +154,30 @@ impl Drop for OpenedFid {
 }
 
 impl ConcurrentReadFid {
+    /// Blocks until this positional read completes, the transport fails, or
+    /// the request is explicitly cancelled.
+    pub fn read(&self, offset: u64, count: u32) -> Result<Vec<u8>> {
+        let pending = {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .map_err(|_| Error::new(libc::EIO, "concurrent read fid lock poisoned"))?;
+            let fid = state
+                .fid
+                .ok_or_else(|| Error::new(libc::EBADF, "concurrent read fid is closed"))?;
+            let pending = self.inner.client.submit_read(fid, offset, count)?;
+            state.active.insert(pending.tag());
+            pending
+        };
+        let tag = pending.tag();
+        let _active = ActiveConcurrentRead {
+            inner: Arc::clone(&self.inner),
+            tag,
+        };
+        pending.wait()
+    }
+
     pub fn read_timeout(&self, offset: u64, count: u32, timeout: Duration) -> Result<Vec<u8>> {
         let pending = {
             let mut state = self
@@ -174,6 +198,14 @@ impl ConcurrentReadFid {
             tag,
         };
         pending.wait_timeout(timeout)
+    }
+
+    /// Reads one delimiter-terminated positional record without turning an
+    /// idle blocking subscription into periodic cancellation and resubmission.
+    pub fn read_delimited(&self, offset: u64, count: u32, delimiter: u8) -> Result<Vec<u8>> {
+        read_delimited_with(offset, count, delimiter, |offset, remaining| {
+            self.read(offset, remaining)
+        })
     }
 
     pub fn read_delimited_timeout(

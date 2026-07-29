@@ -10,8 +10,12 @@ offset is an independent application cursor?
 ## Sources checked
 
 - `crates/core/src/multiplex/client.rs`
+  - `MultiplexedClient::wait_read`
   - `MultiplexedClient::read_delimited_timeout`
   - `MultiplexedClient::read_timeout`
+- `crates/session/src/opened_fid.rs`
+  - `ConcurrentReadFid::read`
+  - `ConcurrentReadFid::read_delimited`
 - `crates/core/src/multiplex/reader.rs`
   - the response reader demultiplexes replies by request tag
 - `crates/core/src/server/connection.rs`
@@ -76,6 +80,14 @@ ordinary 64-bit offset without assigning service-specific meaning to it.
 - Made concurrent retained reads track their outstanding tags.
 - Made cancellation await `Rflush` for every outstanding read before
   clunking the fid.
+- Added no-deadline concurrent reads for blocking subscriptions. An installed
+  r9wm self-test showed why the distinction matters: eight update reads
+  inherited a 5-second ordinary request timeout, all cancelled while idle, and
+  an immediate replacement briefly overlapped the still-finishing cancelled
+  worker at the server's eight-request capacity. The server correctly retained
+  its physical worker bound; the client was incorrectly churning a healthy
+  subscription. Blocking reads now wait for an event, transport failure, or
+  explicit `Tflush` instead.
 
 ## Open Questions
 

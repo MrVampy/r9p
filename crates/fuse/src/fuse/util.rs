@@ -96,7 +96,9 @@ pub(super) fn is_lookup_namespace_shape_error(error: &impl ErrorView) -> bool {
 
 fn is_stale_namespace_message(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
-    lower.contains("unknown fid") || lower.contains("stale fid")
+    lower.contains("unknown fid")
+        || lower.contains("unknown namespace fid")
+        || lower.contains("stale fid")
 }
 
 pub(super) fn duration_parts(duration: Duration) -> (u64, u32) {

@@ -4,7 +4,7 @@ use crate::{
     error::Result,
     fuse::{
         reply::{c_string, read_struct, reply_error, reply_struct},
-        util::{is_namespace_shape_error, is_transport_error},
+        util::{is_lookup_namespace_shape_error, is_transport_error},
         wire::{FuseBatchForgetIn, FuseForgetIn, FuseForgetOne, FuseInHeader},
         R9pFuse,
     },
@@ -29,17 +29,26 @@ impl R9pFuse {
         if name.contains(&b'/') {
             return reply_error(file, header.unique, libc::ENOENT);
         }
-        match self.lookup_once(file, header, &name) {
+        let result = match self.lookup_once(file, header, &name) {
             Ok(()) => Ok(()),
             Err(error) if is_transport_error(&error) => {
                 self.reconnect()?;
                 self.lookup_once(file, header, &name)
             }
-            Err(error) if is_namespace_shape_error(&error) => {
+            Err(error) if is_lookup_namespace_shape_error(&error) => {
                 self.recover_namespace_shape(header.nodeid)?;
                 self.lookup_once(file, header, &name)
             }
             Err(error) => Err(error),
+        };
+        match result {
+            Err(error)
+                if error.errno == libc::ENOENT && !self.config.negative_timeout.is_zero() =>
+            {
+                let out = self.negative_entry_out();
+                reply_struct(file, header.unique, &out)
+            }
+            result => result,
         }
     }
 

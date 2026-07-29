@@ -11,6 +11,7 @@ pub const DEFAULT_MAX_BACKGROUND: u16 = 12;
 pub const DEFAULT_CHANGE_FEED_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 pub const DEFAULT_ATTR_TIMEOUT: Duration = Duration::from_secs(1);
 pub const DEFAULT_ENTRY_TIMEOUT: Duration = Duration::from_secs(1);
+pub const DEFAULT_NEGATIVE_TIMEOUT: Duration = Duration::ZERO;
 
 pub fn default_congestion_threshold(max_background: u16) -> u16 {
     ((u32::from(max_background) * 3 / 4).max(1)) as u16
@@ -29,6 +30,7 @@ pub struct Config {
     pub connect_timeout: Duration,
     pub attr_timeout: Duration,
     pub entry_timeout: Duration,
+    pub negative_timeout: Duration,
     pub request_timeout: Duration,
     pub lookup_timeout: Duration,
     pub read_timeout: Duration,

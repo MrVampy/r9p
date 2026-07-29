@@ -6,7 +6,7 @@ mod node;
 pub use error::Error;
 pub use fuse::{
     default_congestion_threshold, Config, DEFAULT_ATTR_TIMEOUT, DEFAULT_ENTRY_TIMEOUT,
-    DEFAULT_MAX_BACKGROUND, DEFAULT_MAX_WORKERS,
+    DEFAULT_MAX_BACKGROUND, DEFAULT_MAX_WORKERS, DEFAULT_NEGATIVE_TIMEOUT,
 };
 
 pub fn mount(config: Config) -> Result<(), Error> {

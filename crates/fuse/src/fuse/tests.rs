@@ -1,9 +1,10 @@
 use super::config::DEFAULT_CHANGE_FEED_RECONNECT_DELAY;
 use super::dispatch::supported_init_flags;
+use super::mount_state::negative_entry_out;
 use super::ops::encode_dirents;
 use super::util::{
-    dirent_size, flags_to_9p_mode, fuse_name_offset, fuse_open_flags, is_namespace_shape_error,
-    is_transport_error,
+    dirent_size, flags_to_9p_mode, fuse_name_offset, fuse_open_flags,
+    is_lookup_namespace_shape_error, is_namespace_shape_error, is_transport_error,
 };
 use super::wire::{FOPEN_CACHE_DIR, FOPEN_DIRECT_IO, FOPEN_KEEP_CACHE};
 use super::{
@@ -145,6 +146,10 @@ fn namespace_shape_errors_are_reconnect_candidates() {
         libc::ESTALE,
         "unknown fid",
     )));
+    assert!(is_namespace_shape_error(&Error::new(
+        libc::EBADF,
+        "unknown namespace fid 6",
+    )));
     assert!(!is_namespace_shape_error(&Error::new(
         libc::EACCES,
         "permission denied",
@@ -153,6 +158,26 @@ fn namespace_shape_errors_are_reconnect_candidates() {
         libc::ESTALE,
         "application-level stale value",
     )));
+    assert!(!is_lookup_namespace_shape_error(&Error::new(
+        libc::ENOENT,
+        "partial walk",
+    )));
+    assert!(is_lookup_namespace_shape_error(&Error::new(
+        libc::EBADF,
+        "unknown namespace fid 6",
+    )));
+}
+
+#[test]
+fn negative_lookup_reply_has_zero_nodeid_and_configured_validity() {
+    let out = negative_entry_out(Duration::from_millis(5250));
+
+    assert_eq!(out.nodeid, 0);
+    assert_eq!(out.generation, 0);
+    assert_eq!(out.entry_valid, 5);
+    assert_eq!(out.entry_valid_nsec, 250_000_000);
+    assert_eq!(out.attr_valid, 0);
+    assert_eq!(out.attr_valid_nsec, 0);
 }
 
 #[test]
@@ -227,6 +252,7 @@ fn mount_config_normalization_keeps_worker_and_background_limits_nonzero() {
         connect_timeout: Duration::from_secs(30),
         attr_timeout: Duration::ZERO,
         entry_timeout: Duration::ZERO,
+        negative_timeout: Duration::ZERO,
         request_timeout: Duration::from_secs(5),
         lookup_timeout: Duration::ZERO,
         read_timeout: Duration::ZERO,

@@ -572,7 +572,7 @@ impl Client {
         let target = self.routed_target(namespace_path, self.state.connect_timeout)?;
         match walk_remote(&target) {
             Ok(fid) => Ok((target, fid)),
-            Err(error) if self.should_refresh_routes_after(&error) => {
+            Err(error) if self.should_refresh_routes_after(&target, &error) => {
                 self.invalidate_failed_route(&target, &error)?;
                 self.refresh_routes(self.state.connect_timeout)?;
                 let target = self.routed_target(namespace_path, self.state.connect_timeout)?;
@@ -591,7 +591,7 @@ impl Client {
         let target = self.routed_target(namespace_path, timeout)?;
         match walk_remote_timeout(&target, timeout) {
             Ok(fid) => Ok((target, fid)),
-            Err(error) if self.should_refresh_routes_after(&error) => {
+            Err(error) if self.should_refresh_routes_after(&target, &error) => {
                 self.invalidate_failed_route(&target, &error)?;
                 self.refresh_routes(timeout)?;
                 let target = self.routed_target(namespace_path, timeout)?;
@@ -602,17 +602,20 @@ impl Client {
         }
     }
 
-    fn should_refresh_routes_after(&self, error: &Error) -> bool {
-        self.variant().supports_referrals()
-            && matches!(
-                error.errno,
-                libc::ENOENT
-                    | libc::ESTALE
-                    | libc::ENOTCONN
-                    | libc::ECONNABORTED
-                    | libc::ECONNRESET
-                    | libc::EPIPE
-            )
+    fn should_refresh_routes_after(&self, target: &RoutedTarget, error: &Error) -> bool {
+        if !self.variant().supports_referrals() {
+            return false;
+        }
+        match error.errno {
+            // A miss on the root attachment can mean a newly admitted
+            // referral now owns the path. A miss inside an already selected
+            // referral is ordinary service-local absence.
+            libc::ENOENT => target.route_mount.is_none(),
+            libc::ESTALE | libc::ENOTCONN | libc::ECONNABORTED | libc::ECONNRESET | libc::EPIPE => {
+                true
+            }
+            _ => false,
+        }
     }
 
     fn invalidate_failed_route(&self, target: &RoutedTarget, error: &Error) -> Result<()> {

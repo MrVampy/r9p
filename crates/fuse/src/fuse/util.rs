@@ -82,7 +82,16 @@ fn is_transport_message(message: &str) -> bool {
 /// callers retry at most once and only at a safe operation boundary.
 pub(super) fn is_namespace_shape_error(error: &impl ErrorView) -> bool {
     error.errno() == libc::ENOENT
-        || (error.errno() == libc::ESTALE && is_stale_namespace_message(error.message()))
+        || (matches!(error.errno(), libc::ESTALE | libc::EBADF)
+            && is_stale_namespace_message(error.message()))
+}
+
+/// A failed lookup for a previously unknown child is ordinary absence, not
+/// evidence that the mounted namespace attachment is stale. Other operations
+/// address an already resolved object and retain the broader shape-recovery
+/// classification above.
+pub(super) fn is_lookup_namespace_shape_error(error: &impl ErrorView) -> bool {
+    error.errno() != libc::ENOENT && is_namespace_shape_error(error)
 }
 
 fn is_stale_namespace_message(message: &str) -> bool {

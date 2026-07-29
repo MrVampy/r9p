@@ -16,7 +16,10 @@ use std::{
     os::unix::net::UnixListener,
     path::{Path, PathBuf},
     process,
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -214,6 +217,7 @@ fn ordinary_namespace_operations_cross_referrals_transparently() {
             stream,
             ReferralRoot {
                 endpoint: service_address.to_string().into_bytes(),
+                referral_reads: None,
             },
             ServerConfig {
                 variant: Variant::R,
@@ -242,6 +246,59 @@ fn ordinary_namespace_operations_cross_referrals_transparently() {
     assert_eq!(stat.name, b"value");
     client.shutdown().expect("namespace should shut down");
 
+    drop(client);
+    root.join().expect("root server should not panic");
+    service.join().expect("service server should not panic");
+}
+
+#[test]
+fn missing_path_inside_selected_referral_does_not_refresh_routes() {
+    let service_listener = TcpListener::bind("127.0.0.1:0").expect("service listener");
+    let service_address = service_listener.local_addr().expect("service address");
+    let service = thread::spawn(move || {
+        let (stream, _) = service_listener.accept().expect("service accept");
+        handle_configured_connection(stream, ValueTree, ServerConfig::default())
+            .expect("service connection");
+    });
+
+    let referral_reads = Arc::new(AtomicUsize::new(0));
+    let root_referral_reads = Arc::clone(&referral_reads);
+    let root_listener = TcpListener::bind("127.0.0.1:0").expect("root listener");
+    let root_address = root_listener.local_addr().expect("root address");
+    let root = thread::spawn(move || {
+        let (stream, _) = root_listener.accept().expect("root accept");
+        handle_configured_connection(
+            stream,
+            ReferralRoot {
+                endpoint: service_address.to_string().into_bytes(),
+                referral_reads: Some(root_referral_reads),
+            },
+            ServerConfig {
+                variant: Variant::R,
+                ..ServerConfig::default()
+            },
+        )
+        .expect("root connection");
+    });
+
+    let client = Client::connect_with_timeout(
+        &connection(root_address.to_string()),
+        Duration::from_secs(1),
+    )
+    .expect("namespace client should connect");
+    assert_eq!(referral_reads.load(Ordering::SeqCst), 1);
+
+    let error = client
+        .walk_path_timeout("/sources/x/missing", Duration::from_secs(1))
+        .expect_err("missing direct-service child must stay missing");
+    assert_eq!(error.errno, libc::ENOENT);
+    assert_eq!(
+        referral_reads.load(Ordering::SeqCst),
+        1,
+        "a direct-service miss must not refresh the root referral table"
+    );
+
+    client.shutdown().expect("namespace should shut down");
     drop(client);
     root.join().expect("root server should not panic");
     service.join().expect("service server should not panic");
@@ -277,6 +334,7 @@ fn read_only_path_recovers_a_restarted_referral_session() {
             stream,
             ReferralRoot {
                 endpoint: service_address.to_string().into_bytes(),
+                referral_reads: None,
             },
             ServerConfig {
                 variant: Variant::R,
@@ -396,6 +454,7 @@ impl FileTree for RootOnly {
 
 struct ReferralRoot {
     endpoint: Vec<u8>,
+    referral_reads: Option<Arc<AtomicUsize>>,
 }
 
 impl FileTree for ReferralRoot {
@@ -432,6 +491,9 @@ impl FileTree for ReferralRoot {
     }
 
     fn referrals(&mut self, _fid: Fid, _qid: Qid) -> P9Result<Vec<NamespaceReferral>> {
+        if let Some(referral_reads) = &self.referral_reads {
+            referral_reads.fetch_add(1, Ordering::SeqCst);
+        }
         Ok(vec![NamespaceReferral {
             mount_path: b"/sources/x".to_vec(),
             endpoint: self.endpoint.clone(),

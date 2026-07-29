@@ -37,7 +37,7 @@ use std::{
 
 pub use config::{
     default_congestion_threshold, Config, DEFAULT_ATTR_TIMEOUT, DEFAULT_ENTRY_TIMEOUT,
-    DEFAULT_MAX_BACKGROUND, DEFAULT_MAX_WORKERS,
+    DEFAULT_MAX_BACKGROUND, DEFAULT_MAX_WORKERS, DEFAULT_NEGATIVE_TIMEOUT,
 };
 
 #[derive(Clone)]

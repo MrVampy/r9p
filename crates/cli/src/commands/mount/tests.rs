@@ -75,6 +75,8 @@ fn parses_final_mount_options() {
             "1.5".to_string(),
             "--entry-timeout".to_string(),
             "2".to_string(),
+            "--negative-timeout".to_string(),
+            "5.25".to_string(),
             "--allow-other".to_string(),
             "--source".to_string(),
             "/hosts/tuxedo/projects".to_string(),
@@ -124,6 +126,7 @@ fn parses_final_mount_options() {
     assert_eq!(config.change_feed_backpressure_limit, 128);
     assert_eq!(config.attr_timeout, Duration::from_millis(1500));
     assert_eq!(config.entry_timeout, Duration::from_secs(2));
+    assert_eq!(config.negative_timeout, Duration::from_millis(5250));
     assert!(config.allow_other);
     assert_eq!(config.max_workers, 8);
     assert_eq!(config.max_background, 24);

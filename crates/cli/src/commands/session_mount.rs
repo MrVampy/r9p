@@ -16,6 +16,7 @@ pub(crate) struct SessionMountConfig {
     diagnostics_path: Option<PathBuf>,
     attr_timeout: Duration,
     entry_timeout: Duration,
+    negative_timeout: Duration,
 }
 
 pub(crate) fn take_session_mount_config(args: &mut Vec<String>) -> CliResult<SessionMountConfig> {
@@ -33,6 +34,10 @@ pub(crate) fn take_session_mount_config(args: &mut Vec<String>) -> CliResult<Ses
         .map(|value| parse_duration_secs(&value, "mount entry timeout"))
         .transpose()?
         .unwrap_or(fuse::DEFAULT_ENTRY_TIMEOUT);
+    let negative_timeout = take_optional_value(args, "--mount-negative-timeout")?
+        .map(|value| parse_duration_secs(&value, "mount negative timeout"))
+        .transpose()?
+        .unwrap_or(fuse::DEFAULT_NEGATIVE_TIMEOUT);
     Ok(SessionMountConfig {
         mountpoint,
         source_path,
@@ -40,6 +45,7 @@ pub(crate) fn take_session_mount_config(args: &mut Vec<String>) -> CliResult<Ses
         diagnostics_path,
         attr_timeout,
         entry_timeout,
+        negative_timeout,
     })
 }
 
@@ -86,6 +92,7 @@ fn mount_config(
         connect_timeout: control.connect_timeout,
         attr_timeout: mount.attr_timeout,
         entry_timeout: mount.entry_timeout,
+        negative_timeout: mount.negative_timeout,
         request_timeout: control.request_timeout,
         lookup_timeout: Duration::ZERO,
         read_timeout: Duration::ZERO,

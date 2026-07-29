@@ -98,7 +98,7 @@ pub(super) struct FuseOutHeader {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub(super) struct FuseAttr {
     pub(super) ino: u64,
     pub(super) size: u64,

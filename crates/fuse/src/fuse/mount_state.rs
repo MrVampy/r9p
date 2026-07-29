@@ -40,6 +40,19 @@ pub(super) fn source_binding(
     }
 }
 
+pub(super) fn negative_entry_out(timeout: Duration) -> FuseEntryOut {
+    let (entry_valid, entry_valid_nsec) = duration_parts(timeout);
+    FuseEntryOut {
+        nodeid: 0,
+        generation: 0,
+        entry_valid,
+        attr_valid: 0,
+        entry_valid_nsec,
+        attr_valid_nsec: 0,
+        attr: FuseAttr::default(),
+    }
+}
+
 impl R9pFuse {
     pub(in crate::fuse) fn path_from_source(&self, relative: &[Vec<u8>]) -> Vec<Vec<u8>> {
         let mut path = Vec::with_capacity(self.source_path.len() + relative.len());
@@ -86,6 +99,10 @@ impl R9pFuse {
             attr_valid_nsec,
             attr: self.attr(stat),
         }
+    }
+
+    pub(in crate::fuse) fn negative_entry_out(&self) -> FuseEntryOut {
+        negative_entry_out(self.config.negative_timeout)
     }
 
     pub(in crate::fuse) fn attr_out(&self, stat: &Stat) -> FuseAttrOut {

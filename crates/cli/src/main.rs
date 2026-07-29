@@ -257,7 +257,7 @@ pub(crate) fn usage() -> ! {
     eprintln!("  script file              machine mode");
     eprintln!("  script service file      machine mode without -a");
     eprintln!(
-        "  session serve --socket path [--mount mountpoint] [--mount-source namespace-path] [--change-feed namespace-path --change-feed-stream namespace-path] [--change-feed-cursor-template path-with-{{event_id}}] [--change-feed-reconnect-delay seconds] [endpoint]"
+        "  session serve --socket path [--mount mountpoint] [--mount-source namespace-path] [--mount-attr-timeout seconds] [--mount-entry-timeout seconds] [--mount-negative-timeout seconds] [--change-feed namespace-path --change-feed-stream namespace-path] [--change-feed-cursor-template path-with-{{event_id}}] [--change-feed-reconnect-delay seconds] [endpoint]"
     );
     eprintln!("  session status --socket path");
     eprintln!("  session snapshot --socket path [--depth n] [namespace-path]");

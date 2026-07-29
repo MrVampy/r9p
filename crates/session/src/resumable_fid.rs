@@ -48,12 +48,17 @@ impl ResumableFid {
     /// Reads at a replay-safe application cursor.
     pub fn read(&mut self, offset: u64, count: u32) -> Result<Vec<u8>> {
         loop {
-            match self.binding.client.read_timeout(
-                self.binding.fid,
-                offset,
-                count,
-                self.request_timeout,
-            ) {
+            let result = if self.request_timeout.is_zero() {
+                self.binding.client.read(self.binding.fid, offset, count)
+            } else {
+                self.binding.client.read_timeout(
+                    self.binding.fid,
+                    offset,
+                    count,
+                    self.request_timeout,
+                )
+            };
+            match result {
                 Ok(bytes) => return Ok(bytes),
                 Err(error) if error.is_definitive_transport_failure() => {
                     self.reopen_after_failure()?;
@@ -71,12 +76,17 @@ impl ResumableFid {
     /// applying the bytes twice.
     pub fn write(&mut self, offset: u64, data: &[u8]) -> Result<u32> {
         loop {
-            match self.binding.client.write_timeout(
-                self.binding.fid,
-                offset,
-                data,
-                self.request_timeout,
-            ) {
+            let result = if self.request_timeout.is_zero() {
+                self.binding.client.write(self.binding.fid, offset, data)
+            } else {
+                self.binding.client.write_timeout(
+                    self.binding.fid,
+                    offset,
+                    data,
+                    self.request_timeout,
+                )
+            };
+            match result {
                 Ok(count) => return Ok(count),
                 Err(error) if error.is_definitive_transport_failure() => {
                     self.reopen_after_failure()?;
@@ -102,16 +112,33 @@ impl ResumableFid {
             return Ok(());
         }
         self.closed = true;
-        self.binding
-            .client
-            .clunk_timeout(self.binding.fid, self.request_timeout)
+        if self.request_timeout.is_zero() {
+            self.binding.client.clunk(self.binding.fid)
+        } else {
+            self.binding
+                .client
+                .clunk_timeout(self.binding.fid, self.request_timeout)
+        }
     }
 }
 
 fn open_binding(client: &Client, path: &str, mode: u8, timeout: Duration) -> Result<Binding> {
-    let fid = client.walk_path_timeout(path, timeout)?;
-    if let Err(error) = client.open_timeout(fid, mode, timeout) {
-        let _ = client.clunk_timeout(fid, timeout);
+    let fid = if timeout.is_zero() {
+        client.walk_path(path)?
+    } else {
+        client.walk_path_timeout(path, timeout)?
+    };
+    let open = if timeout.is_zero() {
+        client.open(fid, mode)
+    } else {
+        client.open_timeout(fid, mode, timeout)
+    };
+    if let Err(error) = open {
+        if timeout.is_zero() {
+            let _ = client.clunk(fid);
+        } else {
+            let _ = client.clunk_timeout(fid, timeout);
+        }
         return Err(error);
     }
     Ok(Binding {
@@ -148,6 +175,15 @@ mod tests {
 
     #[test]
     fn reconnect_replays_offsets_without_reapplying_input() {
+        reconnect_replays_offsets_without_reapplying_input_with_timeout(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn zero_timeout_uses_blocking_resumable_operations() {
+        reconnect_replays_offsets_without_reapplying_input_with_timeout(Duration::ZERO);
+    }
+
+    fn reconnect_replays_offsets_without_reapplying_input_with_timeout(timeout: Duration) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
         let address = listener.local_addr().expect("address");
         let state = Arc::new(Mutex::new(ReplayState::default()));
@@ -186,11 +222,9 @@ mod tests {
         )
         .expect("session");
         let mut reader =
-            ResumableFid::open(session.clone(), "/stream", ORDWR, Duration::from_secs(1))
-                .expect("reader");
+            ResumableFid::open(session.clone(), "/stream", ORDWR, timeout).expect("reader");
         let mut writer =
-            ResumableFid::open(session.clone(), "/stream", ORDWR, Duration::from_secs(1))
-                .expect("writer");
+            ResumableFid::open(session.clone(), "/stream", ORDWR, timeout).expect("writer");
 
         assert_eq!(writer.write(0, b"hello").expect("replayed write"), 5);
         assert_eq!(reader.read(0, 64).expect("replayed read"), b"reply");

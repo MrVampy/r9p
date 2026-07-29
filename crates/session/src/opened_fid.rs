@@ -1,6 +1,9 @@
-use std::time::Duration;
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
-use r9p::{multiplex::DelimitedRead, Fid};
+use r9p::{multiplex::DelimitedRead, Fid, OREAD};
 
 use crate::{Client, Error, Result, WriteThenReadError};
 
@@ -15,22 +18,45 @@ pub struct OpenedFid {
     clunk_timeout: Duration,
 }
 
+/// One read-only 9P fid shared by concurrent blocking reads.
+///
+/// This is an explicit opt-in for files whose read offsets identify
+/// independent, replay-safe application observations. Clones share the same
+/// opened fid, and [`Self::cancel`] clunks it once to cancel every outstanding
+/// read through ordinary 9P cancellation.
+#[derive(Clone)]
+pub struct ConcurrentReadFid {
+    inner: Arc<ConcurrentReadFidInner>,
+}
+
+struct ConcurrentReadFidInner {
+    client: Client,
+    fid: Mutex<Option<Fid>>,
+    clunk_timeout: Duration,
+}
+
 impl Client {
     pub fn open_path_timeout(&self, path: &str, mode: u8, timeout: Duration) -> Result<OpenedFid> {
-        let names = path_names(path)?;
-        let fid = if names.is_empty() {
-            self.clone_fid_timeout(self.root_fid(), timeout)?
-        } else {
-            self.walk_timeout(self.root_fid(), &names, timeout)?
-        };
-        if let Err(error) = self.open_timeout(fid, mode, timeout) {
-            let _ = self.clunk_timeout(fid, timeout);
-            return Err(error);
-        }
+        let fid = open_path_fid_timeout(self, path, mode, timeout)?;
         Ok(OpenedFid {
             client: self.clone(),
             fid: Some(fid),
             clunk_timeout: timeout,
+        })
+    }
+
+    pub fn open_concurrent_read_path_timeout(
+        &self,
+        path: &str,
+        timeout: Duration,
+    ) -> Result<ConcurrentReadFid> {
+        let fid = open_path_fid_timeout(self, path, OREAD, timeout)?;
+        Ok(ConcurrentReadFid {
+            inner: Arc::new(ConcurrentReadFidInner {
+                client: self.clone(),
+                fid: Mutex::new(Some(fid)),
+                clunk_timeout: timeout,
+            }),
         })
     }
 }
@@ -111,6 +137,83 @@ impl Drop for OpenedFid {
     fn drop(&mut self) {
         let _ = self.clunk();
     }
+}
+
+impl ConcurrentReadFid {
+    pub fn read_timeout(&self, offset: u64, count: u32, timeout: Duration) -> Result<Vec<u8>> {
+        self.inner
+            .client
+            .read_timeout(self.required_fid()?, offset, count, timeout)
+    }
+
+    pub fn read_delimited_timeout(
+        &self,
+        offset: u64,
+        count: u32,
+        delimiter: u8,
+        timeout: Duration,
+    ) -> Result<Vec<u8>> {
+        self.inner.client.read_delimited_timeout(
+            self.required_fid()?,
+            offset,
+            count,
+            delimiter,
+            timeout,
+        )
+    }
+
+    /// Clunks the shared fid and cancels all outstanding reads.
+    ///
+    /// Every clone becomes closed. Repeated cancellation is idempotent.
+    pub fn cancel(&self) -> Result<()> {
+        self.inner.clunk()
+    }
+
+    pub fn close(self) -> Result<()> {
+        self.cancel()
+    }
+
+    fn required_fid(&self) -> Result<Fid> {
+        self.inner
+            .fid
+            .lock()
+            .map_err(|_| Error::new(libc::EIO, "concurrent read fid lock poisoned"))?
+            .ok_or_else(|| Error::new(libc::EBADF, "concurrent read fid is closed"))
+    }
+}
+
+impl ConcurrentReadFidInner {
+    fn clunk(&self) -> Result<()> {
+        let fid = self
+            .fid
+            .lock()
+            .map_err(|_| Error::new(libc::EIO, "concurrent read fid lock poisoned"))?
+            .take();
+        let Some(fid) = fid else {
+            return Ok(());
+        };
+        self.client.clunk_timeout(fid, self.clunk_timeout)
+    }
+}
+
+impl Drop for ConcurrentReadFidInner {
+    fn drop(&mut self) {
+        let _ = self.clunk();
+    }
+}
+
+fn open_path_fid_timeout(client: &Client, path: &str, mode: u8, timeout: Duration) -> Result<Fid> {
+    let names = path_names(path)?;
+    let fid = if names.is_empty() {
+        client.clone_fid_timeout(client.root_fid(), timeout)?
+    } else {
+        client.walk_timeout(client.root_fid(), &names, timeout)?
+    };
+    if let Err(error) = client.open_timeout(fid, mode, timeout) {
+        let _ = client.clunk_timeout(fid, timeout);
+        return Err(error);
+    }
+    Ok(fid)
 }
 
 fn path_names(path: &str) -> Result<Vec<Vec<u8>>> {

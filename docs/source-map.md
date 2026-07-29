@@ -110,6 +110,10 @@ This map defines the local sources agents should inspect before making source-sp
   - Its direct change-feed adapter uses the same stream-primary and
     cursor-catch-up contract; session-hosted mounts consume the session feed's
     event bus.
+- `notes/source-reading/2026-07-29-qid-version-is-not-inode-identity.md`
+  - Source and live evidence that `qid.version` is modification state, not
+    inode identity, and that remappers and FUSE generations must retain a
+    stable identity across version changes.
 - `crates/fs/src/`
   - Local filesystem-backed 9P server adapter used by `r9p serve` and
     `r9p export`; read-only by default with an explicit writable mode.

@@ -122,7 +122,8 @@ impl NodeTable {
                 .get_mut(&nodeid)
                 .ok_or_else(|| Error::new(libc::ESTALE, format!("unknown nodeid {nodeid}")))?;
             let qid_changed = !same_qid(node.qid, stat.qid);
-            let clunk_fid = match (fid, node.fid, qid_changed) {
+            let identity_changed = !same_inode_identity(node, &stat);
+            let clunk_fid = match (fid, node.fid, identity_changed) {
                 (Some(new_fid), Some(_old_fid), false) => Some(new_fid),
                 (Some(new_fid), Some(old_fid), true) => {
                     node.fid = Some(new_fid);
@@ -140,7 +141,7 @@ impl NodeTable {
             if qid_changed || !is_dir(&node.stat) {
                 node.dir_cache = None;
             }
-            if qid_changed {
+            if identity_changed {
                 node.generation = node.generation.saturating_add(1).max(1);
             }
             node.lookups = node.lookups.saturating_add(1).max(1);
@@ -476,7 +477,7 @@ pub fn mode_kind(stat: &Stat) -> u32 {
 }
 
 fn same_inode_identity(node: &Node, stat: &Stat) -> bool {
-    same_qid(node.qid, stat.qid) && mode_kind(&node.stat) == mode_kind(stat)
+    qid_to_inode(node.qid) == qid_to_inode(stat.qid) && mode_kind(&node.stat) == mode_kind(stat)
 }
 
 fn path_has_prefix(path: &[Vec<u8>], prefix: &[Vec<u8>]) -> bool {

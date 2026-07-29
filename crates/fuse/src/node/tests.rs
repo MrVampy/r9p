@@ -149,6 +149,45 @@ fn rebinding_same_inode_keeps_generation_stable() {
 }
 
 #[test]
+fn rebinding_modified_inode_keeps_generation_and_existing_fid() {
+    let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
+    let docs = nodes
+        .insert_lookup(
+            ROOT_NODEID,
+            2,
+            Stat::new(
+                "docs",
+                Qid::new(r9p::qid::QTDIR, 1, 2),
+                r9p::qid::DMDIR | 0o555,
+            ),
+            b"docs",
+        )
+        .map(|inserted| inserted.nodeid)
+        .expect("docs node should insert");
+
+    let generation = nodes.node(docs).expect("docs").generation;
+    let inserted = nodes
+        .insert_lookup(
+            ROOT_NODEID,
+            3,
+            Stat::new(
+                "docs",
+                Qid::new(r9p::qid::QTDIR, 2, 2),
+                r9p::qid::DMDIR | 0o555,
+            ),
+            b"docs",
+        )
+        .expect("modified docs node should refresh");
+
+    assert_eq!(inserted.nodeid, docs);
+    assert_eq!(inserted.clunk_fid, Some(3));
+    let refreshed = nodes.node(docs).expect("docs");
+    assert_eq!(refreshed.fid, Some(2));
+    assert_eq!(refreshed.qid.version, 2);
+    assert_eq!(refreshed.generation, generation);
+}
+
+#[test]
 fn rebinding_new_inode_bumps_generation() {
     let mut nodes = NodeTable::new(1, Stat::new("", Qid::dir(1), 0o555));
     let docs = nodes

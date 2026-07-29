@@ -2,7 +2,7 @@ mod client;
 mod reader;
 mod util;
 
-pub use client::{DelimitedRead, MultiplexedClient, PendingCall, WriteThenReadError};
+pub use client::{DelimitedRead, MultiplexedClient, PendingCall, PendingRead, WriteThenReadError};
 
 use std::{
     io::{self, Read, Write},
@@ -501,6 +501,53 @@ mod tests {
     }
 
     #[test]
+    fn submitted_reads_are_flushed_before_their_fid_is_clunked() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .map_err(|error| io_error("bind test listener", error))?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| io_error("read listener address", error))?;
+        let server = thread::spawn(move || {
+            let (stream, _) = listener
+                .accept()
+                .map_err(|error| io_error("accept test connection", error))?;
+            scripted_concurrent_read_cancel_server(stream)
+        });
+        let client = MultiplexedClient::connect(
+            TcpStream::connect(address).map_err(|error| io_error("connect test client", error))?,
+            "glenda",
+            "",
+            8192,
+        )?;
+        let fid = client.root_fid();
+        let first = client.submit_read(fid, 7, 100)?;
+        let second = client.submit_read(fid, 9, 100)?;
+
+        client.flush_tag_timeout(first.tag(), Duration::from_secs(1))?;
+        client.flush_tag_timeout(second.tag(), Duration::from_secs(1))?;
+        client.clunk_timeout(fid, Duration::from_secs(1))?;
+
+        assert_eq!(
+            client
+                .wait_read_timeout(first, Duration::from_secs(1))
+                .expect_err("first flushed read should not complete")
+                .message(),
+            b"9P request flushed"
+        );
+        assert_eq!(
+            client
+                .wait_read_timeout(second, Duration::from_secs(1))
+                .expect_err("second flushed read should not complete")
+                .message(),
+            b"9P request flushed"
+        );
+        server
+            .join()
+            .map_err(|_| Error::from("server worker panicked"))??;
+        Ok(())
+    }
+
+    #[test]
     fn timeout_drops_waiter_without_poisoning_later_calls() -> Result<()> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .map_err(|error| io_error("bind test listener", error))?;
@@ -667,6 +714,41 @@ mod tests {
         done.recv()
             .map_err(|_| Error::from("flush test ended before server release"))?;
         Ok(())
+    }
+
+    fn scripted_concurrent_read_cancel_server(mut stream: TcpStream) -> Result<()> {
+        handshake(&mut stream)?;
+        let first = read_tmessage(&mut stream)?;
+        let (fid, first_tag) = match first {
+            TMessage::Read {
+                tag,
+                fid,
+                offset: 7,
+                ..
+            } => (fid, tag),
+            other => return Err(Error::from(format!("expected first Tread, got {other:?}"))),
+        };
+        let second = read_tmessage(&mut stream)?;
+        let second_tag = match second {
+            TMessage::Read {
+                tag,
+                fid: seen_fid,
+                offset: 9,
+                ..
+            } if seen_fid == fid => tag,
+            other => return Err(Error::from(format!("expected second Tread, got {other:?}"))),
+        };
+        read_flush_for(&mut stream, first_tag)?;
+        read_flush_for(&mut stream, second_tag)?;
+        let clunk = read_tmessage(&mut stream)?;
+        match clunk {
+            TMessage::Clunk { tag, fid: seen_fid } if seen_fid == fid => {
+                write_response(&mut stream, &RMessage::Clunk { tag })
+            }
+            other => Err(Error::from(format!(
+                "expected Tclunk after both Tflush requests, got {other:?}"
+            ))),
+        }
     }
 
     fn scripted_timeout_server(mut stream: TcpStream) -> Result<()> {

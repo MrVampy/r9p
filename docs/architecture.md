@@ -152,6 +152,13 @@ periodic snapshot fallback; the configured delay is reconnect backoff, not an
 observation cadence. Read deadlines remain bounded liveness and shutdown
 limits.
 
+The generic pattern is described in
+[`event-driven-9p.md`](event-driven-9p.md). A retained blocking read is the
+subscription. Implicit per-fid streams admit one outstanding read per fid;
+explicit positional feeds may pipeline independent tagged reads when their file
+contract makes offsets replay-safe. Cancellation flushes each outstanding tag
+before clunking the fid.
+
 The adapter advertises only capabilities it implements. In particular it does
 not claim exportfs stale-handle support, because forgotten nodeids are retired,
 and it leaves umask application to Linux rather than claiming `DONT_MASK`.

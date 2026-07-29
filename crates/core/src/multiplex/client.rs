@@ -65,6 +65,12 @@ pub struct PendingCall {
     receiver: Receiver<ReplyResult>,
 }
 
+pub struct PendingRead {
+    call: PendingCall,
+    requested: u32,
+    _observer: CallObserverGuard,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WriteThenReadError {
     Rejected(Error),
@@ -124,6 +130,12 @@ impl PendingCall {
         self.receiver
             .recv()
             .map_err(|_| Error::from("9P reader stopped before response"))?
+    }
+}
+
+impl PendingRead {
+    pub fn tag(&self) -> Tag {
+        self.call.tag()
     }
 }
 
@@ -508,13 +520,34 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
         count: u32,
         timeout: Duration,
     ) -> Result<Vec<u8>> {
+        let pending = self.submit_read(fid, offset, count)?;
+        self.wait_read_timeout(pending, timeout)
+    }
+
+    /// Submits one positional read without waiting for its response.
+    ///
+    /// The returned tag can be flushed independently while other reads on the
+    /// same fid remain in flight.
+    pub fn submit_read(&self, fid: Fid, offset: u64, count: u32) -> Result<PendingRead> {
         let count = codec::clamp_read_count(self.msize(), count);
         let op = {
             let mut protocol = lock(&self.inner.protocol, "lock 9P protocol client")?;
             protocol.read(fid, offset, count).map_err(protocol_error)?
         };
-        match self.call_op_timeout(op, timeout)? {
-            Completion::Read { data } => checked_read_data(data, count),
+        let tag = op.tag;
+        let call = self.submit_op(op)?;
+        let observer = self.observe_call(tag);
+        Ok(PendingRead {
+            call,
+            requested: count,
+            _observer: observer,
+        })
+    }
+
+    pub fn wait_read_timeout(&self, pending: PendingRead, timeout: Duration) -> Result<Vec<u8>> {
+        let requested = pending.requested;
+        match self.wait_pending_timeout(pending.call, timeout, true)? {
+            Completion::Read { data } => checked_read_data(data, requested),
             other => Err(unexpected("Rread", other)),
         }
     }

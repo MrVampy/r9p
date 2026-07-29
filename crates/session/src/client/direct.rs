@@ -5,10 +5,11 @@ use crate::{
 use r9p::{
     codec::Variant,
     fid::Fid,
-    multiplex::{DelimitedRead, MultiplexedClient},
+    multiplex::{DelimitedRead, MultiplexedClient, PendingRead},
     qid::Qid,
     referral::NamespaceReferral,
     stat::Stat,
+    Tag,
 };
 use std::{
     sync::Arc,
@@ -159,6 +160,28 @@ impl DirectClient {
     ) -> Result<Vec<u8>> {
         self.inner
             .read_timeout(fid, offset, count, timeout)
+            .map_err(client_error)
+    }
+
+    pub(crate) fn submit_read(&self, fid: Fid, offset: u64, count: u32) -> Result<PendingRead> {
+        self.inner
+            .submit_read(fid, offset, count)
+            .map_err(client_error)
+    }
+
+    pub(crate) fn wait_read_timeout(
+        &self,
+        pending: PendingRead,
+        timeout: Duration,
+    ) -> Result<Vec<u8>> {
+        self.inner
+            .wait_read_timeout(pending, timeout)
+            .map_err(client_error)
+    }
+
+    pub(crate) fn flush_tag_timeout(&self, tag: Tag, timeout: Duration) -> Result<()> {
+        self.inner
+            .flush_tag_timeout(tag, timeout)
             .map_err(client_error)
     }
 

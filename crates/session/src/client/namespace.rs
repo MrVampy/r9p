@@ -3,8 +3,12 @@ use crate::{
     AuthorityBindings, ConnectionConfig, Error, RequestTracker, Result, WriteThenReadError,
 };
 use r9p::{
-    fid::Fid, multiplex::DelimitedRead, qid::Qid, referral::NamespaceReferral, stat::Stat, Variant,
-    NOFID,
+    fid::Fid,
+    multiplex::{DelimitedRead, PendingRead as MultiplexedPendingRead},
+    qid::Qid,
+    referral::NamespaceReferral,
+    stat::Stat,
+    Tag, Variant, NOFID,
 };
 use std::{
     collections::BTreeMap,
@@ -61,6 +65,21 @@ struct RoutedTarget {
     client: DirectClient,
     remote_path: Vec<Vec<u8>>,
     route_mount: Option<Vec<u8>>,
+}
+
+pub(crate) struct PendingRead {
+    client: DirectClient,
+    pending: MultiplexedPendingRead,
+}
+
+impl PendingRead {
+    pub(crate) fn tag(&self) -> Tag {
+        self.pending.tag()
+    }
+
+    pub(crate) fn wait_timeout(self, timeout: Duration) -> Result<Vec<u8>> {
+        self.client.wait_read_timeout(self.pending, timeout)
+    }
 }
 
 impl Client {
@@ -284,6 +303,27 @@ impl Client {
         binding
             .client
             .read_timeout(binding.remote_fid, offset, count, timeout)
+    }
+
+    pub(crate) fn submit_read(&self, fid: Fid, offset: u64, count: u32) -> Result<PendingRead> {
+        let binding = self.binding(fid)?;
+        let pending = binding
+            .client
+            .submit_read(binding.remote_fid, offset, count)?;
+        Ok(PendingRead {
+            client: binding.client,
+            pending,
+        })
+    }
+
+    pub(crate) fn flush_read_tag_timeout(
+        &self,
+        fid: Fid,
+        tag: Tag,
+        timeout: Duration,
+    ) -> Result<()> {
+        let binding = self.binding(fid)?;
+        binding.client.flush_tag_timeout(tag, timeout)
     }
 
     pub fn read(&self, fid: Fid, offset: u64, count: u32) -> Result<Vec<u8>> {

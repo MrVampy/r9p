@@ -1,9 +1,10 @@
 use std::{
+    collections::BTreeSet,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
-use r9p::{multiplex::DelimitedRead, Fid, OREAD};
+use r9p::{multiplex::DelimitedRead, Fid, Tag, OREAD};
 
 use crate::{Client, Error, Result, WriteThenReadError};
 
@@ -22,8 +23,8 @@ pub struct OpenedFid {
 ///
 /// This is an explicit opt-in for files whose read offsets identify
 /// independent, replay-safe application observations. Clones share the same
-/// opened fid, and [`Self::cancel`] clunks it once to cancel every outstanding
-/// read through ordinary 9P cancellation.
+/// opened fid. [`Self::cancel`] flushes every outstanding request tag before
+/// clunking the fid.
 #[derive(Clone)]
 pub struct ConcurrentReadFid {
     inner: Arc<ConcurrentReadFidInner>,
@@ -31,8 +32,18 @@ pub struct ConcurrentReadFid {
 
 struct ConcurrentReadFidInner {
     client: Client,
-    fid: Mutex<Option<Fid>>,
+    state: Mutex<ConcurrentReadFidState>,
     clunk_timeout: Duration,
+}
+
+struct ConcurrentReadFidState {
+    fid: Option<Fid>,
+    active: BTreeSet<Tag>,
+}
+
+struct ActiveConcurrentRead {
+    inner: Arc<ConcurrentReadFidInner>,
+    tag: Tag,
 }
 
 impl Client {
@@ -54,7 +65,10 @@ impl Client {
         Ok(ConcurrentReadFid {
             inner: Arc::new(ConcurrentReadFidInner {
                 client: self.clone(),
-                fid: Mutex::new(Some(fid)),
+                state: Mutex::new(ConcurrentReadFidState {
+                    fid: Some(fid),
+                    active: BTreeSet::new(),
+                }),
                 clunk_timeout: timeout,
             }),
         })
@@ -141,9 +155,25 @@ impl Drop for OpenedFid {
 
 impl ConcurrentReadFid {
     pub fn read_timeout(&self, offset: u64, count: u32, timeout: Duration) -> Result<Vec<u8>> {
-        self.inner
-            .client
-            .read_timeout(self.required_fid()?, offset, count, timeout)
+        let pending = {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .map_err(|_| Error::new(libc::EIO, "concurrent read fid lock poisoned"))?;
+            let fid = state
+                .fid
+                .ok_or_else(|| Error::new(libc::EBADF, "concurrent read fid is closed"))?;
+            let pending = self.inner.client.submit_read(fid, offset, count)?;
+            state.active.insert(pending.tag());
+            pending
+        };
+        let tag = pending.tag();
+        let _active = ActiveConcurrentRead {
+            inner: Arc::clone(&self.inner),
+            tag,
+        };
+        pending.wait_timeout(timeout)
     }
 
     pub fn read_delimited_timeout(
@@ -153,16 +183,12 @@ impl ConcurrentReadFid {
         delimiter: u8,
         timeout: Duration,
     ) -> Result<Vec<u8>> {
-        self.inner.client.read_delimited_timeout(
-            self.required_fid()?,
-            offset,
-            count,
-            delimiter,
-            timeout,
-        )
+        read_delimited_with(offset, count, delimiter, |offset, remaining| {
+            self.read_timeout(offset, remaining, timeout)
+        })
     }
 
-    /// Clunks the shared fid and cancels all outstanding reads.
+    /// Flushes every outstanding read tag, then clunks the shared fid.
     ///
     /// Every clone becomes closed. Repeated cancellation is idempotent.
     pub fn cancel(&self) -> Result<()> {
@@ -172,27 +198,42 @@ impl ConcurrentReadFid {
     pub fn close(self) -> Result<()> {
         self.cancel()
     }
-
-    fn required_fid(&self) -> Result<Fid> {
-        self.inner
-            .fid
-            .lock()
-            .map_err(|_| Error::new(libc::EIO, "concurrent read fid lock poisoned"))?
-            .ok_or_else(|| Error::new(libc::EBADF, "concurrent read fid is closed"))
-    }
 }
 
 impl ConcurrentReadFidInner {
     fn clunk(&self) -> Result<()> {
-        let fid = self
-            .fid
-            .lock()
-            .map_err(|_| Error::new(libc::EIO, "concurrent read fid lock poisoned"))?
-            .take();
+        let (fid, active) = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| Error::new(libc::EIO, "concurrent read fid lock poisoned"))?;
+            let fid = state.fid.take();
+            let active = state.active.iter().copied().collect::<Vec<_>>();
+            (fid, active)
+        };
         let Some(fid) = fid else {
             return Ok(());
         };
+        for tag in active {
+            let _ = self.client.flush_read_tag_timeout(
+                fid,
+                tag,
+                self.clunk_timeout.min(Duration::from_millis(250)),
+            );
+        }
         self.client.clunk_timeout(fid, self.clunk_timeout)
+    }
+
+    fn finish(&self, tag: Tag) {
+        if let Ok(mut state) = self.state.lock() {
+            state.active.remove(&tag);
+        }
+    }
+}
+
+impl Drop for ActiveConcurrentRead {
+    fn drop(&mut self) {
+        self.inner.finish(self.tag);
     }
 }
 
@@ -233,6 +274,55 @@ fn path_names(path: &str) -> Result<Vec<Vec<u8>>> {
             }
         })
         .collect()
+}
+
+fn read_delimited_with<F>(
+    mut offset: u64,
+    count: u32,
+    delimiter: u8,
+    mut read_once: F,
+) -> Result<Vec<u8>>
+where
+    F: FnMut(u64, u32) -> Result<Vec<u8>>,
+{
+    if count == 0 {
+        return Err(Error::new(
+            libc::EINVAL,
+            "delimiter-terminated 9P read requires a nonzero byte bound",
+        ));
+    }
+    let mut remaining = count;
+    let mut out = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
+    while remaining > 0 {
+        let data = read_once(offset, remaining)?;
+        if data.is_empty() {
+            return Err(Error::new(
+                libc::EIO,
+                "9P read reached EOF before the record delimiter",
+            ));
+        }
+        if let Some(position) = data.iter().position(|byte| *byte == delimiter) {
+            if position + 1 != data.len() {
+                return Err(Error::new(
+                    libc::EPROTO,
+                    "9P read returned bytes after the record delimiter",
+                ));
+            }
+            out.extend(data);
+            return Ok(out);
+        }
+        let read_count = u32::try_from(data.len())
+            .map_err(|_| Error::new(libc::EOVERFLOW, "read count overflow"))?;
+        out.extend(data);
+        offset = offset
+            .checked_add(u64::from(read_count))
+            .ok_or_else(|| Error::new(libc::EOVERFLOW, "9P offset overflow"))?;
+        remaining = remaining.saturating_sub(read_count);
+    }
+    Err(Error::new(
+        libc::EMSGSIZE,
+        "9P read reached its byte bound before the record delimiter",
+    ))
 }
 
 #[cfg(test)]

@@ -99,6 +99,15 @@ choice, not a 9P constant. A depth such as eight should be justified by event
 cadence, network delay and jitter, server request capacity, retained history,
 and measured saturation. Increasing it does not create more events.
 
+Do not consume a connection's entire asynchronous request capacity with
+blocking reads if that connection must also carry metadata or mutation
+requests. A client can reserve explicit headroom, or it can dedicate one
+connection to the blocking-read window and retain another admitted connection
+for status and control. The latter keeps stream backpressure independent of
+interactive control without introducing another protocol. The read lane is
+still ordinary 9P, uses the same caller identity and namespace contract, and
+must be cancelled through `Tflush` before it is closed.
+
 ## Cancellation
 
 The request tag is the protocol cancellation identity.

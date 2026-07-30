@@ -220,6 +220,10 @@ The r9p layers preserve these boundaries:
   application contract permits replay.
 - Feed adapters use blocking live reads and cursor-based catch-up without
   periodic polling.
+- The BEAM Front adapter tags and multiplexes native-port calls. A blocking
+  request intake can remain pending while independent service processes update
+  projections or complete earlier requests against the same synchronized
+  Front.
 - Backends own event meaning, cursor encoding, history retention, and gap
   policy.
 

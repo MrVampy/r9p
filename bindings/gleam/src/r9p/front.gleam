@@ -179,12 +179,15 @@ pub fn next_request(
   front: Front,
   timeout_ms: Int,
 ) -> Result(Option(Request), String) {
-  use line <- result.try(
-    run(front.adapter, "front-next-request", [
+  use line <- result.try(run_with_timeout(
+    front.adapter,
+    "front-next-request",
+    [
       int.to_string(front.id),
       int.to_string(timeout_ms),
-    ]),
-  )
+    ],
+    timeout_ms + front.adapter.timeout_ms,
+  ))
   case codec.fields(line) {
     ["front-timeout"] -> Ok(None)
     [
@@ -324,10 +327,19 @@ fn run(
   operation: String,
   fields: List(String),
 ) -> Result(String, String) {
+  run_with_timeout(adapter, operation, fields, adapter.timeout_ms)
+}
+
+fn run_with_timeout(
+  adapter: Adapter,
+  operation: String,
+  fields: List(String),
+  timeout_ms: Int,
+) -> Result(String, String) {
   request_port(
     adapter.executable,
     string.join([operation, ..fields], "\t"),
-    adapter.timeout_ms,
+    timeout_ms,
   )
 }
 

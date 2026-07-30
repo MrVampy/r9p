@@ -43,7 +43,9 @@ ensure_server(ServerName, Executable) ->
 start_server(ServerName, Executable) ->
     case resolve_executable(Executable) of
         {ok, Resolved} ->
-            Pid = spawn(fun() -> server_loop(Resolved, start_port(Resolved)) end),
+            Pid = spawn(fun() ->
+                server_loop(Resolved, start_port(Resolved), #{}, <<>>)
+            end),
             case catch register(ServerName, Pid) of
                 true ->
                     {ok, Pid};
@@ -90,85 +92,186 @@ start_port(Executable) ->
             {error, format_reason(Reason)}
     end.
 
-server_loop(Executable, PortState) ->
+server_loop(Executable, PortState, Pending, Buffer) ->
     receive
         {request, From, Ref, Line, TimeoutMs} ->
-            {Reply, NextPortState} =
-                handle_request(Executable, PortState, Line, TimeoutMs),
-            From ! {Ref, Reply},
-            server_loop(Executable, NextPortState);
+            case send_request(Executable, PortState, Line, TimeoutMs) of
+                {ok, RequestId, Timer, NextPortState} ->
+                    NextPending = maps:put(
+                        RequestId,
+                        {From, Ref, Timer},
+                        Pending
+                    ),
+                    server_loop(Executable, NextPortState, NextPending, Buffer);
+                {error, Reason, NextPortState} ->
+                    From ! {Ref, {error, Reason}},
+                    fail_pending(Pending, Reason),
+                    server_loop(Executable, NextPortState, #{}, <<>>)
+            end;
+        {request_timeout, RequestId} ->
+            case maps:take(RequestId, Pending) of
+                error ->
+                    server_loop(Executable, PortState, Pending, Buffer);
+                {{From, Ref, _Timer}, Remaining} ->
+                    From ! {Ref, {error, <<"r9p_beam_port_timeout">>}},
+                    fail_pending(Remaining, <<"r9p_beam_port_timeout">>),
+                    close_port_state(PortState),
+                    server_loop(Executable, start_port(Executable), #{}, <<>>)
+            end;
+        {Port, {data, {noeol, Line}}} ->
+            case is_current_port(PortState, Port) of
+                true ->
+                    server_loop(
+                        Executable,
+                        PortState,
+                        Pending,
+                        <<Buffer/binary, Line/binary>>
+                    );
+                false ->
+                    server_loop(Executable, PortState, Pending, Buffer)
+            end;
+        {Port, {data, {eol, Line}}} ->
+            handle_response_line(
+                Executable,
+                PortState,
+                Port,
+                Pending,
+                Buffer,
+                Line
+            );
+        {Port, {data, Line}} ->
+            handle_response_line(
+                Executable,
+                PortState,
+                Port,
+                Pending,
+                Buffer,
+                Line
+            );
+        {Port, {exit_status, Status}} ->
+            case is_current_port(PortState, Port) of
+                true ->
+                    Reason = <<
+                        "r9p_beam_port_exit:",
+                        (integer_to_binary(Status))/binary
+                    >>,
+                    fail_pending(Pending, Reason),
+                    close_port_state(PortState),
+                    server_loop(Executable, start_port(Executable), #{}, <<>>);
+                false ->
+                    server_loop(Executable, PortState, Pending, Buffer)
+            end;
         stop ->
             close_port_state(PortState),
+            fail_pending(Pending, <<"r9p_beam_port_stopped">>),
             ok
     end.
 
-handle_request(Executable, {error, Reason}, _Line, _TimeoutMs) ->
-    {{error, <<"r9p_beam_port_start_failed:", Reason/binary>>}, start_port(Executable)};
-handle_request(Executable, {ok, Port}, Line, TimeoutMs) ->
-    case catch port_command(Port, <<Line/binary, "\n">>) of
+send_request(Executable, {error, Reason}, _Line, _TimeoutMs) ->
+    {
+        error,
+        <<"r9p_beam_port_start_failed:", Reason/binary>>,
+        start_port(Executable)
+    };
+send_request(Executable, {ok, Port} = PortState, Line, TimeoutMs) ->
+    RequestId = erlang:unique_integer([monotonic, positive]),
+    Envelope = <<
+        (integer_to_binary(RequestId))/binary,
+        "\t",
+        Line/binary,
+        "\n"
+    >>,
+    case catch port_command(Port, Envelope) of
         true ->
-            case await_response(Port, deadline(TimeoutMs), <<>>) of
-                {reply, Reply, keep} ->
-                    {Reply, {ok, Port}};
-                {reply, Reply, restart} ->
-                    close_port_state({ok, Port}),
-                    {Reply, start_port(Executable)}
-            end;
+            Timer = erlang:send_after(
+                TimeoutMs,
+                self(),
+                {request_timeout, RequestId}
+            ),
+            {ok, RequestId, Timer, PortState};
         _ ->
-            close_port_state({ok, Port}),
+            close_port_state(PortState),
             {
-                {error, <<"r9p_beam_port_command_failed">>},
+                error,
+                <<"r9p_beam_port_command_failed">>,
                 start_port(Executable)
             }
     end.
 
-await_response(Port, Deadline, Buffer) ->
-    Remaining = remaining_timeout(Deadline),
-    receive
-        {Port, {data, {eol, Line}}} ->
-            parse_response(<<Buffer/binary, Line/binary>>);
-        {Port, {data, {noeol, Line}}} ->
-            await_response(Port, Deadline, <<Buffer/binary, Line/binary>>);
-        {Port, {data, Line}} ->
-            parse_response(<<Buffer/binary, Line/binary>>);
-        {Port, {exit_status, Status}} ->
-            {
-                reply,
-                {error, <<"r9p_beam_port_exit:", (integer_to_binary(Status))/binary>>},
-                restart
-            }
-    after Remaining ->
-        {reply, {error, <<"r9p_beam_port_timeout">>}, restart}
+handle_response_line(Executable, PortState, Port, Pending, Buffer, Line) ->
+    case is_current_port(PortState, Port) of
+        false ->
+            server_loop(Executable, PortState, Pending, Buffer);
+        true ->
+            case parse_tagged_response(<<Buffer/binary, Line/binary>>) of
+                {ok, RequestId, Reply} ->
+                    case maps:take(RequestId, Pending) of
+                        error ->
+                            server_loop(Executable, PortState, Pending, <<>>);
+                        {{From, Ref, Timer}, Remaining} ->
+                            _ = erlang:cancel_timer(Timer),
+                            From ! {Ref, Reply},
+                            server_loop(
+                                Executable,
+                                PortState,
+                                Remaining,
+                                <<>>
+                            )
+                    end;
+                {error, Reason} ->
+                    fail_pending(Pending, Reason),
+                    close_port_state(PortState),
+                    server_loop(Executable, start_port(Executable), #{}, <<>>)
+            end
+    end.
+
+parse_tagged_response(Line) ->
+    case binary:match(Line, <<"\t">>) of
+        {Position, 1} ->
+            <<RequestIdBinary:Position/binary, _:8, Response/binary>> = Line,
+            try binary_to_integer(RequestIdBinary) of
+                RequestId ->
+                    {ok, RequestId, parse_response(Response)}
+            catch
+                _:_ ->
+                    {error, <<"r9p_beam_port_invalid_response_id">>}
+            end;
+        nomatch ->
+            {error, <<"r9p_beam_port_missing_response_id">>}
     end.
 
 parse_response(<<"ok\t", PayloadHex/binary>>) ->
     case decode_hex(PayloadHex) of
-        {ok, Payload} -> {reply, {ok, Payload}, keep};
-        {error, Reason} -> {reply, {error, Reason}, keep}
+        {ok, Payload} -> {ok, Payload};
+        {error, Reason} -> {error, Reason}
     end;
 parse_response(<<"error\t", ReasonHex/binary>>) ->
     case decode_hex(ReasonHex) of
-        {ok, Reason} -> {reply, {error, Reason}, keep};
-        {error, DecodeReason} -> {reply, {error, DecodeReason}, keep}
+        {ok, Reason} -> {error, Reason};
+        {error, DecodeReason} -> {error, DecodeReason}
     end;
 parse_response(Other) ->
-    {reply, {error, <<"r9p_beam_port_unexpected_response:", Other/binary>>}, keep}.
+    {error, <<"r9p_beam_port_unexpected_response:", Other/binary>>}.
+
+is_current_port({ok, Current}, Candidate) ->
+    Current =:= Candidate;
+is_current_port({error, _}, _Candidate) ->
+    false.
+
+fail_pending(Pending, Reason) ->
+    maps:foreach(
+        fun(_RequestId, {From, Ref, Timer}) ->
+            _ = erlang:cancel_timer(Timer),
+            From ! {Ref, {error, Reason}}
+        end,
+        Pending
+    ).
 
 close_port_state({ok, Port}) ->
     catch erlang:port_close(Port),
     ok;
 close_port_state({error, _}) ->
     ok.
-
-deadline(TimeoutMs) ->
-    erlang:monotonic_time(millisecond) + TimeoutMs.
-
-remaining_timeout(Deadline) ->
-    Remaining = Deadline - erlang:monotonic_time(millisecond),
-    case Remaining > 0 of
-        true -> Remaining;
-        false -> 0
-    end.
 
 format_reason(Reason) ->
     unicode:characters_to_binary(io_lib:format("~p", [Reason])).

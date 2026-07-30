@@ -122,6 +122,9 @@ This map defines the local sources agents should inspect before making source-sp
 - `crates/beam-port/src/lib.rs` and `bindings/gleam/`
   - BEAM target encoding and caller-local authority bindings for the same
     namespace client.
+  - Tagged native-port multiplexing lets a blocking Front request intake
+    remain pending while independent BEAM processes publish and complete work
+    against the same Front.
 
 Use these when the question is "what does `r9p` do now?"
 

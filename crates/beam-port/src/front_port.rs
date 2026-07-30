@@ -13,6 +13,24 @@ struct FrontState {
     serves: Vec<ServeHandle>,
 }
 
+pub(crate) struct PendingRequest {
+    front: Front,
+    timeout: Duration,
+}
+
+impl PendingRequest {
+    pub(crate) fn complete(self) -> Result<String, String> {
+        let request = self
+            .front
+            .next_request(self.timeout)
+            .map_err(|error| error.to_string())?;
+        Ok(match request {
+            Some(request) => request_output(&request),
+            None => "front-timeout".to_string(),
+        })
+    }
+}
+
 impl Drop for FrontState {
     fn drop(&mut self) {
         for serve in self.serves.drain(..) {
@@ -22,6 +40,23 @@ impl Drop for FrontState {
 }
 
 impl FrontManager {
+    pub(crate) fn pending_request(
+        &self,
+        fields: &[&str],
+    ) -> Option<Result<PendingRequest, String>> {
+        match fields {
+            ["front-next-request", raw_id, timeout_ms] => {
+                Some(self.front_ref(raw_id).and_then(|state| {
+                    parse_u64("timeout_ms", timeout_ms).map(|timeout_ms| PendingRequest {
+                        front: state.front.clone(),
+                        timeout: Duration::from_millis(timeout_ms),
+                    })
+                }))
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn handle(&mut self, fields: &[&str]) -> Result<String, String> {
         match fields {
             ["front-new"] => {
@@ -137,18 +172,6 @@ impl FrontManager {
                     hex::encode(addr.as_bytes())
                 ))
             }
-            ["front-next-request", raw_id, timeout_ms] => {
-                let state = self.front(raw_id)?;
-                let timeout_ms = parse_u64("timeout_ms", timeout_ms)?;
-                let request = state
-                    .front
-                    .next_request(Duration::from_millis(timeout_ms))
-                    .map_err(|error| error.to_string())?;
-                Ok(match request {
-                    Some(request) => request_output(&request),
-                    None => "front-timeout".to_string(),
-                })
-            }
             ["front-complete-request", raw_id, prefix, request_id, data] => {
                 let state = self.front(raw_id)?;
                 let prefix = hex::decode_text(prefix)?;
@@ -208,6 +231,13 @@ impl FrontManager {
         let id = parse_u64("front_id", raw_id)?;
         self.fronts
             .get_mut(&id)
+            .ok_or_else(|| format!("unknown_front:{id}"))
+    }
+
+    fn front_ref(&self, raw_id: &str) -> Result<&FrontState, String> {
+        let id = parse_u64("front_id", raw_id)?;
+        self.fronts
+            .get(&id)
             .ok_or_else(|| format!("unknown_front:{id}"))
     }
 }

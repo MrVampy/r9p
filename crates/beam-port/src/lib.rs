@@ -1,5 +1,6 @@
 mod front_port;
 mod hex;
+mod stdio;
 
 use r9p::{
     blocking::{self, ReadWrite},
@@ -13,12 +14,7 @@ use session::{
     AuthorityBindings, Client as NamespaceClient, ConnectionConfig, Error as SessionError,
     Result as SessionResult,
 };
-use std::{
-    collections::HashMap,
-    io::{self, BufRead, Write},
-    path::PathBuf,
-    time::Duration,
-};
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 #[cfg(unix)]
 use std::{os::unix::net::UnixStream, path::Path};
@@ -42,25 +38,15 @@ struct PeerClientServer {
 }
 
 pub fn run_stdio() -> Result<(), String> {
-    let stdin = io::stdin();
-    let mut stdout = io::stdout().lock();
-    let mut server = PeerClientServer::default();
-
-    for line in stdin.lock().lines() {
-        let line = line.map_err(|error| format!("read r9p beam port stdin: {error}"))?;
-        let response = response_line(server.handle_line(&line));
-        writeln!(stdout, "{response}")
-            .map_err(|error| format!("write r9p beam port stdout: {error}"))?;
-        stdout
-            .flush()
-            .map_err(|error| format!("flush r9p beam port stdout: {error}"))?;
-    }
-
-    Ok(())
+    stdio::run()
 }
 
 impl PeerClientServer {
     fn handle_line(&mut self, line: &str) -> Result<String, String> {
+        self.dispatch_line(line).complete()
+    }
+
+    fn dispatch_line(&mut self, line: &str) -> stdio::ResponseWork {
         let fields = line
             .trim_end_matches(['\r', '\n'])
             .split('\t')
@@ -69,13 +55,16 @@ impl PeerClientServer {
             .first()
             .is_some_and(|operation| operation.starts_with("front-"))
         {
-            return self.fronts.handle(&fields);
+            return match self.fronts.pending_request(&fields) {
+                Some(Ok(request)) => stdio::ResponseWork::Pending(request),
+                Some(Err(error)) => stdio::ResponseWork::Ready(Err(error)),
+                None => stdio::ResponseWork::Ready(self.fronts.handle(&fields)),
+            };
         }
         let Some((operation, fields)) = fields.split_first() else {
-            return Err("invalid_r9p_beam_port_request".to_string());
+            return stdio::ResponseWork::Ready(Err("invalid_r9p_beam_port_request".to_string()));
         };
-        let (key, args) = target_and_args(fields)?;
-        match (*operation, args) {
+        let response = target_and_args(fields).and_then(|(key, args)| match (*operation, args) {
             ("version", []) => version_probe_output(&key).map_err(|error| error.to_string()),
             ("attach", []) => self.with_client_retry(&key, attach_output),
             ("stat", [path]) => {
@@ -145,7 +134,8 @@ impl PeerClientServer {
                 self.with_client(&key, |client| remove_output(client, &path))
             }
             _ => Err("invalid_r9p_beam_port_request".to_string()),
-        }
+        });
+        stdio::ResponseWork::Ready(response)
     }
 
     fn with_client_retry(

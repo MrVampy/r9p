@@ -18,8 +18,8 @@ fn pending_front_request_does_not_block_projection_updates() {
     request(&mut stdin, 1, "front-new");
     let (request_id, response) = response(&mut stdout);
     assert_eq!(request_id, 1);
-    let response = response.expect("front-new response");
-    let front_id = response
+    let front_response = response.expect("front-new response");
+    let front_id = front_response
         .strip_prefix("front\t")
         .expect("front id response")
         .parse::<u64>()

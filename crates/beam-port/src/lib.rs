@@ -42,6 +42,7 @@ pub fn run_stdio() -> Result<(), String> {
 }
 
 impl PeerClientServer {
+    #[cfg(test)]
     fn handle_line(&mut self, line: &str) -> Result<String, String> {
         self.dispatch_line(line).complete()
     }

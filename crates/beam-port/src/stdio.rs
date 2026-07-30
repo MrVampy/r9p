@@ -11,6 +11,7 @@ pub(super) enum ResponseWork {
 }
 
 impl ResponseWork {
+    #[cfg(test)]
     pub(super) fn complete(self) -> Result<String, String> {
         match self {
             Self::Ready(response) => response,

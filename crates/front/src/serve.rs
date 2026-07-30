@@ -50,6 +50,10 @@ impl ServeHandle {
 }
 
 impl Front {
+    pub fn connection_handler(&self) -> FrontConnectionHandler {
+        FrontConnectionHandler::new(self.clone())
+    }
+
     pub fn serve_stream<S>(&self, stream: S) -> Result<()>
     where
         S: FrontServeStream,
@@ -177,11 +181,11 @@ where
             session_uname,
             ..ServerConfig::default()
         },
-        Arc::new(FrontConnectionHandler::new(front.clone())),
+        Arc::new(front.connection_handler()),
     )
 }
 
-struct FrontConnectionHandler {
+pub struct FrontConnectionHandler {
     front: Front,
     tree: Mutex<crate::FrontTree>,
 }

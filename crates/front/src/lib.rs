@@ -11,6 +11,7 @@ pub use model::{
     CreateRelayRequest, IntakeRequest, PushedDirectoryMetadata, PushedEntryMetadata,
     PushedFileMetadata, RequestContext, DEFAULT_IOUNIT, DEFAULT_LOG_CAPACITY,
 };
+pub use serve::FrontConnectionHandler;
 pub use tree::FrontTree;
 
 #[cfg(test)]

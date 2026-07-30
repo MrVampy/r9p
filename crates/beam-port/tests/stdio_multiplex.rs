@@ -16,7 +16,7 @@ fn pending_front_request_does_not_block_projection_updates() {
     let mut stdout = BufReader::new(stdout);
 
     request(&mut stdin, 1, "front-new");
-    let (request_id, response) = response(&mut stdout);
+    let (request_id, response) = read_response(&mut stdout);
     assert_eq!(request_id, 1);
     let front_response = response.expect("front-new response");
     let front_id = front_response
@@ -36,19 +36,19 @@ fn pending_front_request_does_not_block_projection_updates() {
         &format!("front-set\t{front_id}\t737461747573\t7265616479"),
     );
 
-    let (request_id, response) = response(&mut stdout);
+    let (request_id, response) = read_response(&mut stdout);
     assert_eq!(
         request_id, 3,
         "projection update must pass a pending request intake"
     );
     assert_eq!(response, Ok("front-set".to_string()));
 
-    let (request_id, response) = response(&mut stdout);
+    let (request_id, response) = read_response(&mut stdout);
     assert_eq!(request_id, 2);
     assert_eq!(response, Ok("front-timeout".to_string()));
 
     request(&mut stdin, 4, &format!("front-stop\t{front_id}"));
-    let (request_id, response) = response(&mut stdout);
+    let (request_id, response) = read_response(&mut stdout);
     assert_eq!(request_id, 4);
     assert_eq!(response, Ok("front-stop".to_string()));
 
@@ -61,7 +61,7 @@ fn request(stdin: &mut ChildStdin, request_id: u64, command: &str) {
     stdin.flush().expect("flush beam port request");
 }
 
-fn response(reader: &mut impl BufRead) -> (u64, Result<String, String>) {
+fn read_response(reader: &mut impl BufRead) -> (u64, Result<String, String>) {
     let mut line = String::new();
     reader
         .read_line(&mut line)

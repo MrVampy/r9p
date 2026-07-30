@@ -166,6 +166,12 @@
                       sessionAuthModuleEval.config.systemd.tmpfiles.rules
                     then "1"
                     else "0";
+                  recursiveOwnerRulePresent =
+                    if builtins.elem
+                      "Z /var/lib/r9p-session-auth - r9p-proof r9p-proof -"
+                      sessionAuthModuleEval.config.systemd.tmpfiles.rules
+                    then "1"
+                    else "0";
                   publicKeyRulePresent =
                     if builtins.elem
                       "z /var/lib/r9p-session-auth/proof.key.pub 0644 r9p-proof r9p-proof -"
@@ -182,6 +188,7 @@
                 test "$serviceGroup" = "r9p-proof"
                 test "$directoryRulePresent" = "1"
                 test "$privateKeyRulePresent" = "1"
+                test "$recursiveOwnerRulePresent" = "1"
                 test "$publicKeyRulePresent" = "1"
                 case "$executable" in
                   */bin/r9p\ auth-keygen\ --private\ /var/lib/r9p-session-auth/proof.key\ --public\ /var/lib/r9p-session-auth/proof.key.pub) ;;

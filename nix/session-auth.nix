@@ -101,9 +101,16 @@ let
     }
   ];
 
-  keyDirectories = lib.mapAttrsToList
-    (_: entries: (builtins.head entries).directoryRule)
-    directoryGroups;
+  keyDirectories = lib.concatLists (lib.mapAttrsToList
+    (directory: entries:
+      let
+        entry = builtins.head entries;
+      in
+      [
+        entry.directoryRule
+        "Z ${directory} - ${entry.key.user} ${entry.key.group} -"
+      ])
+    directoryGroups);
   keyFiles = lib.concatMap
     (entry: [
       "z ${entry.key.privateKeyFile} 0600 ${entry.key.user} ${entry.key.group} -"

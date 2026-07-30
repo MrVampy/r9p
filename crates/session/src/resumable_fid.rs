@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use r9p::Fid;
 
-use crate::{Client, ClientSession, Error, Result};
+use crate::{Client, ClientSession, Result};
 
 /// One reopened 9P file whose offsets are application-level replay cursors.
 ///

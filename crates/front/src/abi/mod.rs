@@ -30,6 +30,7 @@ pub const CAPABILITY_ATOMIC_CREATE_WRITE: u64 = 1 << 4;
 pub const CAPABILITY_NAMESPACE_MUTATION_RELAYS: u64 = 1 << 5;
 pub const CAPABILITY_AUTHENTICATED_SERVE: u64 = 1 << 6;
 pub const CAPABILITY_CLIENT_AUTHORITY_BINDINGS: u64 = 1 << 7;
+pub const CAPABILITY_SNAPSHOT_READ_RELAY: u64 = 1 << 8;
 pub const CAPABILITIES: u64 = CAPABILITY_PUSHED_NAMESPACE_METADATA
     | CAPABILITY_REQUEST_CONTEXT_V2
     | CAPABILITY_SYNTHETIC_READ_RELAY
@@ -37,7 +38,8 @@ pub const CAPABILITIES: u64 = CAPABILITY_PUSHED_NAMESPACE_METADATA
     | CAPABILITY_ATOMIC_CREATE_WRITE
     | CAPABILITY_NAMESPACE_MUTATION_RELAYS
     | CAPABILITY_AUTHENTICATED_SERVE
-    | CAPABILITY_CLIENT_AUTHORITY_BINDINGS;
+    | CAPABILITY_CLIENT_AUTHORITY_BINDINGS
+    | CAPABILITY_SNAPSHOT_READ_RELAY;
 
 const OK: i32 = 0;
 const TIMEOUT: i32 = 1;
@@ -327,6 +329,27 @@ pub unsafe extern "C" fn r9p_front_register_read_relay(
         return INVALID;
     };
     match abi.front.register_read_relay(path) {
+        Ok(()) => {
+            clear_last_error(abi);
+            OK
+        }
+        Err(error) => set_last_error(abi, error),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn r9p_front_register_snapshot_read_relay(
+    handle: *mut FrontAbi,
+    path: *const c_char,
+    path_len: usize,
+) -> i32 {
+    let Some(abi) = (unsafe { handle.as_ref() }) else {
+        return INVALID;
+    };
+    let Some(path) = (unsafe { str_arg(path, path_len) }) else {
+        return INVALID;
+    };
+    match abi.front.register_snapshot_read_relay(path) {
         Ok(()) => {
             clear_last_error(abi);
             OK

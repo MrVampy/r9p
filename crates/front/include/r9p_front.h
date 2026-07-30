@@ -2,7 +2,7 @@
 #define R9P_FRONT_H
 
 /*
- * r9p front C ABI, generation 20.
+ * r9p front C ABI, generation 21.
  *
  * Contract rules:
  * - Call r9p_front_abi_version() first and require
@@ -36,7 +36,8 @@
  *   request_copy(request_id), then a completion/rejection call according to
  *   the registered shape. The prefix is the value to pass to the completion
  *   call: the intake prefix for register_intake, or the registered path for
- *   register_rpc, register_read_relay, register_write_relay,
+ *   register_rpc, register_read_relay, register_snapshot_read_relay,
+ *   register_write_relay,
  *   register_remove_relay, or
  *   register_wstat_relay.
  *   request_prefix_copy and request_context_copy with cap=0 return the
@@ -67,6 +68,11 @@
  *     enqueues one request carrying its offset and count. complete_request
  *     supplies that read's bytes; reject_request returns the supplied 9P
  *     error. The response is consumed by that Tread and is not cached.
+ *   - register_snapshot_read_relay(path): read-only finite-record file.
+ *     The first Tread on an opened fid enqueues one request.
+ *     complete_request supplies the full record, which remains pinned to
+ *     that fid and serves all later ranges through explicit EOF. Clunk
+ *     retires it. Use for coherent dynamic status and report files.
  *   - register_write_relay(path): synchronous write relay. A client opens
  *     <path> O_WRITE and writes bytes; the Rwrite count is returned only
  *     after the host calls complete_write. reject_write returns the supplied
@@ -142,6 +148,7 @@
 #define R9P_FRONT_CAP_NAMESPACE_MUTATION_RELAYS (UINT64_C(1) << 5)
 #define R9P_FRONT_CAP_AUTHENTICATED_SERVE (UINT64_C(1) << 6)
 #define R9P_FRONT_CAP_CLIENT_AUTHORITY_BINDINGS (UINT64_C(1) << 7)
+#define R9P_FRONT_CAP_SNAPSHOT_READ_RELAY (UINT64_C(1) << 8)
 
 typedef struct r9p_front r9p_front;
 
@@ -176,6 +183,8 @@ int32_t r9p_front_register_rpc(r9p_front *front, const char *path,
                                size_t path_len);
 int32_t r9p_front_register_read_relay(r9p_front *front, const char *path,
                                       size_t path_len);
+int32_t r9p_front_register_snapshot_read_relay(
+    r9p_front *front, const char *path, size_t path_len);
 int32_t r9p_front_register_write_relay(r9p_front *front, const char *path,
                                        size_t path_len);
 int32_t r9p_front_register_remove_relay(r9p_front *front, const char *path,

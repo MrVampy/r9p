@@ -145,6 +145,25 @@ impl Front {
         Ok(())
     }
 
+    pub fn register_snapshot_read_relay(&self, path: &str) -> Result<()> {
+        let mut state = self.lock()?;
+        let trimmed = normalise_request_prefix(path)?;
+        match state.lookup_optional_path(&trimmed)? {
+            Some(id) => {
+                if !matches!(state.node(id)?.body, Body::SnapshotReadRelay(_)) {
+                    return Err(Error::from_static(EPERM));
+                }
+                if let Some(node) = state.nodes.get_mut(&id) {
+                    node.body = Body::SnapshotReadRelay(trimmed);
+                }
+            }
+            None => {
+                state.place(&trimmed, Body::SnapshotReadRelay(trimmed.clone()))?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn register_write_relay(&self, path: &str) -> Result<()> {
         let mut state = self.lock()?;
         let trimmed = normalise_request_prefix(path)?;
@@ -422,6 +441,9 @@ impl Front {
                     .rpc_responses
                     .get_mut(&request_id)
                     .ok_or_else(|| Error::from_static(ENOENT))?;
+                if slot.is_some() {
+                    return Err(Error::from_static("request already completed"));
+                }
                 *slot = Some(RequestReply::Accepted(bytes.to_vec()));
                 drop(state);
                 self.shared.1.notify_all();
@@ -443,6 +465,9 @@ impl Front {
         }
         match state.rpc_responses.get_mut(&request_id) {
             Some(slot) => {
+                if slot.is_some() {
+                    return Err(Error::from_static("request already completed"));
+                }
                 *slot = Some(RequestReply::Rejected(message.to_string()));
                 drop(state);
                 self.shared.1.notify_all();
@@ -888,7 +913,7 @@ impl Front {
             Body::Log(_) => self.read_log(state, id, offset, count, cancel),
             Body::IntakeNew(_) => Err(Error::from_static(EPERM)),
             Body::Rpc(_) => Err(Error::from_static(EPERM)),
-            Body::ReadRelay(_) => Err(Error::from_static(EPERM)),
+            Body::ReadRelay(_) | Body::SnapshotReadRelay(_) => Err(Error::from_static(EPERM)),
             Body::WriteRelay(_) => Err(Error::from_static(EPERM)),
         }
     }

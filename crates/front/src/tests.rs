@@ -1354,6 +1354,65 @@ fn read_relay_rejection_becomes_the_read_error() -> Result<()> {
 }
 
 #[test]
+fn snapshot_read_relay_pins_one_response_through_explicit_eof() -> Result<()> {
+    let front = Front::new();
+    front.register_snapshot_read_relay("status")?;
+    let mut tree = front.tree();
+    tree.attach(1, b"claude", b"/")?;
+    let qids = walk_to(&mut tree, 1, 2, &["status"]);
+    let qid = *qids.last().expect("snapshot read relay qid");
+    tree.open(2, qid, OREAD)?;
+
+    let first = tree.read_target_at(2, 0, 3)?;
+    let ReadTarget::Response(request_id, response_offset, consume) = first else {
+        panic!("snapshot read relay must park one response");
+    };
+    assert_eq!(response_offset, 0);
+    assert!(!consume);
+    let request = front
+        .next_request(Duration::from_millis(200))?
+        .expect("snapshot read relay request");
+    assert_eq!(request.request_id, request_id);
+    front.complete_request(&request.prefix, request_id, b"abcdef")?;
+    assert!(front
+        .complete_request(&request.prefix, request_id, b"replacement")
+        .is_err());
+    assert_eq!(
+        front.response_read(request_id, 0, 3, None, consume)?,
+        ReadData::Bytes(b"abc".to_vec())
+    );
+
+    let second = tree.read_target_at(2, 3, 3)?;
+    let ReadTarget::Response(second_id, second_offset, second_consume) = second else {
+        panic!("snapshot continuation must reuse its response");
+    };
+    assert_eq!(second_id, request_id);
+    assert_eq!(second_offset, 3);
+    assert!(!second_consume);
+    assert_eq!(
+        front.response_read(second_id, second_offset, 3, None, second_consume)?,
+        ReadData::Bytes(b"def".to_vec())
+    );
+
+    let eof = tree.read_target_at(2, 6, 3)?;
+    let ReadTarget::Response(eof_id, eof_offset, eof_consume) = eof else {
+        panic!("snapshot EOF must reuse its response");
+    };
+    assert_eq!(eof_id, request_id);
+    assert_eq!(
+        front.response_read(eof_id, eof_offset, 3, None, eof_consume)?,
+        ReadData::Bytes(Vec::new())
+    );
+    assert!(front.next_request(Duration::from_millis(0))?.is_none());
+
+    tree.clunk(2, qid)?;
+    assert!(front
+        .complete_request("status", request_id, b"late")
+        .is_err());
+    Ok(())
+}
+
+#[test]
 fn rpc_node_only_opens_read_write() -> Result<()> {
     let front = Front::new();
     front.register_rpc("queries")?;

@@ -137,6 +137,15 @@ impl FrontManager {
                     .map_err(|error| error.to_string())?;
                 Ok("front-register-read-relay".to_string())
             }
+            ["front-register-snapshot-read-relay", raw_id, path] => {
+                let state = self.front(raw_id)?;
+                let path = hex::decode_text(path)?;
+                state
+                    .front
+                    .register_snapshot_read_relay(&path)
+                    .map_err(|error| error.to_string())?;
+                Ok("front-register-snapshot-read-relay".to_string())
+            }
             ["front-register-remove-relay", raw_id, path] => {
                 let state = self.front(raw_id)?;
                 let path = hex::decode_text(path)?;

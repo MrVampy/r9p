@@ -77,6 +77,11 @@ reads across multiple `Tread` ranges on one opened fid. The backend still
 chooses which files have snapshot semantics; waits, streams, and other live
 files remain live. The shared helper owns byte accounting, range slicing, and
 fid retirement without importing path or application policy into the core.
+Front-backed applications whose record is produced asynchronously use
+`register_snapshot_read_relay`: the first read asks the owner for one complete
+record, the Front pins that response to the opened fid, and later ranges
+including explicit EOF are answered without another owner request. The
+ordinary `register_read_relay` remains the distinct range-at-a-time contract.
 
 The core owns `Twstat` fields whose mutability is fixed by 9P2000. Immutable
 fields and file-type changes are rejected before backend dispatch. The backend

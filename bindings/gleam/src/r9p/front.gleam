@@ -134,6 +134,19 @@ pub fn register_read_relay(front: Front, path: String) -> Result(Nil, String) {
   expect_line("front-register-read-relay", line)
 }
 
+pub fn register_snapshot_read_relay(
+  front: Front,
+  path: String,
+) -> Result(Nil, String) {
+  use line <- result.try(
+    run(front.adapter, "front-register-snapshot-read-relay", [
+      int.to_string(front.id),
+      text(path),
+    ]),
+  )
+  expect_line("front-register-snapshot-read-relay", line)
+}
+
 pub fn register_remove_relay(front: Front, path: String) -> Result(Nil, String) {
   use line <- result.try(
     run(front.adapter, "front-register-remove-relay", [

@@ -19,6 +19,7 @@ pub struct FrontTree {
     open_modes: BTreeMap<Fid, u8>,
     rpc_buffers: BTreeMap<Fid, RpcBuffer>,
     rpc_inflight: BTreeMap<Fid, u64>,
+    snapshot_relay_inflight: BTreeMap<Fid, u64>,
     write_relay_buffers: BTreeMap<Fid, WriteRelayBuffer>,
 }
 
@@ -31,6 +32,7 @@ impl FrontTree {
             open_modes: BTreeMap::new(),
             rpc_buffers: BTreeMap::new(),
             rpc_inflight: BTreeMap::new(),
+            snapshot_relay_inflight: BTreeMap::new(),
             write_relay_buffers: BTreeMap::new(),
         }
     }
@@ -421,7 +423,11 @@ impl FileTree for FrontTree {
         self.fids.remove(&fid);
         self.open_modes.remove(&fid);
         self.rpc_buffers.remove(&fid);
-        if let Some(request_id) = self.rpc_inflight.remove(&fid) {
+        let response_request = self
+            .rpc_inflight
+            .remove(&fid)
+            .or_else(|| self.snapshot_relay_inflight.remove(&fid));
+        if let Some(request_id) = response_request {
             if let Ok(mut state) = self.front.lock() {
                 state.remove_response_request(request_id);
                 drop(state);
@@ -633,6 +639,45 @@ impl FrontTree {
             self.front.shared.1.notify_all();
             return Ok(ReadTarget::Response(request_id, 0, true));
         }
+        if let Body::SnapshotReadRelay(prefix) = &state.node(id)?.body {
+            let prefix = prefix.clone();
+            if let Some(request_id) = self.snapshot_relay_inflight.get(&fid).copied() {
+                if state.rpc_responses.contains_key(&request_id) {
+                    return Ok(ReadTarget::Response(request_id, offset, false));
+                }
+                self.snapshot_relay_inflight.remove(&fid);
+            }
+            let target_path = state.path_relative_to(id, binding.root)?;
+            let front_path = state.path_relative_to(id, ROOT_ID)?;
+            let open_mode = self.open_modes.get(&fid).copied().unwrap_or(0);
+            let pushed_generation = state.node(id)?.generation;
+            let context = request_context(
+                &binding,
+                fid,
+                front_path,
+                target_path,
+                RequestDetails {
+                    offset,
+                    count,
+                    open_mode,
+                    pushed_generation,
+                },
+            );
+            let request_id = state.next_request_id;
+            state.next_request_id = state.next_request_id.saturating_add(1);
+            state.rpc_responses.insert(request_id, None);
+            state.response_prefixes.insert(request_id, prefix.clone());
+            state.pending.push_back(IntakeRequest {
+                request_id,
+                prefix,
+                bytes: Vec::new(),
+                context,
+            });
+            self.snapshot_relay_inflight.insert(fid, request_id);
+            drop(state);
+            self.front.shared.1.notify_all();
+            return Ok(ReadTarget::Response(request_id, offset, false));
+        }
         Ok(ReadTarget::Node(id))
     }
 
@@ -664,13 +709,16 @@ impl FrontTree {
 
 impl Drop for FrontTree {
     fn drop(&mut self) {
-        if self.rpc_inflight.is_empty() {
+        if self.rpc_inflight.is_empty() && self.snapshot_relay_inflight.is_empty() {
             self.rpc_buffers.clear();
             self.write_relay_buffers.clear();
             return;
         }
         if let Ok(mut state) = self.front.lock() {
             for (_, request_id) in std::mem::take(&mut self.rpc_inflight) {
+                state.remove_response_request(request_id);
+            }
+            for (_, request_id) in std::mem::take(&mut self.snapshot_relay_inflight) {
                 state.remove_response_request(request_id);
             }
             self.rpc_buffers.clear();

@@ -21,6 +21,7 @@ pub(crate) enum Body {
     IntakeNew(u64),
     Rpc(String),
     ReadRelay(String),
+    SnapshotReadRelay(String),
     WriteRelay(String),
 }
 
@@ -343,7 +344,7 @@ impl State {
             Body::Log(log) => (0o444u32, log.end()),
             Body::IntakeNew(_) => (0o222u32, 0u64),
             Body::Rpc(_) => (0o600u32, 0u64),
-            Body::ReadRelay(_) => (0o444u32, 0u64),
+            Body::ReadRelay(_) | Body::SnapshotReadRelay(_) => (0o444u32, 0u64),
             Body::WriteRelay(_) => (0o222u32, 0u64),
         };
         Ok(Stat {
@@ -867,9 +868,11 @@ pub(crate) fn open_allowed(node: &Node, mode: u8) -> bool {
         return false;
     }
     match &node.body {
-        Body::Dir(_) | Body::File(_) | Body::Log(_) | Body::ReadRelay(_) => {
-            mode & mode::ACCESS_MASK == OREAD
-        }
+        Body::Dir(_)
+        | Body::File(_)
+        | Body::Log(_)
+        | Body::ReadRelay(_)
+        | Body::SnapshotReadRelay(_) => mode & mode::ACCESS_MASK == OREAD,
         Body::IntakeNew(_) | Body::WriteRelay(_) => mode & mode::ACCESS_MASK == OWRITE,
         Body::Rpc(_) => mode & mode::ACCESS_MASK == ORDWR,
     }

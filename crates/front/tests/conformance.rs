@@ -3,7 +3,8 @@ use front::abi::{
     r9p_front_client_rpc, r9p_front_complete_remove, r9p_front_complete_request,
     r9p_front_complete_write, r9p_front_free, r9p_front_new, r9p_front_next_request,
     r9p_front_register_intake, r9p_front_register_log, r9p_front_register_read_relay,
-    r9p_front_register_remove_relay, r9p_front_register_rpc, r9p_front_register_write_relay,
+    r9p_front_register_remove_relay, r9p_front_register_rpc,
+    r9p_front_register_snapshot_read_relay, r9p_front_register_write_relay,
     r9p_front_request_context_copy, r9p_front_request_copy, r9p_front_request_prefix_copy,
     r9p_front_serve_tcp, r9p_front_serve_tcp_authenticated, r9p_front_set,
     r9p_front_set_principal_class_aname, r9p_front_set_principal_root,
@@ -599,6 +600,85 @@ fn abi_read_relay_forwards_ranges_until_eof() {
     assert_eq!(
         reader.join().expect("read relay client join"),
         b"cold".to_vec()
+    );
+    assert_eq!(unsafe { r9p_front_stop(handle) }, 0);
+    unsafe { r9p_front_free(handle) };
+}
+
+#[test]
+fn abi_snapshot_read_relay_pins_one_full_record_until_eof() {
+    assert_front_contract();
+    let handle = r9p_front_new();
+    let (path, path_len) = cstr("status");
+    assert_eq!(
+        unsafe { r9p_front_register_snapshot_read_relay(handle, path, path_len) },
+        0
+    );
+    let (bind, bind_len) = cstr("127.0.0.1:0");
+    let mut port = 0u16;
+    assert_eq!(
+        unsafe { r9p_front_serve_tcp(handle, bind, bind_len, &mut port) },
+        0
+    );
+    let address = format!("127.0.0.1:{port}");
+    let handle_for_client = handle as usize;
+    let reader = thread::spawn(move || {
+        let handle = handle_for_client as *mut front::abi::FrontAbi;
+        let (endpoint, endpoint_len) = cstr(&address);
+        let (uname, uname_len) = cstr("codex");
+        let (aname, aname_len) = cstr("/");
+        let (path, path_len) = cstr("/status");
+        let mut response = vec![0_u8; 128];
+        let mut response_len = 0_usize;
+        let status = unsafe {
+            r9p_front_client_read(
+                handle,
+                endpoint,
+                endpoint_len,
+                uname,
+                uname_len,
+                aname,
+                aname_len,
+                path,
+                path_len,
+                65_536,
+                response.as_mut_ptr(),
+                response.len(),
+                &mut response_len,
+            )
+        };
+        assert_eq!(status, 0);
+        response.truncate(response_len);
+        response
+    });
+
+    let mut request_id = 0_u64;
+    let mut request_len = 0_usize;
+    assert_eq!(
+        unsafe { r9p_front_next_request(handle, 1000, &mut request_id, &mut request_len) },
+        0
+    );
+    assert_eq!(request_len, 0);
+    assert_eq!(request_prefix(handle, request_id), "status");
+    assert_eq!(
+        unsafe { r9p_front_request_copy(handle, request_id, std::ptr::null_mut(), 0) },
+        0
+    );
+    let (body, body_len) = cbytes(b"{\"state\":\"ready\"}\n");
+    assert_eq!(
+        unsafe { r9p_front_complete_request(handle, path, path_len, request_id, body, body_len) },
+        0
+    );
+
+    assert_eq!(
+        reader.join().expect("snapshot read relay client join"),
+        b"{\"state\":\"ready\"}\n".to_vec()
+    );
+    let mut extra_id = 0_u64;
+    let mut extra_len = 0_usize;
+    assert_eq!(
+        unsafe { r9p_front_next_request(handle, 0, &mut extra_id, &mut extra_len) },
+        1
     );
     assert_eq!(unsafe { r9p_front_stop(handle) }, 0);
     unsafe { r9p_front_free(handle) };

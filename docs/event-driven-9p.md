@@ -129,6 +129,12 @@ If the server instead interprets the next read offset as a request for a new
 record, a longer later record can be appended to the first one. This produces a
 byte sequence that was never one valid record.
 
+An r9p Front uses `register_snapshot_read_relay` for this shape. The owner
+supplies one complete record in response to the first read, and the Front pins
+it to that fid through the empty EOF response. `register_read_relay` has a
+different contract: every range is forwarded to the owner and is appropriate
+only when the owner deliberately implements range semantics.
+
 An explicit positional cursor can use a different retirement rule when each
 record has a distinct cursor and the client advances to that next cursor
 without an EOF read. That is an application file contract, not a change to

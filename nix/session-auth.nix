@@ -104,6 +104,12 @@ let
   keyDirectories = lib.mapAttrsToList
     (_: entries: (builtins.head entries).directoryRule)
     directoryGroups;
+  keyFiles = lib.concatMap
+    (entry: [
+      "z ${entry.key.privateKeyFile} 0600 ${entry.key.user} ${entry.key.group} -"
+      "z ${entry.key.publicKeyFile} 0644 ${entry.key.user} ${entry.key.group} -"
+    ])
+    keyEntries;
 
   keyServices = lib.mapAttrs'
     (name: key:
@@ -146,7 +152,7 @@ in
 
   config = lib.mkIf (cfg.keys != { }) {
     assertions = keyAssertions;
-    systemd.tmpfiles.rules = keyDirectories;
+    systemd.tmpfiles.rules = keyDirectories ++ keyFiles;
     systemd.services = keyServices;
   };
 }

@@ -117,6 +117,23 @@ deadline and is woken by an event, terminal transport failure, or explicit
 `Tflush`. Connection establishment, cleanup, and reconnect attempts may still
 have finite deadlines.
 
+## Finite Record EOF
+
+A blocking read can return one finite record rather than an endless byte
+stream. An ordinary offset-walking client reads that record until the server
+returns an empty `Rread`. The server must therefore pin the selected record for
+that fid and cursor through the explicit EOF read. Delivering the final
+non-empty chunk is not itself EOF.
+
+If the server instead interprets the next read offset as a request for a new
+record, a longer later record can be appended to the first one. This produces a
+byte sequence that was never one valid record.
+
+An explicit positional cursor can use a different retirement rule when each
+record has a distinct cursor and the client advances to that next cursor
+without an EOF read. That is an application file contract, not a change to
+ordinary 9P read behavior.
+
 ## Cancellation
 
 The request tag is the protocol cancellation identity.
@@ -224,7 +241,8 @@ Before exposing a live source through 9P, answer:
 ## Source Grounding
 
 The detailed source inspection is recorded in
-`notes/source-reading/2026-07-29-concurrent-retained-fid-reads.md`.
+`notes/source-reading/2026-07-29-concurrent-retained-fid-reads.md` and
+`notes/source-reading/2026-07-30-finite-wait-response-eof.md`.
 
 The principal references are:
 

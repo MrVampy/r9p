@@ -21,6 +21,8 @@ const ROOT_FID: Fid = 1;
 const FIRST_DYNAMIC_FID: Fid = ROOT_FID + 1;
 const DEFAULT_REFERRAL_TIMEOUT: Duration = Duration::from_secs(5);
 
+mod operations;
+mod referral_directory;
 mod routing;
 
 pub(crate) use routing::parse_namespace_path;
@@ -59,10 +61,37 @@ struct Route {
 
 #[derive(Clone)]
 struct FidBinding {
-    client: DirectClient,
-    remote_fid: Fid,
     namespace_path: Vec<Vec<u8>>,
+    target: FidTarget,
+}
+
+#[derive(Clone)]
+enum FidTarget {
+    Remote(RemoteFid),
+    ReferralDirectory,
+}
+
+#[derive(Clone)]
+struct RemoteFid {
+    client: DirectClient,
+    fid: Fid,
     route_mount: Option<Vec<u8>>,
+}
+
+impl FidBinding {
+    fn remote(&self) -> Result<RemoteFid> {
+        match &self.target {
+            FidTarget::Remote(remote) => Ok(remote.clone()),
+            FidTarget::ReferralDirectory => Err(referral_directory::directory_operation_error()),
+        }
+    }
+
+    fn writable_remote(&self) -> Result<RemoteFid> {
+        match &self.target {
+            FidTarget::Remote(remote) => Ok(remote.clone()),
+            FidTarget::ReferralDirectory => Err(referral_directory::read_only_error()),
+        }
+    }
 }
 
 struct FidTable {
@@ -74,6 +103,14 @@ struct RoutedTarget {
     client: DirectClient,
     remote_path: Vec<Vec<u8>>,
     route_mount: Option<Vec<u8>>,
+}
+
+fn remote_target(target: RoutedTarget, remote_fid: Fid) -> FidTarget {
+    FidTarget::Remote(RemoteFid {
+        client: target.client,
+        fid: remote_fid,
+        route_mount: target.route_mount,
+    })
 }
 
 pub(crate) struct PendingRead {
@@ -125,10 +162,12 @@ impl Client {
         };
         let routes = build_routes(referrals, &[])?;
         let root_binding = FidBinding {
-            client: root.clone(),
-            remote_fid: root.root_fid(),
             namespace_path: Vec::new(),
-            route_mount: None,
+            target: FidTarget::Remote(RemoteFid {
+                client: root.clone(),
+                fid: root.root_fid(),
+                route_mount: None,
+            }),
         };
         let mut bindings = BTreeMap::new();
         bindings.insert(ROOT_FID, root_binding);
@@ -183,22 +222,28 @@ impl Client {
 
     pub fn clone_fid(&self, fid: Fid) -> Result<Fid> {
         let binding = self.binding(fid)?;
-        let remote_fid = binding.client.clone_fid(binding.remote_fid)?;
-        self.allocate_binding(FidBinding {
-            remote_fid,
-            ..binding
-        })
+        let target = match &binding.target {
+            FidTarget::Remote(remote) => FidTarget::Remote(RemoteFid {
+                client: remote.client.clone(),
+                fid: remote.client.clone_fid(remote.fid)?,
+                route_mount: remote.route_mount.clone(),
+            }),
+            FidTarget::ReferralDirectory => FidTarget::ReferralDirectory,
+        };
+        self.allocate_binding(FidBinding { target, ..binding })
     }
 
     pub fn clone_fid_timeout(&self, fid: Fid, timeout: Duration) -> Result<Fid> {
         let binding = self.binding(fid)?;
-        let remote_fid = binding
-            .client
-            .clone_fid_timeout(binding.remote_fid, timeout)?;
-        self.allocate_binding(FidBinding {
-            remote_fid,
-            ..binding
-        })
+        let target = match &binding.target {
+            FidTarget::Remote(remote) => FidTarget::Remote(RemoteFid {
+                client: remote.client.clone(),
+                fid: remote.client.clone_fid_timeout(remote.fid, timeout)?,
+                route_mount: remote.route_mount.clone(),
+            }),
+            FidTarget::ReferralDirectory => FidTarget::ReferralDirectory,
+        };
+        self.allocate_binding(FidBinding { target, ..binding })
     }
 
     pub fn walk_one_timeout(&self, fid: Fid, name: &[u8], timeout: Duration) -> Result<Fid> {
@@ -208,331 +253,29 @@ impl Client {
     pub fn walk_timeout(&self, fid: Fid, names: &[Vec<u8>], timeout: Duration) -> Result<Fid> {
         let binding = self.binding(fid)?;
         let namespace_path = apply_walk(&binding.namespace_path, names)?;
-        let (target, remote_fid) = self.walk_namespace_path_timeout(&namespace_path, timeout)?;
+        let target = self.walk_namespace_path_timeout(&namespace_path, timeout)?;
         self.allocate_binding(FidBinding {
-            client: target.client,
-            remote_fid,
             namespace_path,
-            route_mount: target.route_mount,
+            target,
         })
     }
 
     pub fn walk_path(&self, path: &str) -> Result<Fid> {
         let namespace_path = parse_namespace_path(path.as_bytes())?;
-        let (target, remote_fid) = self.walk_namespace_path(&namespace_path)?;
+        let target = self.walk_namespace_path(&namespace_path)?;
         self.allocate_binding(FidBinding {
-            client: target.client,
-            remote_fid,
             namespace_path,
-            route_mount: target.route_mount,
+            target,
         })
     }
 
     pub fn walk_path_timeout(&self, path: &str, timeout: Duration) -> Result<Fid> {
         let namespace_path = parse_namespace_path(path.as_bytes())?;
-        let (target, remote_fid) = self.walk_namespace_path_timeout(&namespace_path, timeout)?;
+        let target = self.walk_namespace_path_timeout(&namespace_path, timeout)?;
         self.allocate_binding(FidBinding {
-            client: target.client,
-            remote_fid,
             namespace_path,
-            route_mount: target.route_mount,
+            target,
         })
-    }
-
-    pub fn open(&self, fid: Fid, mode: u8) -> Result<Qid> {
-        let binding = self.binding(fid)?;
-        binding.client.open(binding.remote_fid, mode)
-    }
-
-    pub fn open_timeout(&self, fid: Fid, mode: u8, timeout: Duration) -> Result<Qid> {
-        let binding = self.binding(fid)?;
-        binding
-            .client
-            .open_timeout(binding.remote_fid, mode, timeout)
-    }
-
-    pub fn create_timeout(
-        &self,
-        parent_fid: Fid,
-        name: &[u8],
-        perm: u32,
-        mode: u8,
-        timeout: Duration,
-    ) -> Result<(Fid, Qid)> {
-        validate_path_element(name)?;
-        let parent = self.binding(parent_fid)?;
-        let mut namespace_path = parent.namespace_path.clone();
-        namespace_path.push(name.to_vec());
-        let selected = self.routed_target(&namespace_path, timeout)?;
-        if selected.route_mount != parent.route_mount {
-            return Err(Error::new(
-                libc::EXDEV,
-                "create cannot cross a namespace referral boundary",
-            ));
-        }
-        let (remote_fid, qid) =
-            parent
-                .client
-                .create_timeout(parent.remote_fid, name, perm, mode, timeout)?;
-        let fid = self.allocate_binding(FidBinding {
-            client: parent.client,
-            remote_fid,
-            namespace_path,
-            route_mount: parent.route_mount,
-        })?;
-        Ok((fid, qid))
-    }
-
-    pub fn create(&self, parent_fid: Fid, name: &[u8], perm: u32, mode: u8) -> Result<(Fid, Qid)> {
-        validate_path_element(name)?;
-        let parent = self.binding(parent_fid)?;
-        let mut namespace_path = parent.namespace_path.clone();
-        namespace_path.push(name.to_vec());
-        let selected = self.routed_target(&namespace_path, Duration::ZERO)?;
-        if selected.route_mount != parent.route_mount {
-            return Err(Error::new(
-                libc::EXDEV,
-                "create cannot cross a namespace referral boundary",
-            ));
-        }
-        let (remote_fid, qid) = parent.client.create(parent.remote_fid, name, perm, mode)?;
-        let fid = self.allocate_binding(FidBinding {
-            client: parent.client,
-            remote_fid,
-            namespace_path,
-            route_mount: parent.route_mount,
-        })?;
-        Ok((fid, qid))
-    }
-
-    pub fn read_timeout(
-        &self,
-        fid: Fid,
-        offset: u64,
-        count: u32,
-        timeout: Duration,
-    ) -> Result<Vec<u8>> {
-        let binding = self.binding(fid)?;
-        binding
-            .client
-            .read_timeout(binding.remote_fid, offset, count, timeout)
-    }
-
-    pub(crate) fn submit_read(&self, fid: Fid, offset: u64, count: u32) -> Result<PendingRead> {
-        let binding = self.binding(fid)?;
-        let pending = binding
-            .client
-            .submit_read(binding.remote_fid, offset, count)?;
-        Ok(PendingRead {
-            client: binding.client,
-            pending,
-        })
-    }
-
-    pub(crate) fn flush_read_tag_timeout(
-        &self,
-        fid: Fid,
-        tag: Tag,
-        timeout: Duration,
-    ) -> Result<()> {
-        let binding = self.binding(fid)?;
-        binding.client.flush_tag_timeout(tag, timeout)
-    }
-
-    pub fn read(&self, fid: Fid, offset: u64, count: u32) -> Result<Vec<u8>> {
-        let binding = self.binding(fid)?;
-        binding.client.read(binding.remote_fid, offset, count)
-    }
-
-    pub fn read_full_timeout(
-        &self,
-        fid: Fid,
-        offset: u64,
-        count: u32,
-        timeout: Duration,
-    ) -> Result<Vec<u8>> {
-        let binding = self.binding(fid)?;
-        binding
-            .client
-            .read_full_timeout(binding.remote_fid, offset, count, timeout)
-    }
-
-    pub fn read_delimited_timeout(
-        &self,
-        fid: Fid,
-        offset: u64,
-        count: u32,
-        delimiter: u8,
-        timeout: Duration,
-    ) -> Result<Vec<u8>> {
-        let binding = self.binding(fid)?;
-        binding
-            .client
-            .read_delimited_timeout(binding.remote_fid, offset, count, delimiter, timeout)
-    }
-
-    pub fn read_full(&self, fid: Fid, offset: u64, count: u32) -> Result<Vec<u8>> {
-        let binding = self.binding(fid)?;
-        binding.client.read_full(binding.remote_fid, offset, count)
-    }
-
-    pub fn read_delimited(
-        &self,
-        fid: Fid,
-        offset: u64,
-        count: u32,
-        delimiter: u8,
-    ) -> Result<Vec<u8>> {
-        let binding = self.binding(fid)?;
-        binding
-            .client
-            .read_delimited(binding.remote_fid, offset, count, delimiter)
-    }
-
-    pub fn write_timeout(
-        &self,
-        fid: Fid,
-        offset: u64,
-        data: &[u8],
-        timeout: Duration,
-    ) -> Result<u32> {
-        let binding = self.binding(fid)?;
-        binding
-            .client
-            .write_timeout(binding.remote_fid, offset, data, timeout)
-    }
-
-    pub fn write(&self, fid: Fid, offset: u64, data: &[u8]) -> Result<u32> {
-        let binding = self.binding(fid)?;
-        binding.client.write(binding.remote_fid, offset, data)
-    }
-
-    pub fn write_once(&self, fid: Fid, offset: u64, data: &[u8]) -> Result<u32> {
-        let binding = self.binding(fid)?;
-        binding.client.write_once(binding.remote_fid, offset, data)
-    }
-
-    pub fn write_once_timeout(
-        &self,
-        fid: Fid,
-        offset: u64,
-        data: &[u8],
-        timeout: Duration,
-    ) -> Result<u32> {
-        let binding = self.binding(fid)?;
-        binding
-            .client
-            .write_once_timeout(binding.remote_fid, offset, data, timeout)
-    }
-
-    pub fn write_then_read_delimited_timeout(
-        &self,
-        fid: Fid,
-        write_offset: u64,
-        data: &[u8],
-        read: DelimitedRead,
-        timeout: Duration,
-    ) -> std::result::Result<(u32, Vec<u8>), WriteThenReadError> {
-        let binding = self.binding(fid).map_err(WriteThenReadError::Rejected)?;
-        binding.client.write_then_read_delimited_timeout(
-            binding.remote_fid,
-            write_offset,
-            data,
-            read,
-            timeout,
-        )
-    }
-
-    pub fn clunk_timeout(&self, fid: Fid, timeout: Duration) -> Result<()> {
-        if fid == ROOT_FID {
-            return Err(Error::new(libc::EBUSY, "cannot clunk the namespace root"));
-        }
-        let binding = self.binding(fid)?;
-        binding.client.clunk_timeout(binding.remote_fid, timeout)?;
-        self.remove_binding(fid)
-    }
-
-    pub fn clunk(&self, fid: Fid) -> Result<()> {
-        if fid == ROOT_FID {
-            return Err(Error::new(libc::EBUSY, "cannot clunk the namespace root"));
-        }
-        let binding = self.binding(fid)?;
-        binding.client.clunk(binding.remote_fid)?;
-        self.remove_binding(fid)
-    }
-
-    pub fn shutdown(&self) -> Result<()> {
-        let routes = self
-            .state
-            .connected_routes
-            .lock()
-            .map_err(|_| Error::new(libc::EIO, "namespace route lock poisoned"))?
-            .clone();
-        let mut first_error = None;
-        for route in routes {
-            if let Err(error) = route.shutdown() {
-                first_error.get_or_insert(error);
-            }
-        }
-        if let Err(error) = self.state.root.shutdown() {
-            first_error.get_or_insert(error);
-        }
-        match first_error {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
-    }
-
-    pub fn remove_timeout(&self, fid: Fid, timeout: Duration) -> Result<()> {
-        if fid == ROOT_FID {
-            return Err(Error::new(libc::EBUSY, "cannot remove the namespace root"));
-        }
-        let binding = self.binding(fid)?;
-        binding.client.remove_timeout(binding.remote_fid, timeout)?;
-        self.remove_binding(fid)
-    }
-
-    pub fn remove(&self, fid: Fid) -> Result<()> {
-        if fid == ROOT_FID {
-            return Err(Error::new(libc::EBUSY, "cannot remove the namespace root"));
-        }
-        let binding = self.binding(fid)?;
-        binding.client.remove(binding.remote_fid)?;
-        self.remove_binding(fid)
-    }
-
-    pub fn stat(&self, fid: Fid) -> Result<Stat> {
-        let binding = self.binding(fid)?;
-        binding.client.stat(binding.remote_fid)
-    }
-
-    pub fn stat_timeout(&self, fid: Fid, timeout: Duration) -> Result<Stat> {
-        let binding = self.binding(fid)?;
-        binding.client.stat_timeout(binding.remote_fid, timeout)
-    }
-
-    pub fn wstat_timeout(&self, fid: Fid, stat: Stat, timeout: Duration) -> Result<()> {
-        let binding = self.binding(fid)?;
-        binding
-            .client
-            .wstat_timeout(binding.remote_fid, stat, timeout)
-    }
-
-    pub fn wstat(&self, fid: Fid, stat: Stat) -> Result<()> {
-        let binding = self.binding(fid)?;
-        binding.client.wstat(binding.remote_fid, stat)
-    }
-
-    pub(crate) fn validate_stat(&self, stat: Stat) -> Result<Stat> {
-        if !self.variant().supports_symlinks()
-            && (stat.qid.is_symlink() || stat.mode & r9p::qid::DMSYMLINK != 0)
-        {
-            return Err(Error::new(
-                libc::EPROTO,
-                "server exposed symlink metadata without negotiating 9P2000.R",
-            ));
-        }
-        Ok(stat)
     }
 
     fn binding(&self, fid: Fid) -> Result<FidBinding> {
@@ -577,16 +320,26 @@ impl Client {
             .ok_or_else(|| Error::new(libc::EBADF, format!("unknown namespace fid {fid}")))
     }
 
-    fn walk_namespace_path(&self, namespace_path: &[Vec<u8>]) -> Result<(RoutedTarget, Fid)> {
+    fn walk_namespace_path(&self, namespace_path: &[Vec<u8>]) -> Result<FidTarget> {
         let target = self.routed_target(namespace_path, self.state.connect_timeout)?;
         match walk_remote(&target) {
-            Ok(fid) => Ok((target, fid)),
+            Ok(fid) => Ok(remote_target(target, fid)),
+            Err(error) if self.is_referral_directory_miss(namespace_path, &target, &error)? => {
+                Ok(FidTarget::ReferralDirectory)
+            }
             Err(error) if self.should_refresh_routes_after(&target, &error) => {
                 self.invalidate_failed_route(&target, &error)?;
                 self.refresh_routes(self.state.connect_timeout)?;
                 let target = self.routed_target(namespace_path, self.state.connect_timeout)?;
-                let fid = walk_remote(&target)?;
-                Ok((target, fid))
+                match walk_remote(&target) {
+                    Ok(fid) => Ok(remote_target(target, fid)),
+                    Err(error)
+                        if self.is_referral_directory_miss(namespace_path, &target, &error)? =>
+                    {
+                        Ok(FidTarget::ReferralDirectory)
+                    }
+                    Err(error) => Err(error),
+                }
             }
             Err(error) => Err(error),
         }
@@ -596,19 +349,44 @@ impl Client {
         &self,
         namespace_path: &[Vec<u8>],
         timeout: Duration,
-    ) -> Result<(RoutedTarget, Fid)> {
+    ) -> Result<FidTarget> {
         let target = self.routed_target(namespace_path, timeout)?;
         match walk_remote_timeout(&target, timeout) {
-            Ok(fid) => Ok((target, fid)),
+            Ok(fid) => Ok(remote_target(target, fid)),
+            Err(error) if self.is_referral_directory_miss(namespace_path, &target, &error)? => {
+                Ok(FidTarget::ReferralDirectory)
+            }
             Err(error) if self.should_refresh_routes_after(&target, &error) => {
                 self.invalidate_failed_route(&target, &error)?;
                 self.refresh_routes(timeout)?;
                 let target = self.routed_target(namespace_path, timeout)?;
-                let fid = walk_remote_timeout(&target, timeout)?;
-                Ok((target, fid))
+                match walk_remote_timeout(&target, timeout) {
+                    Ok(fid) => Ok(remote_target(target, fid)),
+                    Err(error)
+                        if self.is_referral_directory_miss(namespace_path, &target, &error)? =>
+                    {
+                        Ok(FidTarget::ReferralDirectory)
+                    }
+                    Err(error) => Err(error),
+                }
             }
             Err(error) => Err(error),
         }
+    }
+
+    fn is_referral_directory_miss(
+        &self,
+        namespace_path: &[Vec<u8>],
+        target: &RoutedTarget,
+        error: &Error,
+    ) -> Result<bool> {
+        Ok(error.errno == libc::ENOENT
+            && target.route_mount.is_none()
+            && !namespace_path.is_empty()
+            && referral_directory::is_ancestor(
+                namespace_path,
+                self.referral_mount_paths(|route| route.has_client() || route.is_valid())?,
+            ))
     }
 
     fn should_refresh_routes_after(&self, target: &RoutedTarget, error: &Error) -> bool {
@@ -642,7 +420,10 @@ impl Client {
         fid: Fid,
     ) -> Result<(DirectClient, Option<Vec<u8>>)> {
         let binding = self.binding(fid)?;
-        Ok((binding.client, binding.route_mount))
+        match binding.target {
+            FidTarget::Remote(remote) => Ok((remote.client, remote.route_mount)),
+            FidTarget::ReferralDirectory => Ok((self.state.root.clone(), None)),
+        }
     }
 
     pub(super) fn recover_read_only_route(
@@ -756,6 +537,33 @@ impl Client {
             .iter()
             .find(|route| mounted_suffix(path, &route.referral.mount_path).is_some())
             .cloned())
+    }
+
+    fn referral_mount_paths(&self, include: impl Fn(&Route) -> bool) -> Result<Vec<Vec<u8>>> {
+        let routes = self
+            .state
+            .routes
+            .lock()
+            .map_err(|_| Error::new(libc::EIO, "namespace route lock poisoned"))?;
+        Ok(routes
+            .iter()
+            .filter(|route| include(route))
+            .map(|route| route.referral.mount_path.clone())
+            .collect())
+    }
+
+    fn read_referral_directory(
+        &self,
+        namespace_path: &[Vec<u8>],
+        offset: u64,
+        count: u32,
+    ) -> Result<Vec<u8>> {
+        referral_directory::read(
+            namespace_path,
+            self.referral_mount_paths(|_| true)?,
+            offset,
+            count,
+        )
     }
 
     fn refresh_routes(&self, timeout: Duration) -> Result<()> {

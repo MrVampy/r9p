@@ -7,7 +7,7 @@ use r9p::{
     qid::{Qid, DMDIR},
     referral::NamespaceReferral,
     server::{FileTree, OpenFile, ReadData, Server, ServerConfig},
-    stat::Stat,
+    stat::{decode_dir_entries, Stat},
 };
 use std::{
     env, fs,
@@ -233,6 +233,49 @@ fn ordinary_namespace_operations_cross_referrals_transparently() {
     )
     .expect("namespace client should connect");
     assert_eq!(client.variant(), Variant::R);
+
+    let sources = client
+        .walk_one_timeout(client.root_fid(), b"sources", Duration::from_secs(1))
+        .expect("referral ancestor should resolve as a directory");
+    let sources_stat = client
+        .stat_timeout(sources, Duration::from_secs(1))
+        .expect("referral ancestor should have directory metadata");
+    assert_eq!(sources_stat.name, b"sources");
+    assert!(sources_stat.qid.is_dir());
+    client
+        .open_timeout(sources, r9p::OREAD, Duration::from_secs(1))
+        .expect("referral ancestor directory should open");
+    let entries = decode_dir_entries(
+        &client
+            .read_full_timeout(sources, 0, 8192, Duration::from_secs(1))
+            .expect("referral ancestor directory should read"),
+    )
+    .expect("referral ancestor entries should decode");
+    assert_eq!(
+        entries
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect::<Vec<_>>(),
+        vec![b"x".to_vec()]
+    );
+    let x = client
+        .walk_one_timeout(sources, b"x", Duration::from_secs(1))
+        .expect("referral mount should resolve from its synthetic parent");
+    let value = client
+        .walk_one_timeout(x, b"value", Duration::from_secs(1))
+        .expect("referred service child should resolve component by component");
+    assert_eq!(
+        client
+            .stat_timeout(value, Duration::from_secs(1))
+            .expect("referred service child should stat")
+            .name,
+        b"value"
+    );
+    client.clunk(value).expect("value fid should clunk");
+    client.clunk(x).expect("service root fid should clunk");
+    client
+        .clunk(sources)
+        .expect("referral ancestor fid should clunk locally");
 
     assert_eq!(
         client
@@ -472,9 +515,7 @@ impl FileTree for ReferralRoot {
         if names.is_empty() {
             Ok(Vec::new())
         } else {
-            Err(P9Error::from(
-                "root does not relay referred namespace paths",
-            ))
+            Err(P9Error::from("file does not exist"))
         }
     }
 

@@ -24,7 +24,7 @@ const DEFAULT_REFERRAL_TIMEOUT: Duration = Duration::from_secs(5);
 mod routing;
 
 pub(crate) use routing::parse_namespace_path;
-use routing::validate_path_element;
+use routing::*;
 
 /// One logical 9P namespace.
 ///

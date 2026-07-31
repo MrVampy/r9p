@@ -563,7 +563,7 @@ mod tests {
                 "--connect",
                 "127.0.0.1:9641",
                 "--principal",
-                "/srv/agents/compute/m7",
+                "/srv/example/runtime/m7",
                 "--auth-config",
                 "/run/auth/client.conf",
                 "--max-sessions",
@@ -578,7 +578,7 @@ mod tests {
             ProxyEndpoint::tcp(SocketAddr::from(([127, 0, 0, 6], 9671)))
         );
         assert_eq!(parsed.upstream, SocketAddr::from(([127, 0, 0, 1], 9641)));
-        assert_eq!(parsed.principal, "/srv/agents/compute/m7");
+        assert_eq!(parsed.principal, "/srv/example/runtime/m7");
         assert_eq!(parsed.max_sessions, 4);
     }
 

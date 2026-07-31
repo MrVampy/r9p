@@ -71,19 +71,19 @@ fn reverse_transport_socket_disables_nagle() -> Result<(), Box<dyn std::error::E
 fn session_proxy_terminates_client_auth_behind_a_local_endpoint(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let service_key = generate_key_pair()?;
-    let compute_key = generate_key_pair()?;
+    let runtime_key = generate_key_pair()?;
     let upstream = std::net::TcpListener::bind(address(Ipv4Addr::LOCALHOST, 0))?;
     let upstream_endpoint = upstream.local_addr()?;
     let service_auth = ServerConfig::new(
         "r9p-session-proxy-test",
         service_key.private,
-        [(compute_key.public, "/srv/agents/compute/m7".to_string())],
+        [(runtime_key.public, "/srv/example/runtime/m7".to_string())],
     )?;
     let server = thread::spawn(
         move || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let (stream, _) = upstream.accept()?;
             let session = authenticate_server(stream, &service_auth, Duration::from_secs(2))?;
-            assert_eq!(session.peer.principal(), "/srv/agents/compute/m7");
+            assert_eq!(session.peer.principal(), "/srv/example/runtime/m7");
             let mut stream = session.stream;
             let mut request = [0_u8; 4];
             stream.read_exact(&mut request)?;
@@ -98,10 +98,10 @@ fn session_proxy_terminates_client_auth_behind_a_local_endpoint(
         upstream: upstream_endpoint,
         auth: ClientConfig::new(
             "r9p-session-proxy-test",
-            compute_key.private,
+            runtime_key.private,
             service_key.public,
         )?,
-        principal: "/srv/agents/compute/m7".to_string(),
+        principal: "/srv/example/runtime/m7".to_string(),
         max_sessions: 2,
         connect_timeout: Duration::from_secs(2),
         authentication_timeout: Duration::from_secs(2),
@@ -249,7 +249,7 @@ fn reverse_export_holds_idle_pool_and_authenticates_the_end_service_peer(
     let broker_key = generate_key_pair()?;
     let exporter_key = generate_key_pair()?;
     let service_key = generate_key_pair()?;
-    let compute_key = generate_key_pair()?;
+    let runtime_key = generate_key_pair()?;
     let intruder_key = generate_key_pair()?;
     let broker = ReverseBroker::start(BrokerConfig {
         reverse_bind: address(Ipv4Addr::LOCALHOST, 0),
@@ -258,9 +258,9 @@ fn reverse_export_holds_idle_pool_and_authenticates_the_end_service_peer(
         auth: ServerConfig::new(
             "r9p-reverse-placement-test",
             broker_key.private.clone(),
-            [(exporter_key.public, "profile-host".to_string())],
+            [(exporter_key.public, "example-exporter".to_string())],
         )?,
-        peer_principal: "profile-host".to_string(),
+        peer_principal: "example-exporter".to_string(),
         max_waiting_streams: 2,
         authentication_timeout: Duration::from_secs(2),
         proxy_wait_timeout: Duration::from_secs(2),
@@ -273,7 +273,7 @@ fn reverse_export_holds_idle_pool_and_authenticates_the_end_service_peer(
                 exporter_key.private,
                 broker_key.public,
             )?,
-            principal: "profile-host".to_string(),
+            principal: "example-exporter".to_string(),
             connection_pool: 2,
             connect_timeout: Duration::from_secs(2),
             authentication_timeout: Duration::from_secs(2),
@@ -290,7 +290,7 @@ fn reverse_export_holds_idle_pool_and_authenticates_the_end_service_peer(
         ServerConfig::new(
             "agents-profile-service",
             service_key.private,
-            [(compute_key.public, "/srv/agents/compute/m7".to_string())],
+            [(runtime_key.public, "/srv/example/runtime/m7".to_string())],
         )?,
         Duration::from_secs(1),
         || Ok(IdentityHandler),
@@ -309,7 +309,7 @@ fn reverse_export_holds_idle_pool_and_authenticates_the_end_service_peer(
             intruder_key.private,
             service_key.public,
         )?,
-        "/srv/agents/compute/m7",
+        "/srv/example/runtime/m7",
         Duration::from_secs(2),
     );
     assert!(unauthorized.is_err());
@@ -319,14 +319,14 @@ fn reverse_export_holds_idle_pool_and_authenticates_the_end_service_peer(
         std::net::TcpStream::connect(tcp_proxy_endpoint(&broker)?)?,
         &ClientConfig::new(
             "agents-profile-service",
-            compute_key.private,
+            runtime_key.private,
             service_key.public,
         )?,
-        "/srv/agents/compute/m7",
+        "/srv/example/runtime/m7",
         Duration::from_secs(2),
     )?;
     let mut reader =
-        Client::connect_with_variant(stream, "/srv/agents/compute/m7", "/", 65_536, Variant::R)?;
+        Client::connect_with_variant(stream, "/srv/example/runtime/m7", "/", 65_536, Variant::R)?;
     assert_eq!(reader.read_path("/identity")?, b"application-tree\n");
     Ok(())
 }

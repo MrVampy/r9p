@@ -996,4 +996,5 @@ fn abi_remove_relay_uses_tremove_and_drops_projection() {
     unsafe { r9p_front_free(handle) };
 }
 
+#[path = "conformance/door_and_cancellation.rs"]
 mod door_and_cancellation;

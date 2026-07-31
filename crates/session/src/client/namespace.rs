@@ -24,7 +24,11 @@ const DEFAULT_REFERRAL_TIMEOUT: Duration = Duration::from_secs(5);
 mod routing;
 
 pub(crate) use routing::parse_namespace_path;
-use routing::*;
+use routing::{
+    apply_walk, bounded_referral_timeout, build_routes, mounted_suffix, next_fid, protocol_error,
+    render_namespace_path, route_connect_timeout, route_transport_failed, text_field,
+    validate_path_element, walk_remote, walk_remote_timeout,
+};
 
 /// One logical 9P namespace.
 ///

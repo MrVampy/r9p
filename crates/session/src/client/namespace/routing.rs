@@ -124,7 +124,7 @@ pub(crate) fn parse_namespace_path(path: &[u8]) -> Result<Vec<Vec<u8>>> {
         .collect()
 }
 
-fn validate_path_element(name: &[u8]) -> Result<()> {
+pub(super) fn validate_path_element(name: &[u8]) -> Result<()> {
     if name.is_empty()
         || name.contains(&b'/')
         || name.contains(&0)

@@ -81,6 +81,15 @@ impl FrontManager {
                 let _ = self.front(raw_id)?;
                 Ok(format!("front-process-id\t{}", std::process::id()))
             }
+            ["front-set-wait-timeout", raw_id, timeout_ms] => {
+                let state = self.front(raw_id)?;
+                let timeout_ms = parse_u64("timeout_ms", timeout_ms)?;
+                state
+                    .front
+                    .set_wait_timeout(Duration::from_millis(timeout_ms))
+                    .map_err(|error| error.to_string())?;
+                Ok("front-set-wait-timeout".to_string())
+            }
             ["front-set", raw_id, path, data] => {
                 let state = self.front(raw_id)?;
                 let path = hex::decode_text(path)?;

@@ -825,6 +825,13 @@ mod tests {
     fn front_commands_roundtrip_rpc_request() {
         let mut server = PeerClientServer::default();
         let front_id = parse_front_id(&server.handle_line("front-new").expect("front-new"));
+        let wait_timeout = format!("front-set-wait-timeout\t{front_id}\t5000");
+        assert_eq!(
+            server
+                .handle_line(&wait_timeout)
+                .expect("front-set-wait-timeout"),
+            "front-set-wait-timeout".to_string()
+        );
         let register = format!(
             "front-register-rpc\t{front_id}\t{}",
             hex_text("declaration")

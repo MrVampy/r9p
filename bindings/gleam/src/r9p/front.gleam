@@ -56,6 +56,16 @@ pub fn process_id(front: Front) -> Result(Int, String) {
   }
 }
 
+pub fn set_wait_timeout(front: Front, timeout_ms: Int) -> Result(Nil, String) {
+  use line <- result.try(
+    run(front.adapter, "front-set-wait-timeout", [
+      int.to_string(front.id),
+      int.to_string(timeout_ms),
+    ]),
+  )
+  expect_line("front-set-wait-timeout", line)
+}
+
 pub fn set(front: Front, path: String, data: BitArray) -> Result(Nil, String) {
   use line <- result.try(
     run(front.adapter, "front-set", [

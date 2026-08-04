@@ -15,7 +15,6 @@ use std::{
 use zeroize::{Zeroize, Zeroizing};
 
 const KEY_BYTES: usize = 32;
-const KEY_HEX_BYTES: usize = KEY_BYTES * 2;
 #[derive(Clone)]
 pub struct PrivateKey(Arc<PrivateKeyBytes>);
 
@@ -198,7 +197,7 @@ pub fn write_key_pair(private_path: &Path, public_path: &Path, pair: &KeyPair) -
     }
 }
 
-fn write_new_file(path: &Path, bytes: &[u8], mode: u32, label: &str) -> Result<()> {
+pub(crate) fn write_new_file(path: &Path, bytes: &[u8], mode: u32, label: &str) -> Result<()> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -232,7 +231,7 @@ fn derive_public_key(private: &PrivateKey) -> Result<PublicKey> {
     PublicKey::from_bytes(dh.pubkey())
 }
 
-fn path_exists(path: &Path, label: &str) -> Result<bool> {
+pub(crate) fn path_exists(path: &Path, label: &str) -> Result<bool> {
     path.try_exists()
         .map_err(|error| Error::from(format!("inspect {label} {}: {error}", path.display())))
 }
@@ -244,31 +243,44 @@ fn key_array(bytes: &[u8], label: &str) -> Result<[u8; KEY_BYTES]> {
 }
 
 fn decode_key(value: &str) -> Result<[u8; KEY_BYTES]> {
-    if value.len() != KEY_HEX_BYTES {
+    decode_hex(value, "key")
+}
+
+/// Fixed-width lowercase hex, shared by 32-byte keys and 64-byte certificate
+/// signatures so there is one decoder to get wrong rather than two.
+pub(crate) fn decode_hex<const N: usize>(value: &str, label: &str) -> Result<[u8; N]> {
+    let expected = N * 2;
+    if value.len() != expected {
         return Err(Error::from(format!(
-            "key must be exactly {KEY_HEX_BYTES} lowercase hexadecimal characters"
+            "{label} must be exactly {expected} lowercase hexadecimal characters"
         )));
     }
-    let mut out = [0_u8; KEY_BYTES];
+    let mut out = [0_u8; N];
     for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
-        let high = decode_nibble(pair[0])?;
-        let low = decode_nibble(pair[1])?;
+        let high = decode_nibble(pair[0], label)?;
+        let low = decode_nibble(pair[1], label)?;
         out[index] = (high << 4) | low;
     }
     Ok(out)
 }
 
-fn decode_nibble(value: u8) -> Result<u8> {
+fn decode_nibble(value: u8, label: &str) -> Result<u8> {
     match value {
         b'0'..=b'9' => Ok(value - b'0'),
         b'a'..=b'f' => Ok(value - b'a' + 10),
-        _ => Err(Error::from("key must use lowercase hexadecimal")),
+        _ => Err(Error::from(format!(
+            "{label} must use lowercase hexadecimal"
+        ))),
     }
 }
 
 fn encode_key(bytes: &[u8; KEY_BYTES]) -> String {
+    encode_hex(bytes)
+}
+
+pub(crate) fn encode_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(KEY_HEX_BYTES);
+    let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         out.push(char::from(HEX[usize::from(byte >> 4)]));
         out.push(char::from(HEX[usize::from(byte & 0x0f)]));

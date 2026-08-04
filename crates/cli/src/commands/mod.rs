@@ -1,4 +1,5 @@
 pub(crate) mod auth_keygen;
+pub(crate) mod cert;
 pub(crate) mod con;
 pub(crate) mod ls;
 pub(crate) mod machine;

@@ -10,6 +10,8 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+ed25519-dalek.workspace = true
+getrandom.workspace = true
 r9p.workspace = true
 rustix.workspace = true
 snow.workspace = true

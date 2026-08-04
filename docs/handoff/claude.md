@@ -57,32 +57,81 @@ Carry a name in signed material, the way Nebula certs do, so a relying party
 *learns* a principal's name instead of asserting it. Server configs then hold a
 signing authority's public key and no `peer` lines.
 
-## Decision: an offline signer, not a service
+## Decision: an offline signer, not a service — **the signer now exists**
 
-A small local tool, `r9p-cert`, analogous to `nebula-cert`. Root key in sops,
-run by the operator, no daemon. Coordinator does not take this on, reversing
-nothing about the original cost decision.
+A small local tool, analogous to `nebula-cert`. Root key in sops, run by the
+operator, no daemon. Coordinator does not take this on, reversing nothing about
+the original cost decision.
 
-`r9p-cert` **consumes** `auth-keygen` rather than replacing it. Today
+Shipped as `r9p cert` (`crates/auth/src/cert.rs`,
+`crates/cli/src/commands/cert.rs`) with `root`, `sign`, `print` and `verify`.
+The **transport does not consult it yet** — see "What remains" below. Issuing a
+certificate currently changes nothing about who may connect.
+
+Implementation notes worth keeping:
+
+- **Two key types, not one.** Session keys are X25519 Noise statics and cannot
+  sign, so the root is Ed25519 and signs over the subject's X25519 public key.
+  Nebula splits them the same way. `ed25519-dalek` is pinned to `=2.2.0`
+  specifically because 3.0 pulls a second `curve25519-dalek` alongside snow's;
+  2.x shares it, so the tree holds one copy of that field arithmetic.
+- **Signed bytes are canonical, not textual.** The signature covers a
+  length-framed encoding built from the parsed fields, so reformatting cannot
+  change what was signed and no field boundary can shift — `name "a" group "b"`
+  cannot be re-read as `name "ab"`. There is a test for exactly that.
+- **Validity is whole Unix seconds.** No calendar library in the trust path;
+  `print` reports `expires_in_seconds`, matching the mesh service's
+  `certificate_ttl_seconds`, which is the form a threshold alert wants.
+- **Names and groups reject whitespace**, which `validate_principal` permits.
+  They live on whitespace-delimited lines, so permitting it would break the
+  round trip rather than be caught.
+
+`r9p cert` **consumes** `auth-keygen` rather than replacing it.
 `auth-keygen` (`crates/cli/src/commands/auth_keygen.rs`, `crates/auth/src/key.rs:139`)
 generates a Noise static pair on the host that will use it, converges on re-run
 — derives a missing public key, verifies a mismatched one, refuses to replace a
 public key whose private is gone — and prints `public_key\t<hex>`. That line is
-already a certificate request minus the request. Signing over the public key
-preserves the property that the private key never leaves the machine, which is
-better than the mesh's own posture: `nebula-cert sign` mints the pair on the
-operator's laptop and ships it through sops.
+already a certificate request minus the request. `cert sign` takes the public
+half, so the private key never leaves the machine that made it, which is better
+than the mesh's own posture: `nebula-cert sign` mints the pair on the operator's
+laptop and ships it through sops.
 
-What the credential should carry:
+The credential carries:
 
 - `name` — learned by the relying party, not asserted.
-- `groups` — so authorization stops enumerating principals. The mesh firewall
-  admits on group/cidr rather than listing peers; `operators = [ "codex.interface" ]`
-  should become "carries group `operator`". Centralizing the list removes
-  duplication; carrying groups removes the list.
-- `notAfter` — session keys presently have no lifetime, so "how long is this
-  good for" answers "forever, including after it leaks". A TTL is also what
-  makes an expiry alert expressible at all.
+- `group` (repeatable) — so authorization stops enumerating principals. The
+  mesh firewall admits on group/cidr rather than listing peers;
+  `operators = [ "codex.interface" ]` should become "carries group `operator`".
+  Centralizing the list removes duplication; carrying groups removes the list.
+- `not-before` / `not-after` — session keys otherwise have no lifetime, so "how
+  long is this good for" answers "forever, including after it leaks".
+
+## What remains: the transport
+
+The handshake still authorizes through `peer` lines. What has to change, from
+reading `crates/auth/src/handshake.rs`:
+
+- The client's **first Noise message payload already carries the principal**
+  (`handshake.rs:100`), and the server reads it back and calls
+  `config.authorize(public_key, &principal)` (`handshake.rs:169`). That payload
+  is where a certificate goes.
+- **A discriminator is available for free.** Principals are validated UTF-8
+  with no control bytes, so a payload whose first byte is `0x00` can never be a
+  legacy principal. That makes old and new payloads unambiguous without a
+  version negotiation.
+- **The server's read buffer must grow.** It is `MAX_PRINCIPAL_BYTES` (255) at
+  `handshake.rs:157`, and a certificate is larger. Read into a
+  `MAX_NOISE_MESSAGE_BYTES` buffer and bound by payload kind instead.
+- **`ServerConfig` needs a root instead of, or beside, peers.** It currently
+  *requires* at least one peer (`config.rs:89`); a cert-only server has none.
+- **Migration order is servers first, then clients.** A new client against an
+  old server fails, because the old server cannot parse the payload or size the
+  buffer. Both must be accepted for a period, which is the mixed fleet this
+  note has asked for from the start.
+- **`preauthorized` already models the distinction** the cert path needs:
+  `authenticate_server_attested` admits an unlisted key and defers to the
+  application. A certificate-authenticated session is a third case — the name
+  is proven, not asserted and not deferred.
 
 ## What it does not close
 

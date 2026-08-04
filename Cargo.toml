@@ -24,9 +24,15 @@ todo = "deny"
 unwrap_used = "deny"
 
 [workspace.dependencies]
+# Certificates sign with Ed25519 while session keys stay X25519 Noise statics:
+# the same split Nebula uses, because a DH key cannot sign.
+ed25519-dalek = { version = "=2.2.0", default-features = false, features = [
+    "zeroize",
+] }
 front = { version = "0.1.0", path = "crates/front" }
 fuse = { version = "0.1.0", path = "crates/fuse" }
 fs = { version = "0.1.0", path = "crates/fs" }
+getrandom = "=0.3.4"
 libc = "=0.2.186"
 r9p = { version = "0.1.0", path = "crates/core" }
 r9p-auth = { version = "0.1.0", path = "crates/auth" }

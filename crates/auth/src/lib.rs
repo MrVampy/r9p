@@ -1,3 +1,4 @@
+mod cert;
 mod config;
 mod handshake;
 mod key;
@@ -5,6 +6,10 @@ mod p9any;
 mod peercred;
 mod stream;
 
+pub use cert::{
+    generate_root_key_pair, now_unix, provision_root_key_pair, Certificate, CertificateBody,
+    RootKeyPair, RootPrivateKey, RootPublicKey, UnixSeconds, CERT_FORMAT,
+};
 pub use config::{ClientConfig, ServerConfig};
 pub use handshake::{
     authenticate_client, authenticate_server, authenticate_server_attested, AuthenticatedSession,

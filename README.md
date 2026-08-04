@@ -20,6 +20,8 @@ Current surfaces and consumers:
 - `9P2000.R` namespace referrals, which let one caller-local client compose
   admitted direct service sessions behind ordinary namespace paths.
 - `r9p auth-keygen`, key creation for authenticated remote 9P sessions.
+- `r9p cert`, an offline signer that binds a name and groups to a session key
+  so relying parties learn a principal's name instead of asserting it.
 - Racme serves an Acme-compatible 9P namespace through `r9p`.
 - coordinator consumes `r9p` for its listener, one-shot client operations,
   local FUSE mounts, and admitted service referrals.
@@ -126,6 +128,10 @@ r9p reverse-broker --reverse-bind address [--proxy-bind address] [--proxy-exposu
 r9p reverse-export --connect address --principal name --auth-config path [--pool count] [--reconnect-min-delay seconds] [--reconnect-max-delay seconds] [--writable] root
 r9p session-proxy --bind loopback-address|unix!/path --connect address --principal name --auth-config path [--max-sessions count]
 r9p auth-keygen --private path --public path
+r9p cert root --private path --public path
+r9p cert sign --root-private path --name name (--key hex | --key-file path) [--group name]... (--days n | --not-after seconds) [--not-before seconds] [--out path]
+r9p cert print --path path [--at seconds]
+r9p cert verify --path path (--root hex | --root-file path) [--at seconds]
 ```
 
 `-a` accepts `host:port`, `tcp!host!port`, bare hosts defaulting to port 564,
@@ -166,6 +172,43 @@ The command creates a mode `0600` private key and a mode `0644` public key. On
 later runs it verifies that the pair still matches. If a completed private-key
 write is missing only its public key, the command reconstructs the public key;
 a public-only or mismatched pair fails without overwriting either file.
+
+### Certificates
+
+A `peer <key> <name>` line proves the key and asserts the name. The name is
+per-server configuration, so two relying parties can disagree about what one
+key is called, and renaming a principal is an edit everywhere it appears.
+
+`r9p cert` moves the name into signed material. An offline Ed25519 root signs
+over a session key's *public* half, so the private half never leaves the host
+that generated it — `auth-keygen` still creates it, and the certificate is
+issued afterwards:
+
+```bash
+r9p cert root --private /var/lib/r9p/cert/root --public /var/lib/r9p/cert/root.pub
+r9p cert sign \
+  --root-private /var/lib/r9p/cert/root \
+  --name tuxedo \
+  --key-file /var/lib/r9p/auth/public \
+  --group operator \
+  --days 730 \
+  --out tuxedo.crt
+r9p cert verify --path tuxedo.crt --root-file /var/lib/r9p/cert/root.pub
+```
+
+Session keys are X25519 Noise statics and cannot sign, so the root is Ed25519
+and signs over them. The signature covers a canonical length-framed encoding
+built from the parsed fields rather than the file text, so reformatting cannot
+change what was signed and no field boundary can be shifted. Validity is whole
+seconds since the Unix epoch, which keeps a calendar library out of the trust
+path; `r9p cert print` reports `expires_in_seconds`, the form a threshold alert
+wants. Certificates are public material and are written mode `0644`; signing
+refuses to overwrite an existing one.
+
+The handshake does **not** consult certificates yet. Sessions still authorize
+through `peer` lines, so issuing a certificate changes nothing about who may
+connect until the transport carries and verifies it. The tool exists first so
+identities can be signed and inspected before the trust path depends on them.
 
 The flake exports `nixosModules.session-auth` for boot-time provisioning and
 verification without host-specific scripts. After importing the module, declare

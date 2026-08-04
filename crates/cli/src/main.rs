@@ -9,6 +9,7 @@ mod transport;
 
 use commands::{
     auth_keygen::auth_keygen_cmd,
+    cert::cert_cmd,
     con::con_cmd,
     ls::ls_cmd,
     machine::{machine_list_cmd, machine_remove_cmd, machine_rpc_hex_cmd},
@@ -54,6 +55,7 @@ fn run() -> CliResult<()> {
     let command = args.remove(0);
     match command.as_str() {
         "auth-keygen" => auth_keygen_cmd(config, args),
+        "cert" => cert_cmd(config, args),
         "version" => version_cmd(config, args),
         "attach" => attach_cmd(config, args),
         "read" | "cat" => read_cmd(config, args, ReadMode::Read),
@@ -234,6 +236,7 @@ pub(crate) fn usage() -> ! {
     );
     eprintln!("possible cmds:");
     eprintln!("  auth-keygen --private path --public path");
+    eprintln!("  cert root|sign|print|verify ...");
     eprintln!("  version [service]");
     eprintln!("  attach [service]");
     eprintln!("  read name");

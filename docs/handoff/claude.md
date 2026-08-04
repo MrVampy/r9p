@@ -54,26 +54,67 @@ duplication and turned naming into a distributed agreement problem.
 ## What would close it
 
 Carry a name in signed material, the way Nebula certs do, so a relying party
-*learns* a principal's name instead of asserting it. Server configs would then
-list keys (or a signing authority) and authorization would be written against
-names the credential itself carries.
+*learns* a principal's name instead of asserting it. Server configs then hold a
+signing authority's public key and no `peer` lines.
 
-Design questions that belong to this repository, not to the host flake:
+## Decision: an offline signer, not a service
 
-- Does the name live in a signed credential issued by an authority, or is it
-  bound to the key at generation and self-asserted? The first prevents
-  disagreement; the second is cheaper and still removes the per-server list.
-- If an authority signs, is it coordinator — reversing the original cost
-  decision — or a small local signer analogous to `nebula-cert`, which is what
-  made the mesh case cheap?
-- Migration must tolerate a mixed fleet: some hosts naming keys locally while
-  others read names from credentials, since a simultaneous fleet-wide switch is
-  exactly the failure mode this is meant to remove.
+A small local tool, `r9p-cert`, analogous to `nebula-cert`. Root key in sops,
+run by the operator, no daemon. Coordinator does not take this on, reversing
+nothing about the original cost decision.
 
-## Interim, on the host-flake side
+`r9p-cert` **consumes** `auth-keygen` rather than replacing it. Today
+`auth-keygen` (`crates/cli/src/commands/auth_keygen.rs`, `crates/auth/src/key.rs:139`)
+generates a Noise static pair on the host that will use it, converges on re-run
+— derives a missing public key, verifies a mismatched one, refuses to replace a
+public key whose private is gone — and prints `public_key\t<hex>`. That line is
+already a certificate request minus the request. Signing over the public key
+preserves the property that the private key never leaves the machine, which is
+better than the mesh's own posture: `nebula-cert sign` mints the pair on the
+operator's laptop and ships it through sops.
 
-A `principals.nix` declaring each identity once and generating every `peer`
-line and authorization list is planned there. It removes the duplication but
-not the underlying gap: it is a **cache** that keeps relying parties agreeing,
-not a binding. If a name ever becomes signed material, that file is the input
-you sign from rather than the runtime truth.
+What the credential should carry:
+
+- `name` — learned by the relying party, not asserted.
+- `groups` — so authorization stops enumerating principals. The mesh firewall
+  admits on group/cidr rather than listing peers; `operators = [ "codex.interface" ]`
+  should become "carries group `operator`". Centralizing the list removes
+  duplication; carrying groups removes the list.
+- `notAfter` — session keys presently have no lifetime, so "how long is this
+  good for" answers "forever, including after it leaks". A TTL is also what
+  makes an expiry alert expressible at all.
+
+## What it does not close
+
+- **Capability policy.** Groups do not express "wsl may open terminal sessions
+  but not agent runtimes". Minting a group per capability recreates the scatter
+  somewhere else.
+- **Revocation.** CAs are weak at it; short lifetimes are the practical answer
+  and those need an online issuer. Until then, revoking early means re-signing
+  downstream.
+- **Recorded state.** ~72 journal transactions in the Credentials store name
+  the principal directly. That is data, not config, and still needs migrating.
+
+## If an online issuer is later wanted
+
+Recorded because the bootstrap now has an answer it lacked before. A node
+reaching such a service is already on the Nebula overlay, having handshaken
+against a CA-signed certificate carrying a name and groups — session identity
+can be *derived from* mesh identity rather than invented. Shape would be
+two-tier: root offline in sops as above, plus an intermediate online that may
+only mint short-lived leaves for declared names.
+
+The trigger is churn or short lifetimes, not fleet size. Four hosts changing
+twice a year do not justify a signing daemon, and an online signer that can
+mint any identity is strictly worse to compromise than anything it issues.
+
+## The host-flake side
+
+`principals.nix`, declaring each identity once, is planned there. Before
+signing exists it is a **cache** that keeps relying parties agreeing, not a
+binding. After, it is the input `r9p-cert` signs from — the role
+`nebula/topology.nix` plays for `nebula-issue-cert`.
+
+Migration must tolerate a mixed fleet: some hosts naming keys locally while
+others read names from credentials, since a simultaneous fleet-wide switch is
+exactly the failure mode this is meant to remove.

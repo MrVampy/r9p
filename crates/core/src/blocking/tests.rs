@@ -151,13 +151,25 @@ fn bounded_tcp_client_applies_distinct_transport_timeouts() {
     .expect("bounded client should complete handshake");
     server.join().expect("server thread should finish");
 
-    assert_eq!(
-        client.stream.read_timeout().expect("read timeout query"),
-        Some(timeouts.read_timeout)
+    let applied_read = client.stream.read_timeout().expect("read timeout query");
+    let applied_write = client.stream.write_timeout().expect("write timeout query");
+
+    assert_socket_timeout_applied("read", applied_read, timeouts.read_timeout);
+    assert_socket_timeout_applied("write", applied_write, timeouts.write_timeout);
+    assert_ne!(
+        applied_read, applied_write,
+        "read and write timeouts should stay distinct after being applied"
     );
-    assert_eq!(
-        client.stream.write_timeout().expect("write timeout query"),
-        Some(timeouts.write_timeout)
+}
+
+fn assert_socket_timeout_applied(which: &str, applied: Option<Duration>, requested: Duration) {
+    const MAX_ROUNDING: Duration = Duration::from_millis(50);
+
+    let applied = applied.unwrap_or_else(|| panic!("{which} timeout should be set"));
+    assert!(
+        applied >= requested && applied <= requested + MAX_ROUNDING,
+        "{which} timeout should be the requested {requested:?} rounded up by at most \
+         {MAX_ROUNDING:?}, got {applied:?}"
     );
 }
 

@@ -324,6 +324,28 @@ impl AuthBoundary {
         })
     }
 
+    pub fn p9any_noise_xx(domain: &str) -> Result<Self> {
+        validate_p9any_domain(domain)?;
+        Ok(Self {
+            class: AuthClass::P9any,
+            details: format!("{P9ANY_NOISE_XX}@{domain}"),
+        })
+    }
+
+    /// The service name a caller must see proved before it trusts the session.
+    /// Under XX this is checked against the responder's certificate, which is
+    /// what makes a referral safe to take from an addressing service: it can
+    /// point you somewhere, it cannot change who answers.
+    pub fn p9any_domain(&self) -> Option<&str> {
+        if self.class != AuthClass::P9any {
+            return None;
+        }
+        self.details
+            .strip_prefix(P9ANY_NOISE_XX)
+            .or_else(|| self.details.strip_prefix(P9ANY_NOISE_IK))
+            .and_then(|value| value.strip_prefix('@'))
+    }
+
     pub fn render(&self) -> String {
         match self.class {
             AuthClass::None if self.details.is_empty() => "none".to_string(),
@@ -335,15 +357,11 @@ impl AuthBoundary {
         match self.class {
             AuthClass::None if self.details.is_empty() => Ok(()),
             AuthClass::P9any => {
-                let domain = self
-                    .details
-                    .strip_prefix(P9ANY_NOISE_IK)
-                    .and_then(|value| value.strip_prefix('@'))
-                    .ok_or_else(|| {
-                        Error::from(format!(
-                            "p9any auth boundary must use {P9ANY_NOISE_IK}@domain"
-                        ))
-                    })?;
+                let domain = self.p9any_domain().ok_or_else(|| {
+                    Error::from(format!(
+                        "p9any auth boundary must use {P9ANY_NOISE_IK}@domain or {P9ANY_NOISE_XX}@domain"
+                    ))
+                })?;
                 validate_p9any_domain(domain)
             }
             AuthClass::UnixPeerCred if !self.details.is_empty() => Ok(()),
@@ -703,5 +721,31 @@ mod tests {
         assert!(AuthBoundary::parse("p9any:dp9ik@vault").is_err());
         assert!(AuthBoundary::parse("p9any:noise-ik@vault/domain").is_err());
         assert!(AuthBoundary::parse("p9any:noise-ik@").is_err());
+    }
+}
+
+#[cfg(test)]
+mod xx_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn an_xx_boundary_round_trips_and_names_the_expected_responder() -> Result<()> {
+        let boundary = AuthBoundary::p9any_noise_xx("terminal-m7")?;
+        assert_eq!(boundary.render(), "p9any:noise-xx@terminal-m7");
+        let parsed = AuthBoundary::parse(&boundary.render())?;
+        assert_eq!(parsed.p9any_domain(), Some("terminal-m7"));
+        Ok(())
+    }
+
+    #[test]
+    fn the_ik_boundary_still_parses_while_the_fleet_migrates() -> Result<()> {
+        let parsed = AuthBoundary::parse("p9any:noise-ik@terminal-m7")?;
+        assert_eq!(parsed.p9any_domain(), Some("terminal-m7"));
+        Ok(())
+    }
+
+    #[test]
+    fn an_unknown_p9any_protocol_is_refused() {
+        assert!(AuthBoundary::parse("p9any:noise-zz@terminal-m7").is_err());
     }
 }

@@ -108,16 +108,13 @@ The credential carries:
 
 ## The transport, as built
 
-`ClientConfig` takes an optional `certificate`; `ServerConfig` takes `root`
-lines and may hold peers, roots, or both. `ServerConfig::new` keeps its old
-signature and semantics, so nothing outside had to change;
-`new_with_roots` is the wider constructor.
+`ClientConfig` is a private key, the certificate it presents, and the roots it
+trusts. `ServerConfig` is that plus the domain it serves. Neither names the
+other: there are no peer lines and no pinned responder key.
 
-The certificate rides in the first Noise message payload, where the bare
-principal used to go, behind a leading `0x00`. That byte is a free
-discriminator: `validate_principal` rejects NUL and every control byte, so a
-legacy payload can never begin with it and the two forms need no version
-negotiation.
+XX carries both certificates inside the handshake. The responder's arrives in
+message two and the initiator's in message three, each encrypted, so an
+observer learns neither static key.
 
 The load-bearing check is that **the certificate was issued for the key that
 completed this handshake**. Certificates are public; without that check anyone

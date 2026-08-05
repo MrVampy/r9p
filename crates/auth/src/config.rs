@@ -325,23 +325,49 @@ mod tests {
     }
 
     #[test]
-    fn a_server_config_may_carry_only_a_root() -> Result<()> {
+    fn a_server_config_carries_its_certificate_and_its_roots() -> Result<()> {
         let dir = test_root("server-root")?;
         let root = generate_root_key_pair()?;
         let server = crate::generate_key_pair()?;
         let key_path = dir.join("private");
         crate::write_key_pair(&key_path, &dir.join("public"), &server)?;
+        let cert_path = dir.join("vault.crt");
+        Certificate::sign(
+            &root.private,
+            CertificateBody::new(
+                "vault",
+                server.public,
+                Vec::<String>::new(),
+                1_000,
+                4_000_000_000,
+                root.public,
+            )?,
+        )?
+        .write(&cert_path)?;
         let config_path = dir.join("server.conf");
+        let body = format!(
+            "format {CONFIG_FORMAT}\nrole server\ndomain vault\nprivate-key {}\ncertificate {}\nroot {}\n",
+            key_path.display(),
+            cert_path.display(),
+            root.public
+        );
+        write(&config_path, &body)?;
+        let parsed = ServerConfig::read(&config_path)?;
+        assert_eq!(parsed.roots(), [root.public]);
+
+        let without_certificate = dir.join("no-cert.conf");
         write(
-            &config_path,
+            &without_certificate,
             &format!(
                 "format {CONFIG_FORMAT}\nrole server\ndomain vault\nprivate-key {}\nroot {}\n",
                 key_path.display(),
                 root.public
             ),
         )?;
-        let parsed = ServerConfig::read(&config_path)?;
-        assert_eq!(parsed.roots(), [root.public]);
+        assert!(
+            ServerConfig::read(&without_certificate).is_err(),
+            "a server with no certificate cannot prove itself under XX"
+        );
         Ok(())
     }
 

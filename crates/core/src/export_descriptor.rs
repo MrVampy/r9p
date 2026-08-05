@@ -4,6 +4,10 @@ use crate::{Error, Result};
 
 pub const EXPORT_FORMAT_V1: &str = "r9p-export.v1";
 pub const P9ANY_NOISE_IK: &str = "noise-ik";
+/// Mutual-certificate variant. The responder transmits its static key during
+/// the handshake instead of the initiator pinning it in advance, so a client
+/// needs no per-service key material.
+pub const P9ANY_NOISE_XX: &str = "noise-xx";
 pub const SESSION_ENDPOINT_BIND_FIELD: &str = "session_endpoint_bind";
 pub const SESSION_ANAME_FIELD: &str = "session_aname";
 pub const SESSION_AUTH_FIELD: &str = "session_auth";

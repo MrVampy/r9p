@@ -15,10 +15,15 @@ const MAX_PRINCIPAL_BYTES: usize = 255;
 
 #[derive(Clone, Debug)]
 pub struct ClientConfig {
-    domain: String,
+    /// Absent when one config serves many services: the domain then comes from
+    /// the connection, which is what removes per-service client configuration.
+    domain: Option<String>,
     private_key: PrivateKey,
-    server_key: PublicKey,
+    /// Only IK needs this. Under XX the responder's key arrives in the
+    /// handshake and is authenticated by its certificate instead of pinned.
+    server_key: Option<PublicKey>,
     certificate: Option<Certificate>,
+    roots: Vec<RootPublicKey>,
 }
 
 #[derive(Clone, Debug)]
@@ -26,6 +31,8 @@ pub struct ServerConfig {
     domain: String,
     private_key: PrivateKey,
     peers: BTreeMap<PublicKey, BTreeSet<String>>,
+    /// This server's own identity, presented to clients under XX.
+    certificate: Option<Certificate>,
     /// Roots whose certificates this server accepts. A server with roots and no
     /// peers authorizes purely on signed names; one with both is mid-migration.
     roots: Vec<RootPublicKey>,
@@ -40,11 +47,51 @@ impl ClientConfig {
         let domain = domain.into();
         validate_p9any_domain(&domain)?;
         Ok(Self {
-            domain,
+            domain: Some(domain),
             private_key,
-            server_key,
+            server_key: Some(server_key),
             certificate: None,
+            roots: Vec::new(),
         })
+    }
+
+    /// The config that ends pairwise client setup: an identity and the roots it
+    /// trusts, with no service named and no responder key pinned. The domain is
+    /// supplied per connection and checked against the responder's certificate.
+    pub fn certified(
+        private_key: PrivateKey,
+        certificate: Certificate,
+        roots: impl IntoIterator<Item = RootPublicKey>,
+    ) -> Result<Self> {
+        let roots = dedupe_roots(roots);
+        if roots.is_empty() {
+            return Err(Error::from(
+                "a certified client config requires at least one root",
+            ));
+        }
+        Self {
+            domain: None,
+            private_key,
+            server_key: None,
+            certificate: None,
+            roots,
+        }
+        .with_certificate(certificate)
+    }
+
+    pub fn with_roots(mut self, roots: impl IntoIterator<Item = RootPublicKey>) -> Self {
+        self.roots = dedupe_roots(roots);
+        self
+    }
+
+    pub fn roots(&self) -> &[RootPublicKey] {
+        &self.roots
+    }
+
+    /// Whether this client can authenticate a responder from its certificate,
+    /// which is what lets it select XX and stop pinning keys.
+    pub fn can_verify_responder(&self) -> bool {
+        self.certificate.is_some() && !self.roots.is_empty()
     }
 
     /// Attaches the certificate this client presents instead of a bare name.
@@ -84,37 +131,67 @@ impl ClientConfig {
                 "client session auth config cannot contain peer entries",
             ));
         }
-        if !parsed.roots.is_empty() {
-            return Err(Error::from(
-                "client session auth config cannot contain root entries",
-            ));
-        }
         let private_path = resolve_path(path, required(parsed.private_key, "private-key")?);
-        let config = Self::new(
-            required(parsed.domain, "domain")?,
-            PrivateKey::read(&private_path)?,
-            PublicKey::from_hex(&required(parsed.server_key, "server-key")?)?,
-        )?;
-        match parsed.certificate {
-            None => Ok(config),
+        let domain = match parsed.domain {
+            Some(domain) => {
+                validate_p9any_domain(&domain)?;
+                Some(domain)
+            }
+            None => None,
+        };
+        let server_key = match parsed.server_key {
+            Some(value) => Some(PublicKey::from_hex(&value)?),
+            None => None,
+        };
+        let mut roots = Vec::with_capacity(parsed.roots.len());
+        for root in parsed.roots {
+            roots.push(RootPublicKey::from_hex(&root)?);
+        }
+        let config = Self {
+            domain,
+            private_key: PrivateKey::read(&private_path)?,
+            server_key,
+            certificate: None,
+            roots: dedupe_roots(roots),
+        };
+        let config = match parsed.certificate {
+            None => config,
             Some(value) => {
                 let certificate_path = resolve_path(path, value);
-                config.with_certificate(Certificate::read(&certificate_path)?)
+                config.with_certificate(Certificate::read(&certificate_path)?)?
             }
+        };
+        // Either it pins a responder key (IK) or it can authenticate one from a
+        // certificate (XX). Neither leaves nothing to trust.
+        if config.server_key.is_none() && !config.can_verify_responder() {
+            return Err(Error::from(
+                "client session auth config needs either server-key or a certificate with a root",
+            ));
         }
+        Ok(config)
     }
 
-    pub fn domain(&self) -> &str {
-        &self.domain
+    pub fn domain(&self) -> Option<&str> {
+        self.domain.as_deref()
     }
 
     pub fn private_key(&self) -> &PrivateKey {
         &self.private_key
     }
 
-    pub const fn server_key(&self) -> PublicKey {
+    pub const fn server_key(&self) -> Option<PublicKey> {
         self.server_key
     }
+}
+
+fn dedupe_roots(roots: impl IntoIterator<Item = RootPublicKey>) -> Vec<RootPublicKey> {
+    let mut accepted = Vec::new();
+    for root in roots {
+        if !accepted.contains(&root) {
+            accepted.push(root);
+        }
+    }
+    accepted
 }
 
 impl ServerConfig {
@@ -161,6 +238,7 @@ impl ServerConfig {
             domain,
             private_key,
             peers: allowed,
+            certificate: None,
             roots: accepted,
         })
     }
@@ -179,11 +257,6 @@ impl ServerConfig {
                 "server session auth config cannot contain server-key",
             ));
         }
-        if parsed.certificate.is_some() {
-            return Err(Error::from(
-                "server session auth config cannot contain certificate",
-            ));
-        }
         let private_path = resolve_path(path, required(parsed.private_key, "private-key")?);
         let mut peers = Vec::with_capacity(parsed.peers.len());
         for (key, principal) in parsed.peers {
@@ -193,12 +266,57 @@ impl ServerConfig {
         for root in parsed.roots {
             roots.push(RootPublicKey::from_hex(&root)?);
         }
-        Self::new_with_roots(
+        let config = Self::new_with_roots(
             required(parsed.domain, "domain")?,
             PrivateKey::read(&private_path)?,
             peers,
             roots,
-        )
+        )?;
+        match parsed.certificate {
+            None => Ok(config),
+            Some(value) => {
+                let certificate_path = resolve_path(path, value);
+                config.with_certificate(Certificate::read(&certificate_path)?)
+            }
+        }
+    }
+
+    /// The certificate this server presents under XX. Its name must equal the
+    /// domain clients ask for, so a client that asked for `terminal-m7` cannot
+    /// be answered by a differently-named service holding a valid certificate.
+    pub fn with_certificate(mut self, certificate: Certificate) -> Result<Self> {
+        let own = derive_public_key(&self.private_key)?;
+        if certificate.body().key() != own {
+            return Err(Error::from(format!(
+                "certificate for {} was issued for another session key",
+                certificate.body().name()
+            )));
+        }
+        if certificate.body().name() != self.domain {
+            return Err(Error::from(format!(
+                "certificate names {} but this server serves domain {}",
+                certificate.body().name(),
+                self.domain
+            )));
+        }
+        self.certificate = Some(certificate);
+        Ok(self)
+    }
+
+    pub const fn certificate(&self) -> Option<&Certificate> {
+        self.certificate.as_ref()
+    }
+
+    /// Attaches a certificate without the domain check, so tests can build a
+    /// server that lies about which service it is and prove clients catch it.
+    #[cfg(test)]
+    pub(crate) fn force_certificate_for_test(&mut self, certificate: Certificate) {
+        self.certificate = Some(certificate);
+    }
+
+    /// Whether this server can prove its own identity, and so offer XX.
+    pub fn can_prove_identity(&self) -> bool {
+        self.certificate.is_some() && !self.roots.is_empty()
     }
 
     pub fn domain(&self) -> &str {
@@ -441,35 +559,84 @@ mod tests {
     }
 
     #[test]
-    fn roles_reject_each_other_s_certificate_fields() -> Result<()> {
-        let dir = test_root("role-mix")?;
+    fn a_client_may_trust_roots_and_pin_nothing() -> Result<()> {
+        // Under XX the client authenticates the responder from its certificate,
+        // so roots on a client are required rather than forbidden, and no
+        // server-key is pinned.
+        let dir = test_root("client-roots")?;
         let root = generate_root_key_pair()?;
+        let client = crate::generate_key_pair()?;
+        let key_path = dir.join("private");
+        crate::write_key_pair(&key_path, &dir.join("public"), &client)?;
+        let body = CertificateBody::new(
+            "tuxedo",
+            client.public,
+            ["operator".to_string()],
+            1_000,
+            4_000_000_000,
+            root.public,
+        )?;
+        let cert_path = dir.join("tuxedo.crt");
+        Certificate::sign(&root.private, body)?.write(&cert_path)?;
+
+        let config_path = dir.join("client.conf");
+        write(
+            &config_path,
+            &format!(
+                "format {CONFIG_FORMAT}\nrole client\nprivate-key {}\ncertificate {}\nroot {}\n",
+                key_path.display(),
+                cert_path.display(),
+                root.public
+            ),
+        )?;
+        let parsed = ClientConfig::read(&config_path)?;
+        assert!(
+            parsed.domain().is_none(),
+            "a certified client pins no service"
+        );
+        assert!(
+            parsed.server_key().is_none(),
+            "a certified client pins no key"
+        );
+        assert!(parsed.can_verify_responder());
+        Ok(())
+    }
+
+    #[test]
+    fn a_client_that_can_neither_pin_nor_verify_is_refused() -> Result<()> {
+        let dir = test_root("client-empty")?;
         let pair = crate::generate_key_pair()?;
         let key_path = dir.join("private");
         crate::write_key_pair(&key_path, &dir.join("public"), &pair)?;
-
-        let client_with_root = dir.join("client-root.conf");
+        let config_path = dir.join("client.conf");
         write(
-            &client_with_root,
+            &config_path,
             &format!(
-                "format {CONFIG_FORMAT}\nrole client\ndomain vault\nprivate-key {}\nserver-key {}\nroot {}\n",
-                key_path.display(),
-                pair.public.to_hex(),
-                root.public
+                "format {CONFIG_FORMAT}\nrole client\ndomain vault\nprivate-key {}\n",
+                key_path.display()
             ),
         )?;
-        assert!(ClientConfig::read(&client_with_root).is_err());
+        assert!(ClientConfig::read(&config_path).is_err());
+        Ok(())
+    }
 
-        let server_with_cert = dir.join("server-cert.conf");
-        write(
-            &server_with_cert,
-            &format!(
-                "format {CONFIG_FORMAT}\nrole server\ndomain vault\nprivate-key {}\ncertificate /nonexistent\nroot {}\n",
-                key_path.display(),
-                root.public
-            ),
+    #[test]
+    fn a_server_certificate_must_match_the_domain_it_serves() -> Result<()> {
+        // Otherwise a validly-certified service could answer in another's place.
+        let root = generate_root_key_pair()?;
+        let server = crate::generate_key_pair()?;
+        let body = CertificateBody::new(
+            "terminal-nucbox",
+            server.public,
+            Vec::<String>::new(),
+            1_000,
+            4_000_000_000,
+            root.public,
         )?;
-        assert!(ServerConfig::read(&server_with_cert).is_err());
+        let certificate = Certificate::sign(&root.private, body)?;
+        let config =
+            ServerConfig::new_with_roots("terminal-m7", server.private, Vec::new(), [root.public])?;
+        assert!(config.with_certificate(certificate).is_err());
         Ok(())
     }
 

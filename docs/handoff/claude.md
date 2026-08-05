@@ -147,9 +147,43 @@ read part of signed material as a principal. So:
 A new client against an old server fails; an old client against a new server
 works. That asymmetry is what makes the order safe.
 
-Not yet done on the host-flake side: no root exists in sops, no host declares
-`root` or `certificate` lines, and nothing consumes `groups()` for
-authorization yet — `operators = [ ... ]` lists are still name lists.
+### Rolled out (2026-08-05)
+
+Done on the four-host fleet, in this order: r9p binary everywhere → `root` on
+all 13 server configs → certificate on the operator's 7 client configs. Zero
+failed units after.
+
+Proven in production: a key present in **no peer line anywhere** authenticated
+to all four mesh services on one certificate. Adding that principal took no
+server-side edit. Against terminal-m7 the peer-line and certificate paths
+return byte-identical results, so the cutover is a genuine drop-in.
+
+Two things the rollout taught that reading the code did not:
+
+- **A config change does not restart a service.** Adding `root` fleet-wide was
+  silently a no-op on every mesh service: `/etc` changed, the unit definition
+  did not, so each kept serving the config it read at boot and rejected
+  certificates with "this server accepts none" while a root sat in the file
+  beside it. Any service reading a session-auth config needs
+  `restartTriggers` on it.
+- **An old binary rejects `root` as an invalid config line.** So the binary
+  must land fleet-wide before any config names a root — the migration order is
+  binary, then roots, then certificates.
+
+Still open, both predicted here and now confirmed live:
+
+- The operator key is called `codex.interface` by eleven configs and `codex`
+  by the coordinator door. A certificate must pick one, so that door stays on
+  its peer line; reconciling it is an `/entries/ctl` write against the live
+  runtime entry, not a config edit.
+- One m7 key answers to **19 distinct names**. Certificates make identity
+  singular, so those need 19 certificates, 19 keys, or to become groups. That
+  is the strongest case yet for group authorization: 19 names for one key is
+  exactly authorization enumerating principals.
+
+Peer lines are still in place everywhere and are the fallback. Removing them is
+the last step, and `groups()` is still unused — `operators = [ ... ]` remain
+name lists.
 
 ## What it does not close
 

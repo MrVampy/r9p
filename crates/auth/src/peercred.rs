@@ -81,12 +81,8 @@ impl TransportIdentity {
         }
     }
 
-    pub fn transport_authorizes_uname(&self, uname: &str) -> bool {
-        match self {
-            Self::Local => true,
-            Self::Authenticated { principal, .. } => principal.as_ref() == uname,
-            Self::UnixPeer { .. } => false,
-        }
+    pub fn transport_authorizes_uname(&self, _uname: &str) -> bool {
+        matches!(self, Self::Local)
     }
 }
 
@@ -119,7 +115,7 @@ mod tests {
     }
 
     #[test]
-    fn an_authenticated_identity_authorizes_only_its_own_principal() -> Result<()> {
+    fn a_certificate_names_a_caller_without_admitting_it() -> Result<()> {
         let key = generate_key_pair()?;
         let peer = PeerIdentity::new("codex.interface", key.public)?;
         let identity = TransportIdentity::authenticated(&peer);
@@ -128,8 +124,8 @@ mod tests {
             identity.subject_id(),
             format!("{NOISE_SUBJECT_PREFIX}{}", key.public)
         );
-        assert!(identity.transport_authorizes_uname("codex.interface"));
-        assert!(!identity.transport_authorizes_uname("root"));
+        assert_eq!(identity.authenticated_uname(), Some("codex.interface"));
+        assert!(!identity.transport_authorizes_uname("codex.interface"));
         Ok(())
     }
 

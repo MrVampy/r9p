@@ -1,5 +1,3 @@
-/// Whether the transport is itself the boundary, so there is no peer to
-/// authenticate.
 pub(crate) fn contained_authority(authority_boundary: &str) -> bool {
     matches!(authority_boundary, "loopback" | "unix_socket")
         || authority_boundary.starts_with("network_class:")

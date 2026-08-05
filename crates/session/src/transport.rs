@@ -93,9 +93,16 @@ pub(crate) fn connect_stream(
             stream
                 .set_write_timeout(Some(TCP_WRITE_TIMEOUT))
                 .map_err(|error| Error::io("set TCP write timeout", error))?;
-            match root_authentication(config) {
-                Some((credential, responder)) => {
-                    let auth = AuthConfig::read(credential.config()).map_err(client_error)?;
+            match config.authentication.as_ref() {
+                Some(authentication) => {
+                    let responder = authentication.responder().ok_or_else(|| {
+                        Error::new(
+                            libc::EINVAL,
+                            "a TCP root carrying a credential must state the responder it expects",
+                        )
+                    })?;
+                    let auth = AuthConfig::read(authentication.credential().config())
+                        .map_err(client_error)?;
                     let handshake_timeout = if connect_timeout.is_zero() {
                         DEFAULT_AUTH_HANDSHAKE_TIMEOUT
                     } else {

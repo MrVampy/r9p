@@ -40,8 +40,6 @@ impl ResponderName {
     }
 }
 
-/// A responder without a credential is unrepresentable: there would be nothing
-/// to authenticate with.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct SessionAuthentication {
     credential: ClientCredential,
@@ -74,7 +72,6 @@ impl SessionAuthentication {
         &self.credential
     }
 
-    /// `None` when this dial's transport is itself the boundary.
     pub const fn responder(&self) -> Option<&ResponderName> {
         self.root_responder.as_ref()
     }

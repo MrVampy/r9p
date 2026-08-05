@@ -5,9 +5,6 @@ use super::{bytes_arg, clear_last_error, set_last_error, str_arg, FrontAbi, INVA
 
 const CLIENT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Sets the one credential this front's client sessions authenticate with and
-/// the responder a root dial expects. Referrals taken from that session supply
-/// their own responder name, so no per-service binding is ever needed.
 #[no_mangle]
 pub unsafe extern "C" fn r9p_front_set_client_authentication(
     handle: *mut FrontAbi,

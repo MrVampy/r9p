@@ -7,9 +7,6 @@ use crate::usage;
 pub(crate) struct Config {
     pub(crate) address: Option<String>,
     pub(crate) auth_config: Option<PathBuf>,
-    /// The responder this dial expects. One service-agnostic credential
-    /// authenticates every boundary, so the caller states which service must
-    /// answer; referrals supply their own from the authority boundary.
     pub(crate) auth_domain: Option<String>,
     pub(crate) aname: String,
     pub(crate) uname: String,

@@ -605,8 +605,6 @@ impl Client {
             ));
         }
         let authority = text_field("authority_boundary", &route.referral.authority_boundary)?;
-        // An addressing service may point a session somewhere; it may not change
-        // who answers.
         let authentication = if contained_authority(&authority) {
             None
         } else {

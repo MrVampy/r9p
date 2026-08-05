@@ -20,20 +20,29 @@ referral endpoint reset a connection during host boot?
 
 ## Finding
 
-P9any negotiation converts an operating-system I/O error into the shared r9p
-error text while retaining the standard `(os error N)` suffix. The session
-adapter recognized socket errors from the initial `connect` call, but not I/O
-errors raised while reading or writing the p9any negotiation. It consequently
-sent `read p9any protocol offer: Connection reset by peer (os error 104)`
-through remote 9P error classification. That classifier matched the word
-`protocol` before `connection reset` and returned `EPROTO`, so a renewable
-client treated an early-boot transport reset as permanent.
+P9any negotiation converts a local I/O error into the shared r9p error text.
+Most socket errors retain the standard `(os error N)` suffix, but Rust's
+`read_exact` renders `UnexpectedEof` as `failed to fill whole buffer` without a
+numeric errno. The session adapter recognized socket errors from the initial
+`connect` call, but initially recognized p9any read and write failures only
+when they retained an operating-system error number.
+
+That first gap sent
+`read p9any protocol offer: Connection reset by peer (os error 104)` through
+remote 9P error classification. The narrower first repair preserved its
+`ECONNRESET`, but a live host-reboot proof then exposed the other rendering:
+`read p9any selection response: failed to fill whole buffer`. That message
+again reached remote classification, which matched the word `protocol` and
+returned `EPROTO`. In both cases a renewable client treated an early-boot
+transport break as permanent.
 
 ## Decision
 
-The session adapter recognizes p9any read and write failures carrying an
-operating-system error number as local transport failures and preserves that
-errno. A genuine p9any selection or authentication rejection carries no
-operating-system error marker and remains non-transient. This keeps reconnect
-policy machine-readable without teaching a domain client about authentication
-message text or broadening remote 9P errors into retryable failures.
+The session adapter recognizes every error carrying the local `read p9any` or
+`write p9any` provenance as a transport failure. It preserves a numeric
+operating-system errno when present; otherwise the broken negotiation maps to
+`ECONNRESET`, which is reconnectable. Genuine p9any selection and admission
+rejections have distinct messages without those local I/O prefixes and remain
+non-transient. This keeps reconnect policy machine-readable without teaching a
+domain client about authentication message text or broadening remote 9P errors
+into retryable failures.

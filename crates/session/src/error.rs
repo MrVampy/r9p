@@ -256,8 +256,8 @@ fn is_protocol_error(message: &str) -> bool {
 
 fn is_transport_message(message: &str) -> bool {
     (message.starts_with("connect ") && message.contains("(os error "))
-        || ((message.starts_with("read p9any ") || message.starts_with("write p9any "))
-            && message.contains("(os error "))
+        || message.starts_with("read p9any ")
+        || message.starts_with("write p9any ")
         || message.contains("9P frame")
         || message.contains("9P reader stopped")
         || message.contains("9P transport closed")
@@ -274,13 +274,18 @@ fn transport_errno(message: &str) -> Option<i32> {
         return Some(libc::ETIMEDOUT);
     }
     let marker = "os error ";
-    let start = message.find(marker)? + marker.len();
-    let rest = &message[start..];
-    let digits = rest
-        .chars()
-        .take_while(|character| character.is_ascii_digit())
-        .collect::<String>();
-    digits.parse().ok()
+    if let Some(start) = message.find(marker).map(|start| start + marker.len()) {
+        let rest = &message[start..];
+        let digits = rest
+            .chars()
+            .take_while(|character| character.is_ascii_digit())
+            .collect::<String>();
+        return digits.parse().ok();
+    }
+    if message.starts_with("read p9any ") || message.starts_with("write p9any ") {
+        return Some(libc::ECONNRESET);
+    }
+    None
 }
 
 #[cfg(test)]
@@ -348,6 +353,12 @@ mod tests {
 
         assert_eq!(error.errno, libc::ECONNRESET);
         assert!(error.is_transient_connection_failure());
+
+        let eof = client_error(P9Error::from(
+            "read p9any selection response: failed to fill whole buffer",
+        ));
+        assert_eq!(eof.errno, libc::ECONNRESET);
+        assert!(eof.is_transient_connection_failure());
 
         let rejection = client_error(P9Error::from("p9any server rejected protocol selection"));
         assert!(!rejection.is_transient_connection_failure());

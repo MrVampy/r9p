@@ -1,6 +1,7 @@
 use crate::{
-    config::validate_principal, p9any, ClientConfig, PublicKey, SecureStream, ServerConfig,
-    CONFIG_FORMAT, NOISE_PATTERN,
+    cert::{now_unix, Certificate},
+    config::validate_principal,
+    p9any, ClientConfig, PublicKey, SecureStream, ServerConfig, CONFIG_FORMAT, NOISE_PATTERN,
 };
 use r9p::{
     error::{Error, Result},
@@ -9,14 +10,21 @@ use r9p::{
 };
 use snow::{params::NoiseParams, HandshakeState};
 use std::{
+    collections::BTreeSet,
     io::{Read, Write},
     net::TcpStream,
     time::Duration,
 };
 
 const MAX_NOISE_MESSAGE_BYTES: usize = u16::MAX as usize;
-const MAX_PRINCIPAL_BYTES: usize = 255;
+const MAX_CERTIFICATE_BYTES: usize = 8192;
 const SERVER_ACK: &[u8] = b"r9p-session-authenticated.v1";
+
+/// Leading byte marking the first handshake payload as a certificate rather
+/// than a bare principal. `validate_principal` rejects NUL and every other
+/// control byte, so a legacy payload can never begin with this and the two
+/// forms need no version negotiation to tell apart.
+const CERTIFICATE_TAG: u8 = 0x00;
 
 mod sealed {
     pub trait Sealed {}
@@ -44,6 +52,8 @@ pub trait AuthenticationTransport: ConnectionStream + MultiplexTransport + seale
 pub struct PeerIdentity {
     principal: String,
     public_key: PublicKey,
+    groups: BTreeSet<String>,
+    certified: bool,
 }
 
 pub struct AuthenticatedSession<S = TcpStream> {
@@ -59,6 +69,8 @@ impl PeerIdentity {
         Ok(Self {
             principal,
             public_key,
+            groups: BTreeSet::new(),
+            certified: false,
         })
     }
 
@@ -68,6 +80,23 @@ impl PeerIdentity {
 
     pub const fn public_key(&self) -> PublicKey {
         self.public_key
+    }
+
+    /// Groups carried by the certificate that named this peer. Always empty for
+    /// a peer-line identity, so authorization written against groups denies a
+    /// legacy session rather than silently widening it.
+    pub fn groups(&self) -> impl Iterator<Item = &str> {
+        self.groups.iter().map(String::as_str)
+    }
+
+    pub fn in_group(&self, group: &str) -> bool {
+        self.groups.contains(group)
+    }
+
+    /// Whether the name was read from signed material rather than asserted by
+    /// this server's own configuration.
+    pub const fn certified(&self) -> bool {
+        self.certified
     }
 }
 
@@ -95,9 +124,30 @@ pub fn authenticate_client<S: AuthenticationTransport>(
         .build_initiator()
         .map_err(noise_error("create Noise initiator"))?;
 
+    // A configured certificate replaces the bare name. The caller still passes
+    // the principal it believes it is, and a disagreement is refused here: a
+    // client must not silently authenticate as someone other than who its
+    // caller asked for.
+    let payload = match config.certificate() {
+        Some(certificate) => {
+            if certificate.body().name() != principal {
+                return Err(Error::from(format!(
+                    "certificate names {} but the session asked for {principal}",
+                    certificate.body().name()
+                )));
+            }
+            let rendered = certificate.render();
+            let mut payload = Vec::with_capacity(rendered.len() + 1);
+            payload.push(CERTIFICATE_TAG);
+            payload.extend_from_slice(rendered.as_bytes());
+            payload
+        }
+        None => principal.as_bytes().to_vec(),
+    };
+
     let mut first = vec![0_u8; MAX_NOISE_MESSAGE_BYTES];
     let first_len = handshake
-        .write_message(principal.as_bytes(), &mut first)
+        .write_message(&payload, &mut first)
         .map_err(noise_error("write client authentication message"))?;
     write_frame(&mut stream, &first[..first_len])?;
 
@@ -154,24 +204,48 @@ fn authenticate_server_inner<S: AuthenticationTransport>(
         .map_err(noise_error("create Noise responder"))?;
 
     let first = read_frame(&mut stream, "client authentication message")?;
-    let mut principal_bytes = vec![0_u8; MAX_PRINCIPAL_BYTES];
-    let principal_len = handshake
-        .read_message(&first, &mut principal_bytes)
+    // Sized for the larger of the two payload forms. A bare principal is still
+    // length-bounded by validate_principal below; a certificate
+    // is bounded explicitly. An older server reading a certificate payload into
+    // its 255-byte buffer fails here instead of misparsing, which is what makes
+    // servers-before-clients the safe migration order.
+    let mut payload_bytes = vec![0_u8; MAX_NOISE_MESSAGE_BYTES];
+    let payload_len = handshake
+        .read_message(&first, &mut payload_bytes)
         .map_err(noise_error("read client authentication message"))?;
-    let principal = String::from_utf8(principal_bytes[..principal_len].to_vec())
-        .map_err(|_| Error::from("session principal is not utf-8"))?;
-    validate_principal(&principal)?;
+    let payload = &payload_bytes[..payload_len];
     let public_key = PublicKey::from_bytes(
         handshake
             .get_remote_static()
             .ok_or_else(|| Error::from("Noise handshake did not authenticate a client key"))?,
     )?;
-    let preauthorized = config.authorize(public_key, &principal);
-    if !preauthorized && !allow_attested {
-        return Err(Error::from(format!(
-            "client key is not authorized for principal {principal}"
-        )));
-    }
+
+    let identity = if payload.first() == Some(&CERTIFICATE_TAG) {
+        certified_identity(config, &payload[1..], public_key)?
+    } else {
+        let principal = String::from_utf8(payload.to_vec())
+            .map_err(|_| Error::from("session principal is not utf-8"))?;
+        validate_principal(&principal)?;
+        let preauthorized = config.authorize(public_key, &principal);
+        if !preauthorized && !allow_attested {
+            return Err(Error::from(format!(
+                "client key is not authorized for principal {principal}"
+            )));
+        }
+        AdmittedIdentity {
+            peer: PeerIdentity {
+                principal,
+                public_key,
+                groups: BTreeSet::new(),
+                certified: false,
+            },
+            preauthorized,
+        }
+    };
+    let AdmittedIdentity {
+        peer,
+        preauthorized,
+    } = identity;
 
     let mut second = vec![0_u8; MAX_NOISE_MESSAGE_BYTES];
     let second_len = handshake
@@ -182,12 +256,69 @@ fn authenticate_server_inner<S: AuthenticationTransport>(
     stream.restore_authentication_timeouts(previous)?;
     Ok(AuthenticatedSession {
         stream: SecureStream::new(stream, transport),
-        peer: PeerIdentity {
-            principal,
-            public_key,
-        },
+        peer,
         preauthorized,
     })
+}
+
+struct AdmittedIdentity {
+    peer: PeerIdentity,
+    preauthorized: bool,
+}
+
+/// Admits a certificate-bearing client.
+///
+/// The load-bearing check is that the certificate was issued for the key that
+/// just completed this handshake. Certificates are public, so without it anyone
+/// could replay another principal's certificate and be believed. Noise proves
+/// possession of the key; this ties the signed name to that same key.
+fn certified_identity(
+    config: &ServerConfig,
+    body: &[u8],
+    public_key: PublicKey,
+) -> Result<AdmittedIdentity> {
+    if config.roots().is_empty() {
+        return Err(Error::from(
+            "client presented a certificate but this server accepts none",
+        ));
+    }
+    if body.len() > MAX_CERTIFICATE_BYTES {
+        return Err(Error::from(format!(
+            "presented certificate exceeds {MAX_CERTIFICATE_BYTES} bytes"
+        )));
+    }
+    let text =
+        std::str::from_utf8(body).map_err(|_| Error::from("presented certificate is not utf-8"))?;
+    let certificate = Certificate::parse(text)?;
+    if certificate.body().key() != public_key {
+        return Err(Error::from(format!(
+            "certificate for {} was issued for a different session key",
+            certificate.body().name()
+        )));
+    }
+
+    let now = now_unix()?;
+    let mut refusal = None;
+    for root in config.roots() {
+        match certificate.verify(*root, now) {
+            Ok(()) => {
+                let peer = PeerIdentity {
+                    principal: certificate.body().name().to_string(),
+                    public_key,
+                    groups: certificate.body().groups().map(str::to_string).collect(),
+                    certified: true,
+                };
+                // Preauthorized: the name is proven rather than asserted here,
+                // which is a stronger claim than a peer line makes.
+                return Ok(AdmittedIdentity {
+                    peer,
+                    preauthorized: true,
+                });
+            }
+            Err(error) => refusal = Some(error),
+        }
+    }
+    Err(refusal.unwrap_or_else(|| Error::from("presented certificate was not accepted")))
 }
 
 fn noise_params() -> Result<NoiseParams> {
@@ -475,6 +606,292 @@ mod tests {
         assert!(server
             .join()
             .map_err(|_| Error::from("auth server panicked"))?
+            .is_err());
+        Ok(())
+    }
+
+    // ---- certificate-bearing sessions -------------------------------------
+
+    use crate::cert::{generate_root_key_pair, CertificateBody, RootKeyPair};
+    use crate::{KeyPair, PrivateKey};
+
+    const VALID_FROM: crate::UnixSeconds = 1_000;
+    const VALID_UNTIL: crate::UnixSeconds = 4_000_000_000;
+
+    fn issue(
+        root: &RootKeyPair,
+        subject: PublicKey,
+        name: &str,
+        groups: &[&str],
+        not_before: crate::UnixSeconds,
+        not_after: crate::UnixSeconds,
+    ) -> Result<Certificate> {
+        let body = CertificateBody::new(
+            name,
+            subject,
+            groups.iter().map(|group| (*group).to_string()),
+            not_before,
+            not_after,
+            root.public,
+        )?;
+        Certificate::sign(&root.private, body)
+    }
+
+    /// Runs one handshake and returns the server's view. The server is joined
+    /// before the client error is surfaced so a failure on either side is
+    /// reported rather than deadlocking the test.
+    fn handshake_once(
+        server_config: ServerConfig,
+        client_config: &ClientConfig,
+        principal: &str,
+    ) -> Result<PeerIdentity> {
+        let listener =
+            TcpListener::bind("127.0.0.1:0").map_err(|error| Error::from(error.to_string()))?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| Error::from(error.to_string()))?;
+        let server = thread::spawn(move || -> Result<PeerIdentity> {
+            let (stream, _) = listener
+                .accept()
+                .map_err(|error| Error::from(error.to_string()))?;
+            let session = authenticate_server(stream, &server_config, Duration::from_secs(2))?;
+            Ok(session.peer)
+        });
+        let stream = TcpStream::connect(address).map_err(|error| Error::from(error.to_string()))?;
+        let client = authenticate_client(stream, client_config, principal, Duration::from_secs(2));
+        let peer = server
+            .join()
+            .map_err(|_| Error::from("auth server panicked"))?;
+        client?;
+        peer
+    }
+
+    fn cert_client(
+        server_key: &KeyPair,
+        client_private: PrivateKey,
+        certificate: Certificate,
+    ) -> Result<ClientConfig> {
+        ClientConfig::new("vault", client_private, server_key.public)?.with_certificate(certificate)
+    }
+
+    #[test]
+    fn a_certificate_names_the_session_with_no_peer_line() -> Result<()> {
+        let root = generate_root_key_pair()?;
+        let server_key = generate_key_pair()?;
+        let client_key = generate_key_pair()?;
+        let certificate = issue(
+            &root,
+            client_key.public,
+            "tuxedo",
+            &["operator", "laptop"],
+            VALID_FROM,
+            VALID_UNTIL,
+        )?;
+        let server_config = ServerConfig::new_with_roots(
+            "vault",
+            server_key.private.clone(),
+            Vec::new(),
+            [root.public],
+        )?;
+        let client_config = cert_client(&server_key, client_key.private, certificate)?;
+
+        let peer = handshake_once(server_config, &client_config, "tuxedo")?;
+        assert_eq!(peer.principal(), "tuxedo");
+        assert_eq!(peer.public_key(), client_key.public);
+        assert!(peer.certified());
+        assert!(peer.in_group("operator"));
+        assert!(peer.in_group("laptop"));
+        assert!(!peer.in_group("server"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_certificate_cannot_be_replayed_by_another_key() -> Result<()> {
+        // Certificates are public. Without binding the certificate to the key
+        // that completed the handshake, anyone holding a copy could claim it.
+        let root = generate_root_key_pair()?;
+        let server_key = generate_key_pair()?;
+        let owner = generate_key_pair()?;
+        let thief = generate_key_pair()?;
+        let certificate = issue(
+            &root,
+            owner.public,
+            "tuxedo",
+            &["operator"],
+            VALID_FROM,
+            VALID_UNTIL,
+        )?;
+        let server_config = ServerConfig::new_with_roots(
+            "vault",
+            server_key.private.clone(),
+            Vec::new(),
+            [root.public],
+        )?;
+        // with_certificate refuses the mismatch locally, so the stolen
+        // certificate is forced past it to prove the server also refuses.
+        let mut client_config = ClientConfig::new("vault", thief.private, server_key.public)?;
+        client_config.force_certificate_for_test(certificate);
+        assert!(handshake_once(server_config, &client_config, "tuxedo").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn a_certificate_from_an_unknown_root_is_refused() -> Result<()> {
+        let root = generate_root_key_pair()?;
+        let other = generate_root_key_pair()?;
+        let server_key = generate_key_pair()?;
+        let client_key = generate_key_pair()?;
+        let certificate = issue(
+            &other,
+            client_key.public,
+            "tuxedo",
+            &[],
+            VALID_FROM,
+            VALID_UNTIL,
+        )?;
+        let server_config = ServerConfig::new_with_roots(
+            "vault",
+            server_key.private.clone(),
+            Vec::new(),
+            [root.public],
+        )?;
+        let client_config = cert_client(&server_key, client_key.private, certificate)?;
+        assert!(handshake_once(server_config, &client_config, "tuxedo").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn an_expired_certificate_is_refused() -> Result<()> {
+        let root = generate_root_key_pair()?;
+        let server_key = generate_key_pair()?;
+        let client_key = generate_key_pair()?;
+        let certificate = issue(&root, client_key.public, "tuxedo", &[], 1_000, 2_000)?;
+        let server_config = ServerConfig::new_with_roots(
+            "vault",
+            server_key.private.clone(),
+            Vec::new(),
+            [root.public],
+        )?;
+        let client_config = cert_client(&server_key, client_key.private, certificate)?;
+        assert!(handshake_once(server_config, &client_config, "tuxedo").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn a_server_without_roots_refuses_a_certificate() -> Result<()> {
+        let root = generate_root_key_pair()?;
+        let server_key = generate_key_pair()?;
+        let client_key = generate_key_pair()?;
+        let certificate = issue(
+            &root,
+            client_key.public,
+            "tuxedo",
+            &[],
+            VALID_FROM,
+            VALID_UNTIL,
+        )?;
+        let server_config = ServerConfig::new(
+            "vault",
+            server_key.private.clone(),
+            [(client_key.public, "tuxedo".to_string())],
+        )?;
+        let client_config = cert_client(&server_key, client_key.private, certificate)?;
+        assert!(handshake_once(server_config, &client_config, "tuxedo").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn peer_lines_keep_working_while_roots_are_configured() -> Result<()> {
+        // The migration state: a server trusting a root must not stop admitting
+        // the clients that have not been cut over yet.
+        let root = generate_root_key_pair()?;
+        let server_key = generate_key_pair()?;
+        let legacy = generate_key_pair()?;
+        let server_config = ServerConfig::new_with_roots(
+            "vault",
+            server_key.private.clone(),
+            [(legacy.public, "codex".to_string())],
+            [root.public],
+        )?;
+        let client_config = ClientConfig::new("vault", legacy.private, server_key.public)?;
+        let peer = handshake_once(server_config, &client_config, "codex")?;
+        assert_eq!(peer.principal(), "codex");
+        assert!(!peer.certified());
+        assert_eq!(peer.groups().count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn a_client_will_not_authenticate_under_a_name_it_was_not_asked_for() -> Result<()> {
+        let root = generate_root_key_pair()?;
+        let server_key = generate_key_pair()?;
+        let client_key = generate_key_pair()?;
+        let certificate = issue(
+            &root,
+            client_key.public,
+            "tuxedo",
+            &[],
+            VALID_FROM,
+            VALID_UNTIL,
+        )?;
+        let client_config = cert_client(&server_key, client_key.private, certificate)?;
+        let server_config = ServerConfig::new_with_roots(
+            "vault",
+            server_key.private.clone(),
+            Vec::new(),
+            [root.public],
+        )?;
+        assert!(handshake_once(server_config, &client_config, "m7").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn a_certificate_issued_for_another_key_is_refused_before_use() -> Result<()> {
+        let root = generate_root_key_pair()?;
+        let server_key = generate_key_pair()?;
+        let client_key = generate_key_pair()?;
+        let other = generate_key_pair()?;
+        let certificate = issue(&root, other.public, "tuxedo", &[], VALID_FROM, VALID_UNTIL)?;
+        assert!(cert_client(&server_key, client_key.private, certificate).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn an_undersized_server_buffer_refuses_rather_than_truncating() -> Result<()> {
+        // A server predating certificates reads the first payload into a
+        // 255-byte buffer. A certificate does not fit. This must fail outright:
+        // if it truncated instead, an old server could read a prefix of signed
+        // material as a principal. That safe failure is what makes
+        // servers-before-clients the correct migration order.
+        let server_key = generate_key_pair()?;
+        let client_key = generate_key_pair()?;
+        let prologue = prologue("vault");
+        let mut initiator = snow::Builder::new(noise_params()?)
+            .prologue(&prologue)
+            .map_err(noise_error("prologue"))?
+            .local_private_key(client_key.private.as_bytes())
+            .map_err(noise_error("client key"))?
+            .remote_public_key(server_key.public.as_bytes())
+            .map_err(noise_error("server key"))?
+            .build_initiator()
+            .map_err(noise_error("initiator"))?;
+        let mut responder = snow::Builder::new(noise_params()?)
+            .prologue(&prologue)
+            .map_err(noise_error("prologue"))?
+            .local_private_key(server_key.private.as_bytes())
+            .map_err(noise_error("server key"))?
+            .build_responder()
+            .map_err(noise_error("responder"))?;
+
+        let payload = vec![b'x'; 1024];
+        let mut message = vec![0_u8; MAX_NOISE_MESSAGE_BYTES];
+        let len = initiator
+            .write_message(&payload, &mut message)
+            .map_err(noise_error("write"))?;
+
+        let mut undersized = vec![0_u8; 255];
+        assert!(responder
+            .read_message(&message[..len], &mut undersized)
             .is_err());
         Ok(())
     }

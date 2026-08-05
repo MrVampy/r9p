@@ -205,10 +205,32 @@ path; `r9p cert print` reports `expires_in_seconds`, the form a threshold alert
 wants. Certificates are public material and are written mode `0644`; signing
 refuses to overwrite an existing one.
 
-The handshake does **not** consult certificates yet. Sessions still authorize
-through `peer` lines, so issuing a certificate changes nothing about who may
-connect until the transport carries and verifies it. The tool exists first so
-identities can be signed and inspected before the trust path depends on them.
+A client presents its certificate by naming it in the client config; a server
+accepts certificates by naming the roots it trusts:
+
+```
+# client
+certificate /var/lib/r9p/cert/tuxedo.crt
+
+# server
+root 217a98d48bc5c82dbbab66272009ff7ced583321a4b9e6bae6f5db04ae1ce183
+```
+
+A server may carry `peer` lines, `root` lines, or both. Both is the migration
+state. The presented certificate must have been issued for the key that
+completed the handshake, so a certificate — which is public — cannot be
+replayed by anyone else holding a copy. A session named this way reports
+`certified()`, and the groups it carries are visible to authorization;
+a `peer`-line session carries none, so authorization written against groups
+denies it rather than silently widening.
+
+**Migrate servers before clients.** A server predating this reads the first
+handshake payload into a 255-byte buffer, which a certificate overflows; it
+refuses the session rather than reading a prefix of signed material as a
+principal. So a new client cannot talk to an old server, while an old client
+keeps working against a new one. Deploy roots everywhere first, verify legacy
+sessions still authenticate, then cut clients over and remove `peer` lines
+last.
 
 The flake exports `nixosModules.session-auth` for boot-time provisioning and
 verification without host-specific scripts. After importing the module, declare

@@ -222,7 +222,7 @@ pub(crate) fn write_new_file(path: &Path, bytes: &[u8], mode: u32, label: &str) 
     }
 }
 
-fn derive_public_key(private: &PrivateKey) -> Result<PublicKey> {
+pub(crate) fn derive_public_key(private: &PrivateKey) -> Result<PublicKey> {
     let resolver = DefaultResolver;
     let mut dh = resolver
         .resolve_dh(&DHChoice::Curve25519)

@@ -64,9 +64,9 @@ operator, no daemon. Coordinator does not take this on, reversing nothing about
 the original cost decision.
 
 Shipped as `r9p cert` (`crates/auth/src/cert.rs`,
-`crates/cli/src/commands/cert.rs`) with `root`, `sign`, `print` and `verify`.
-The **transport does not consult it yet** — see "What remains" below. Issuing a
-certificate currently changes nothing about who may connect.
+`crates/cli/src/commands/cert.rs`) with `root`, `sign`, `print` and `verify`,
+and **wired into the handshake** — a certificate now names a session. Nothing
+in the fleet is configured to use it yet; see "Rolling it out" below.
 
 Implementation notes worth keeping:
 
@@ -106,32 +106,50 @@ The credential carries:
 - `not-before` / `not-after` — session keys otherwise have no lifetime, so "how
   long is this good for" answers "forever, including after it leaks".
 
-## What remains: the transport
+## The transport, as built
 
-The handshake still authorizes through `peer` lines. What has to change, from
-reading `crates/auth/src/handshake.rs`:
+`ClientConfig` takes an optional `certificate`; `ServerConfig` takes `root`
+lines and may hold peers, roots, or both. `ServerConfig::new` keeps its old
+signature and semantics, so nothing outside had to change;
+`new_with_roots` is the wider constructor.
 
-- The client's **first Noise message payload already carries the principal**
-  (`handshake.rs:100`), and the server reads it back and calls
-  `config.authorize(public_key, &principal)` (`handshake.rs:169`). That payload
-  is where a certificate goes.
-- **A discriminator is available for free.** Principals are validated UTF-8
-  with no control bytes, so a payload whose first byte is `0x00` can never be a
-  legacy principal. That makes old and new payloads unambiguous without a
-  version negotiation.
-- **The server's read buffer must grow.** It is `MAX_PRINCIPAL_BYTES` (255) at
-  `handshake.rs:157`, and a certificate is larger. Read into a
-  `MAX_NOISE_MESSAGE_BYTES` buffer and bound by payload kind instead.
-- **`ServerConfig` needs a root instead of, or beside, peers.** It currently
-  *requires* at least one peer (`config.rs:89`); a cert-only server has none.
-- **Migration order is servers first, then clients.** A new client against an
-  old server fails, because the old server cannot parse the payload or size the
-  buffer. Both must be accepted for a period, which is the mixed fleet this
-  note has asked for from the start.
-- **`preauthorized` already models the distinction** the cert path needs:
-  `authenticate_server_attested` admits an unlisted key and defers to the
-  application. A certificate-authenticated session is a third case — the name
-  is proven, not asserted and not deferred.
+The certificate rides in the first Noise message payload, where the bare
+principal used to go, behind a leading `0x00`. That byte is a free
+discriminator: `validate_principal` rejects NUL and every control byte, so a
+legacy payload can never begin with it and the two forms need no version
+negotiation.
+
+The load-bearing check is that **the certificate was issued for the key that
+completed this handshake**. Certificates are public; without that check anyone
+holding a copy could present it. Noise proves possession of the key, and the
+check ties the signed name to that same key. `a_certificate_cannot_be_replayed_by_another_key`
+forces a stolen certificate past the client-side guard to prove the server
+refuses it too.
+
+`PeerIdentity` gained `groups()` and `certified()`. A peer-line identity has no
+groups, so authorization written against groups denies a legacy session rather
+than silently widening it.
+
+## Rolling it out
+
+**Servers before clients, and it is not merely convention.** A server predating
+this reads the first payload into a 255-byte buffer, which a certificate
+overflows. `an_undersized_server_buffer_refuses_rather_than_truncating` proves
+snow errors rather than delivering a prefix — otherwise an old server could
+read part of signed material as a principal. So:
+
+1. Deploy servers carrying `root` lines beside their existing `peer` lines.
+   `peer_lines_keep_working_while_roots_are_configured` covers this state.
+2. Verify legacy sessions still authenticate everywhere.
+3. Issue certificates and cut clients over one at a time.
+4. Remove `peer` lines last.
+
+A new client against an old server fails; an old client against a new server
+works. That asymmetry is what makes the order safe.
+
+Not yet done on the host-flake side: no root exists in sops, no host declares
+`root` or `certificate` lines, and nothing consumes `groups()` for
+authorization yet — `operators = [ ... ]` lists are still name lists.
 
 ## What it does not close
 

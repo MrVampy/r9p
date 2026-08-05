@@ -46,3 +46,19 @@ rejections have distinct messages without those local I/O prefixes and remain
 non-transient. This keeps reconnect policy machine-readable without teaching a
 domain client about authentication message text or broadening remote 9P errors
 into retryable failures.
+
+## Host-absence follow-up
+
+A later real reboot kept the laptop-side terminal viewer alive while the remote
+host disappeared from the LAN. Linux returned `EHOSTUNREACH` from the initial
+TCP `connect`, and `client_error` correctly preserved that numeric errno. The
+transient connection allowlist did not include host or network reachability
+errors, however, so a persistent namespace observer stopped instead of waiting
+for the namespace change feed and renewing its attachment when the host came
+back.
+
+The generic session policy now treats `ENETDOWN`, `ENETUNREACH`, `EHOSTDOWN`,
+and `EHOSTUNREACH` as transient connection failures. These values describe the
+current reachability of a configured endpoint; they do not weaken admission or
+turn a remote 9P rejection into a retry. The exact Linux `No route to host (os
+error 113)` rendering is covered by a regression test.

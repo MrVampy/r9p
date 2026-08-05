@@ -102,6 +102,10 @@ impl Error {
                 | libc::ECONNABORTED
                 | libc::EAGAIN
                 | libc::ETIMEDOUT
+                | libc::ENETDOWN
+                | libc::ENETUNREACH
+                | libc::EHOSTDOWN
+                | libc::EHOSTUNREACH
         )
     }
 }
@@ -343,6 +347,16 @@ mod tests {
         ));
         assert_eq!(error.errno, libc::ECONNREFUSED);
         assert!(error.message().contains("Connection refused"));
+    }
+
+    #[test]
+    fn absent_host_is_a_transient_connection_failure() {
+        let error = client_error(P9Error::from(
+            "connect 192.168.0.30:9564: No route to host (os error 113)",
+        ));
+
+        assert_eq!(error.errno, libc::EHOSTUNREACH);
+        assert!(error.is_transient_connection_failure());
     }
 
     #[test]

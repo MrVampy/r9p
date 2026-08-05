@@ -791,7 +791,8 @@ mod tests {
                 .handle_line(&serve)
                 .expect("authenticated front serve"),
         );
-        let target = target_fields_with_auth(&addr, &client_config.to_string_lossy());
+        let target =
+            target_fields_with_auth(&addr, &client_config.to_string_lossy(), "front-test");
         let read = server
             .handle_line(&format!("read\t{target}\t{}", hex_text("status")))
             .expect("authenticated read");
@@ -1051,13 +1052,18 @@ mod tests {
         )
     }
 
-    fn target_fields_with_auth(bind: &str, auth_config_path: &str) -> String {
+    fn target_fields_with_auth(
+        bind: &str,
+        auth_config_path: &str,
+        expected_responder: &str,
+    ) -> String {
         format!(
-            "{}\t{}\t{}\t65536\t{}\t",
+            "{}\t{}\t{}\t65536\t{}\t{}",
             hex_text(bind),
             hex_text("codex"),
             hex_text("/"),
-            hex_text(auth_config_path)
+            hex_text(auth_config_path),
+            hex_text(expected_responder)
         )
     }
 }

@@ -1,12 +1,11 @@
 use crate::{
     cert::{Certificate, RootPublicKey},
     key::derive_public_key,
-    PrivateKey, PublicKey, CONFIG_FORMAT,
+    PrivateKey, CONFIG_FORMAT,
 };
 use r9p::error::{Error, Result};
 use r9p::export_descriptor::validate_p9any_domain;
 use std::{
-    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -346,7 +345,6 @@ mod tests {
     fn a_client_config_loads_and_binds_its_certificate() -> Result<()> {
         let dir = test_root("client-cert")?;
         let root = generate_root_key_pair()?;
-        let server = crate::generate_key_pair()?;
         let client = crate::generate_key_pair()?;
         let key_path = dir.join("private");
         crate::write_key_pair(&key_path, &dir.join("public"), &client)?;
@@ -367,10 +365,10 @@ mod tests {
         write(
             &config_path,
             &format!(
-                "format {CONFIG_FORMAT}\nrole client\ndomain vault\nprivate-key {}\nserver-key {}\ncertificate {}\n",
+                "format {CONFIG_FORMAT}\nrole client\nprivate-key {}\ncertificate {}\nroot {}\n",
                 key_path.display(),
-                server.public.to_hex(),
-                cert_path.display()
+                cert_path.display(),
+                root.public
             ),
         )?;
         let parsed = ClientConfig::read(&config_path)?;

@@ -178,7 +178,7 @@ function endpointTransportClass(endpointBind: string): "tcp" | "unix" {
 }
 
 function validP9anyDetails(details: string): boolean {
-  const match = /^noise-ik@([A-Za-z0-9._-]{1,255})$/.exec(details);
+  const match = /^noise-xx@([A-Za-z0-9._-]{1,255})$/.exec(details);
   return match !== null;
 }
 

@@ -18,7 +18,10 @@ use r9p::message::{RMessage, TMessage, NOTAG};
 use r9p::qid::DMDIR;
 use r9p::stat::decode_dir_entries;
 use r9p::{codec, Error};
-use r9p_auth::{authenticate_client, generate_key_pair, write_key_pair, ClientConfig};
+use r9p_auth::{
+    authenticate_client_to, generate_key_pair, generate_root_key_pair, write_key_pair, Certificate,
+    CertificateBody, ClientConfig, PublicKey, RootKeyPair,
+};
 use std::ffi::c_char;
 use std::fs;
 use std::net::TcpStream;
@@ -54,19 +57,38 @@ fn front_auth_fixture() -> (PathBuf, PathBuf, ClientConfig) {
     let server_private = root.join("server.key");
     let server_public = root.join("server.pub");
     write_key_pair(&server_private, &server_public, &server).expect("write server key pair");
+    let signing_root = generate_root_key_pair().expect("root key pair");
+    let server_cert = root.join("server.crt");
+    certify(&signing_root, server.public, "front-test")
+        .write(&server_cert)
+        .expect("write server certificate");
     let server_config = root.join("server.conf");
     fs::write(
         &server_config,
         format!(
-            "format r9p-session-auth.v1\nrole server\ndomain front-test\nprivate-key {}\npeer {} codex\n",
+            "format r9p-session-auth.v1\nrole server\ndomain front-test\nprivate-key {}\ncertificate {}\nroot {}\n",
             server_private.display(),
-            client.public
+            server_cert.display(),
+            signing_root.public
         ),
     )
     .expect("write server config");
-    let client_config =
-        ClientConfig::new("front-test", client.private, server.public).expect("client config");
+    let client_config = ClientConfig::certified(
+        client.private,
+        certify(&signing_root, client.public, "codex"),
+        [signing_root.public],
+    )
+    .expect("client config");
     (root, server_config, client_config)
+}
+
+fn certify(root: &RootKeyPair, key: PublicKey, name: &str) -> Certificate {
+    Certificate::sign(
+        &root.private,
+        CertificateBody::new(name, key, Vec::<String>::new(), 1, 4_000_000_000, root.public)
+            .expect("certificate body"),
+    )
+    .expect("sign certificate")
 }
 
 #[test]
@@ -101,7 +123,13 @@ fn abi_authenticated_serve_binds_transport_principal_to_attach_uname() {
 
     let address = format!("127.0.0.1:{port}");
     let stream = TcpStream::connect(address).expect("connect authenticated front");
-    let stream = authenticate_client(stream, &client_config, "codex", Duration::from_secs(2))
+    let stream = authenticate_client_to(
+        stream,
+        &client_config,
+        "front-test",
+        "codex",
+        Duration::from_secs(2),
+    )
         .expect("authenticate front client");
     let mut client =
         Client::connect(stream, "codex", "/", 65_536).expect("attach authenticated front");

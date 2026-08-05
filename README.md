@@ -137,8 +137,8 @@ r9p cert verify --path path (--root hex | --root-file path) [--at seconds]
 `-a` accepts `host:port`, `tcp!host!port`, bare hosts defaulting to port 564,
 and `unix!/path/to/socket`. Without `-a`, paths use the plan9port namespace
 shape: `service/subpath` connects to `$NAMESPACE/service` and walks `subpath`.
-Repeat `--authority-auth AUTHORITY=ABSOLUTE_CONFIG_PATH` to bind the portable
-authority names in referrals to credentials on the caller's host. `-n` and
+`--auth-domain` names the responder a dial requires; referrals supply their own
+from the authority boundary, so one credential serves them all. `-n` and
 `-D` are accepted for plan9port command-line compatibility; `r9p` uses
 `NOFID` attach because remote authentication is completed before the 9P
 version and attach exchange.
@@ -252,39 +252,44 @@ format r9p-session-auth.v1
 role server
 domain namespace
 private-key /var/lib/r9p/auth/private
-peer 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef codex
+certificate /var/lib/r9p/auth/namespace.crt
+root 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
-A client config pins the server public key:
+A client config names no service and pins no key. It carries the identity it
+presents and the roots it trusts, so the same file reaches every service:
 
 ```text
 format r9p-session-auth.v1
 role client
-domain namespace
 private-key /var/lib/r9p/auth/private
-server-key fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+certificate /var/lib/r9p/auth/codex.crt
+root 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
 Relative private-key paths resolve from the config file directory. A protected
-client call and export then use:
+client call and export then use, with `--auth-domain` naming the responder the
+client requires:
 
 ```bash
-r9p --auth-config client.conf -a 192.168.0.30:9564 -u codex ls /
+r9p --auth-config client.conf --auth-domain namespace \
+    -a 192.168.0.30:9564 -u codex ls /
 r9p export --bind 192.168.0.30:9564 --auth-config server.conf /srv/export
 ```
 
-The peers negotiate `noise-ik@<domain>` with p9any, authenticate their pinned
-X25519 static keys, and carry 9P over ChaCha20-Poly1305 records with BLAKE2s.
-Each session creates its own ephemeral handshake state; there is no per-session
-operator setup. The provider follows p9any's extensible negotiation shape but
-does not claim dp9ik or unmodified factotum interoperability.
+The peers negotiate `noise-xx@<domain>` with p9any and carry 9P over
+ChaCha20-Poly1305 records with BLAKE2s. Both X25519 static keys travel inside
+the handshake, encrypted, and each is authenticated by a certificate from a
+root the other side trusts, so neither side configures the other's key. The
+dialling side names the service it expects; a responder holding a valid
+certificate for a different name cannot answer in its place. Each session
+creates its own ephemeral handshake state; there is no per-session operator
+setup. The provider follows p9any's extensible negotiation shape but does not
+claim dp9ik or unmodified factotum interoperability.
 
-`authenticate_server` remains a strict key-and-username allowlist.
-Applications that own a separate admission layer may instead call
-`authenticate_server_attested`: r9p still proves the Noise static key and
-reports whether the claimed username was preauthorized, while the application
-must admit any otherwise-unlisted subject before accepting its 9P attach.
-`TransportIdentity` exposes that key as
+`authenticate_server` proves the Noise static key and the certified name bound
+to it. It does not admit the caller: mapping a subject to a namespace principal
+remains application policy. `TransportIdentity` exposes that key as
 `noise-static-key:<hex>`. On Unix sockets it derives
 `unix-peer:uid:<uid>` from `SO_PEERCRED`, plus `unix-peer:same-user` when the
 peer runs under the listener's effective UID. Mapping those subjects to
@@ -357,10 +362,11 @@ selected ordinary namespace subtree as the local FUSE root. Referral selection,
 direct connection establishment, reconnect, and path rebinding remain internal
 to the r9p client. Omitting `--source` selects `/`.
 
-Referrals carry portable authority names, never local credential paths. The
-caller binds an authenticated boundary such as `p9any:noise-ik@agents` to an
-absolute local client configuration. Contained boundaries such as loopback,
-Unix sockets, and admitted network classes need no credential file. Receiving
+Referrals carry portable authority names, never local credential paths. A
+session holds one credential and reuses it across every boundary it crosses;
+the referral's domain, such as `p9any:noise-xx@agents`, is the responder name
+its certificate must prove. Contained boundaries such as loopback, Unix
+sockets, and admitted network classes need no credential at all. Receiving
 a referral is not transport authentication, and moving the client to the
 service host does not prove the original caller can reach the endpoint.
 

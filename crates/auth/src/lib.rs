@@ -12,7 +12,7 @@ pub use cert::{
 };
 pub use config::{ClientConfig, ServerConfig};
 pub use handshake::{
-    authenticate_client, authenticate_client_to, authenticate_server, AuthenticatedSession,
+    authenticate_client_to, authenticate_server, AuthenticatedSession,
     AuthenticationTimeouts, AuthenticationTransport, PeerIdentity,
 };
 pub use key::{

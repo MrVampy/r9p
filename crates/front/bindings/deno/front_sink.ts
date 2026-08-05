@@ -1,4 +1,4 @@
-export const SUPPORTED_ABI_VERSION = 21;
+export const SUPPORTED_ABI_VERSION = 22;
 export const FRONT_CAP_PUSHED_NAMESPACE_METADATA = 1n << 0n;
 export const FRONT_CAP_REQUEST_CONTEXT_V2 = 1n << 1n;
 export const FRONT_CAP_SYNTHETIC_READ_RELAY = 1n << 2n;
@@ -6,7 +6,7 @@ export const FRONT_CAP_NATIVE_CLIENT_MUTATIONS = 1n << 3n;
 export const FRONT_CAP_ATOMIC_CREATE_WRITE = 1n << 4n;
 export const FRONT_CAP_NAMESPACE_MUTATION_RELAYS = 1n << 5n;
 export const FRONT_CAP_AUTHENTICATED_SERVE = 1n << 6n;
-export const FRONT_CAP_CLIENT_AUTHORITY_BINDINGS = 1n << 7n;
+export const FRONT_CAP_CLIENT_SESSION_AUTHENTICATION = 1n << 7n;
 export const REQUIRED_FRONT_CAPABILITIES =
   FRONT_CAP_PUSHED_NAMESPACE_METADATA |
   FRONT_CAP_REQUEST_CONTEXT_V2 |
@@ -15,7 +15,7 @@ export const REQUIRED_FRONT_CAPABILITIES =
   FRONT_CAP_ATOMIC_CREATE_WRITE |
   FRONT_CAP_NAMESPACE_MUTATION_RELAYS |
   FRONT_CAP_AUTHENTICATED_SERVE |
-  FRONT_CAP_CLIENT_AUTHORITY_BINDINGS;
+  FRONT_CAP_CLIENT_SESSION_AUTHENTICATION;
 
 export { renderExportDescriptor } from "./export_descriptor.ts";
 export type {
@@ -31,7 +31,7 @@ const SYMBOLS = {
   r9p_front_capabilities: { parameters: [], result: "u64" },
   r9p_front_new: { parameters: [], result: "pointer" },
   r9p_front_free: { parameters: ["pointer"], result: "void" },
-  r9p_front_bind_client_authority: {
+  r9p_front_set_client_authentication: {
     parameters: ["pointer", "buffer", "usize", "buffer", "usize"],
     result: "i32",
   },
@@ -380,20 +380,23 @@ export class FrontHost implements TransitionSink {
     return new FrontHost(library, handle);
   }
 
-  bindClientAuthority(authorityBoundary: string, authConfigPath: string): void {
+  setClientAuthentication(
+    authConfigPath: string,
+    expectedResponder: string,
+  ): void {
     this.assertOpen();
-    const [authority, authorityLen] = bytes(authorityBoundary);
     const [authConfig, authConfigLen] = bytes(authConfigPath);
-    const status = this.library.symbols.r9p_front_bind_client_authority(
+    const [responder, responderLen] = bytes(expectedResponder);
+    const status = this.library.symbols.r9p_front_set_client_authentication(
       this.handle,
-      authority,
-      authorityLen,
       authConfig,
       authConfigLen,
+      responder,
+      responderLen,
     );
     if (status !== 0) {
       throw new Error(
-        `front bind_client_authority(${authorityBoundary}) failed with status ${status}: ${this.lastError()}`,
+        `front set_client_authentication failed with status ${status}: ${this.lastError()}`,
       );
     }
   }

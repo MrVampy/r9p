@@ -18,7 +18,7 @@ use r9p::{
     },
 };
 use r9p_auth::{
-    authenticate_client, authenticate_server, ClientConfig, SecureStream,
+    authenticate_client_to, authenticate_server, ClientConfig, SecureStream,
     ServerConfig as SessionAuthConfig,
 };
 
@@ -28,6 +28,7 @@ use crate::{configure_transport_socket, receive_session_claim};
 pub struct ReverseExportConfig {
     pub broker_endpoint: SocketAddr,
     pub auth: ClientConfig,
+    pub expected_responder: String,
     pub principal: String,
     pub connection_pool: usize,
     pub connect_timeout: Duration,
@@ -41,6 +42,7 @@ pub struct ReverseExportConfig {
 pub struct FilesystemExportConfig {
     pub broker_endpoint: SocketAddr,
     pub auth: ClientConfig,
+    pub expected_responder: String,
     pub principal: String,
     pub root: PathBuf,
     pub writable: bool,
@@ -101,6 +103,7 @@ impl FilesystemExport {
             ReverseExportConfig {
                 broker_endpoint: config.broker_endpoint,
                 auth: config.auth,
+                expected_responder: config.expected_responder,
                 principal: config.principal,
                 connection_pool: config.connection_pool,
                 connect_timeout: config.connect_timeout,
@@ -304,9 +307,10 @@ fn export_loop<F>(
                     continue;
                 }
             };
-        let mut stream = match authenticate_client(
+        let mut stream = match authenticate_client_to(
             stream,
             &config.auth,
+            &config.expected_responder,
             &config.principal,
             config.authentication_timeout,
         ) {

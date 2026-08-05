@@ -485,7 +485,7 @@ fn response_line(response: Result<String, String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use r9p_auth::{generate_key_pair, write_key_pair};
+    use r9p_auth::{generate_key_pair, generate_root_key_pair, write_key_pair};
     use std::{
         env, fs,
         os::unix::net::UnixListener,
@@ -749,23 +749,34 @@ mod tests {
             .expect("write server key pair");
         write_key_pair(&client_private, &client_public, &client_key)
             .expect("write client key pair");
+        let signing_root = generate_root_key_pair().expect("root key pair");
+        let server_cert = root.join("server.crt");
+        let client_cert = root.join("client.crt");
+        certify(&signing_root, server_key.public, "front-test")
+            .write(&server_cert)
+            .expect("write server certificate");
+        certify(&signing_root, client_key.public, "codex")
+            .write(&client_cert)
+            .expect("write client certificate");
         let server_config = root.join("server.conf");
         let client_config = root.join("client.conf");
         fs::write(
             &server_config,
             format!(
-                "format r9p-session-auth.v1\nrole server\ndomain front-test\nprivate-key {}\npeer {} codex\n",
+                "format r9p-session-auth.v1\nrole server\ndomain front-test\nprivate-key {}\ncertificate {}\nroot {}\n",
                 server_private.display(),
-                client_key.public
+                server_cert.display(),
+                signing_root.public
             ),
         )
         .expect("write server config");
         fs::write(
             &client_config,
             format!(
-                "format r9p-session-auth.v1\nrole client\ndomain front-test\nprivate-key {}\nserver-key {}\n",
+                "format r9p-session-auth.v1\nrole client\nprivate-key {}\ncertificate {}\nroot {}\n",
                 client_private.display(),
-                server_key.public
+                client_cert.display(),
+                signing_root.public
             ),
         )
         .expect("write client config");
@@ -1065,5 +1076,25 @@ mod tests {
             hex_text(auth_config_path),
             hex_text(expected_responder)
         )
+    }
+
+    fn certify(
+        root: &r9p_auth::RootKeyPair,
+        key: r9p_auth::PublicKey,
+        name: &str,
+    ) -> r9p_auth::Certificate {
+        r9p_auth::Certificate::sign(
+            &root.private,
+            r9p_auth::CertificateBody::new(
+                name,
+                key,
+                Vec::<String>::new(),
+                1,
+                4_000_000_000,
+                root.public,
+            )
+            .expect("certificate body"),
+        )
+        .expect("sign certificate")
     }
 }

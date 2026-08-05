@@ -101,7 +101,7 @@ This map defines the local sources agents should inspect before making source-sp
   - `r9p con --resume` uses the same two lanes across renewed attachments only
     for an explicitly replay-safe offset stream.
   - Ordinary path commands use the transparent namespace client;
-    `--authority-auth` supplies caller-local authority bindings.
+    `--auth-domain` names the responder a root dial requires.
 - `crates/cli/tests/cli_machine.rs`
   - Machine-output and streaming command regression tests.
 - `crates/fuse/src/`

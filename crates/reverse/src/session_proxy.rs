@@ -10,7 +10,7 @@ use std::{
 };
 
 use r9p::error::{Error, Result};
-use r9p_auth::{authenticate_client, ClientConfig};
+use r9p_auth::{authenticate_client_to, ClientConfig};
 
 use crate::{
     broker::{bridge, LocalStream, ProxyEndpoint, ProxyListener},
@@ -22,6 +22,7 @@ pub struct SessionProxyConfig {
     pub bind: ProxyEndpoint,
     pub upstream: SocketAddr,
     pub auth: ClientConfig,
+    pub expected_responder: String,
     pub principal: String,
     pub max_sessions: usize,
     pub connect_timeout: Duration,
@@ -195,9 +196,10 @@ fn proxy_session(local: LocalStream, config: &SessionProxyConfig, counters: &Ses
         let _ = local.shutdown();
         return;
     }
-    let stream = match authenticate_client(
+    let stream = match authenticate_client_to(
         upstream,
         &config.auth,
+        &config.expected_responder,
         &config.principal,
         config.authentication_timeout,
     ) {

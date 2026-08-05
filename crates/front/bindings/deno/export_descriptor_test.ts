@@ -10,7 +10,7 @@ Deno.test("renderExportDescriptor emits the canonical field order", () => {
       exportedRoot: "/sensor",
       transportClass: "tcp",
       mode: "ro",
-      auth: "p9any:noise-ik@vault",
+      auth: "p9any:noise-xx@vault",
       pid: 42,
       protocol: "9P2000",
       msize: 65_536,
@@ -19,7 +19,7 @@ Deno.test("renderExportDescriptor emits the canonical field order", () => {
       sessionEndpoint: {
         endpointBind: "192.168.0.20:4568",
         aname: "/",
-        auth: "p9any:noise-ik@example",
+        auth: "p9any:noise-xx@example",
       },
       extraFields: {
         service_unit: "example.service",
@@ -33,7 +33,7 @@ Deno.test("renderExportDescriptor emits the canonical field order", () => {
       "exported_root\t/sensor\n" +
       "transport_class\ttcp\n" +
       "mode\tro\n" +
-      "auth\tp9any:noise-ik@vault\n" +
+      "auth\tp9any:noise-xx@vault\n" +
       "pid\t42\n" +
       "protocol\t9P2000\n" +
       "msize\t65536\n" +
@@ -41,7 +41,7 @@ Deno.test("renderExportDescriptor emits the canonical field order", () => {
       "namespace_mount_paths\t/venues/example/demo/sensor\n" +
       "session_endpoint_bind\t192.168.0.20:4568\n" +
       "session_aname\t/\n" +
-      "session_auth\tp9any:noise-ik@example\n" +
+      "session_auth\tp9any:noise-xx@example\n" +
       "host_firewall_admission\ttcp:192.168.0.20:4567\n" +
       "service_unit\texample.service\n",
   );
@@ -87,7 +87,7 @@ Deno.test("renderExportDescriptor validates the session endpoint boundary", () =
 });
 
 Deno.test("renderExportDescriptor validates the p9any provider and domain", () => {
-  for (const auth of ["p9any:dp9ik@vault", "p9any:noise-ik@vault/domain"]) {
+  for (const auth of ["p9any:dp9ik@vault", "p9any:noise-xx@vault/domain"]) {
     assertThrows(() =>
       renderExportDescriptor({
         endpointBind: "192.168.0.20:4567",

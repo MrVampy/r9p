@@ -47,6 +47,7 @@ pub(crate) fn reverse_export_cmd(global: Config, args: Vec<String>) -> CliResult
     let export = FilesystemExport::start(FilesystemExportConfig {
         broker_endpoint: config.broker_endpoint,
         auth: ClientConfig::read(&config.auth_config)?,
+        expected_responder: config.expected_responder.clone(),
         principal: config.principal,
         root: config.root,
         writable: config.writable,
@@ -95,6 +96,7 @@ struct ReverseBrokerCliConfig {
 struct ReverseExportCliConfig {
     broker_endpoint: SocketAddr,
     auth_config: PathBuf,
+    expected_responder: String,
     principal: String,
     root: PathBuf,
     writable: bool,
@@ -112,6 +114,7 @@ struct SessionProxyCliConfig {
     bind: ProxyEndpoint,
     upstream: SocketAddr,
     auth_config: PathBuf,
+    expected_responder: String,
     principal: String,
     max_sessions: usize,
     connect_timeout: Duration,
@@ -183,6 +186,7 @@ fn parse_broker_config(global: Config, args: Vec<String>) -> CliResult<ReverseBr
 }
 
 fn parse_export_config(global: Config, args: Vec<String>) -> CliResult<ReverseExportCliConfig> {
+    let auth_domain = global.auth_domain.clone();
     reject_client_globals(&global, "reverse-export")?;
     let mut broker_endpoint = None;
     let mut auth_config = global.auth_config;
@@ -245,6 +249,7 @@ fn parse_export_config(global: Config, args: Vec<String>) -> CliResult<ReverseEx
     Ok(ReverseExportCliConfig {
         broker_endpoint: broker_endpoint.ok_or_else(|| cli_error("missing --connect"))?,
         auth_config: auth_config.ok_or_else(|| cli_error("missing --auth-config"))?,
+        expected_responder: auth_domain.ok_or_else(|| cli_error("missing --auth-domain"))?,
         principal: principal.ok_or_else(|| cli_error("missing --principal"))?,
         root: root.ok_or_else(|| cli_error("missing root directory"))?,
         writable,
@@ -263,6 +268,7 @@ fn parse_session_proxy_config(
     args: Vec<String>,
 ) -> CliResult<SessionProxyCliConfig> {
     reject_client_globals(&global, "session-proxy")?;
+    let auth_domain = global.auth_domain.clone();
     let mut bind = Some(ProxyEndpoint::tcp(loopback_ephemeral()));
     let mut upstream = None;
     let mut auth_config = global.auth_config;
@@ -312,6 +318,7 @@ fn parse_session_proxy_config(
         bind,
         upstream: upstream.ok_or_else(|| cli_error("missing --connect"))?,
         auth_config: auth_config.ok_or_else(|| cli_error("missing --auth-config"))?,
+        expected_responder: auth_domain.ok_or_else(|| cli_error("missing --auth-domain"))?,
         principal: principal.ok_or_else(|| cli_error("missing --principal"))?,
         max_sessions,
         connect_timeout,

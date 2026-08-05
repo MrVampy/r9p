@@ -14,7 +14,7 @@ pub fn canonical_descriptor_order_test() {
     <> "exported_root\t/trades\n"
     <> "transport_class\ttcp\n"
     <> "mode\trw\n"
-    <> "auth\tp9any:noise-ik@vault\n"
+    <> "auth\tp9any:noise-xx@vault\n"
     <> "pid\t42\n"
     <> "protocol\t9P2000\n"
     <> "msize\t65536\n"
@@ -32,7 +32,7 @@ pub fn remote_tcp_requires_a_network_authority_test() {
   |> should.be_error
 }
 
-pub fn p9any_requires_the_noise_ik_provider_and_a_valid_domain_test() {
+pub fn p9any_requires_the_noise_xx_provider_and_a_valid_domain_test() {
   export_descriptor.render(
     export_descriptor.Descriptor(..descriptor(), auth: "p9any:dp9ik@vault"),
   )
@@ -41,7 +41,7 @@ pub fn p9any_requires_the_noise_ik_provider_and_a_valid_domain_test() {
   export_descriptor.render(
     export_descriptor.Descriptor(
       ..descriptor(),
-      auth: "p9any:noise-ik@vault/domain",
+      auth: "p9any:noise-xx@vault/domain",
     ),
   )
   |> should.be_error
@@ -55,7 +55,7 @@ fn descriptor() -> export_descriptor.Descriptor {
     exported_root: "/trades",
     transport_class: "tcp",
     mode: "rw",
-    auth: "p9any:noise-ik@vault",
+    auth: "p9any:noise-xx@vault",
     pid: 42,
     protocol: "9P2000",
     msize: 65_536,

@@ -2,7 +2,6 @@ use crate::{
     cert::{now_unix, Certificate},
     config::validate_principal,
     p9any,
-    p9any::Protocol,
     ClientConfig, PublicKey, SecureStream, ServerConfig, CONFIG_FORMAT,
 };
 use r9p::{
@@ -221,8 +220,7 @@ pub fn authenticate_server<S: AuthenticationTransport>(
 ) -> Result<AuthenticatedSession<S>> {
     stream.configure_authentication_transport()?;
     let previous = stream.install_authentication_timeout(timeout)?;
-    let protocol =
-        p9any::negotiate_server(&mut stream, config.domain())?;
+    p9any::negotiate_server(&mut stream, config.domain())?;
     let prologue = prologue(config.domain());
     let (peer, transport) = server_xx(&mut stream, config, &prologue)?;
     stream.restore_authentication_timeouts(previous)?;
@@ -527,11 +525,6 @@ mod tests {
     #[test]
     fn xx_authenticates_both_sides_with_nothing_pinned() -> Result<()> {
         let (_, server, client) = xx_pair("terminal-m7", "tuxedo.operator")?;
-        assert!(
-            client.server_key().is_none(),
-            "client pinned a responder key"
-        );
-        assert!(client.domain().is_none(), "client named a service");
         let peer = xx_once(server, &client, "terminal-m7", "tuxedo.operator")?;
         assert_eq!(peer.principal(), "tuxedo.operator");
         assert!(peer.certified());

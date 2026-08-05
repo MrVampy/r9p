@@ -144,7 +144,7 @@ fn auth_class(auth: String) -> Result(String, String) {
 
 fn valid_p9any_details(details: String) -> Bool {
   case string.split_once(details, on: "@") {
-    Ok(#("noise-ik", domain)) -> {
+    Ok(#("noise-xx", domain)) -> {
       let characters = string.to_graphemes(domain)
       characters != []
       && list.length(characters) <= 255

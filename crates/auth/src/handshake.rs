@@ -19,13 +19,6 @@ use std::{
 
 const MAX_NOISE_MESSAGE_BYTES: usize = u16::MAX as usize;
 const MAX_CERTIFICATE_BYTES: usize = 8192;
-const SERVER_ACK: &[u8] = b"r9p-session-authenticated.v1";
-
-/// Leading byte marking the first handshake payload as a certificate rather
-/// than a bare principal. `validate_principal` rejects NUL and every other
-/// control byte, so a legacy payload can never begin with this and the two
-/// forms need no version negotiation to tell apart.
-const CERTIFICATE_TAG: u8 = 0x00;
 
 mod sealed {
     pub trait Sealed {}

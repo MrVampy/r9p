@@ -69,6 +69,7 @@ pub(crate) fn session_proxy_cmd(global: Config, args: Vec<String>) -> CliResult<
         bind: config.bind,
         upstream: config.upstream,
         auth: ClientConfig::read(&config.auth_config)?,
+        expected_responder: config.expected_responder.clone(),
         principal: config.principal.clone(),
         max_sessions: config.max_sessions,
         connect_timeout: config.connect_timeout,

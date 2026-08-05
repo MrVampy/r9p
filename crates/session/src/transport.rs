@@ -231,3 +231,112 @@ mod tests {
         assert!(error.message().contains("single path element"));
     }
 }
+
+#[cfg(test)]
+mod referral_binding_tests {
+    //! Proves the name derived from a referral's `authority_boundary` actually
+    //! reaches the handshake. The auth crate already proves
+    //! `authenticate_client_to` checks it; what needs covering here is the
+    //! private plumbing in between, which no other test touches.
+    use super::*;
+    use r9p::export_descriptor::AuthBoundary;
+    use r9p_auth::{
+        authenticate_server, generate_key_pair, generate_root_key_pair, Certificate,
+        CertificateBody, RootKeyPair, ServerConfig,
+    };
+    use std::{
+        net::{TcpListener, TcpStream},
+        sync::atomic::{AtomicU64, Ordering},
+        thread,
+    };
+
+    static SERIAL: AtomicU64 = AtomicU64::new(0);
+    const FROM: u64 = 1_000;
+    const UNTIL: u64 = 4_000_000_000;
+
+    fn cert(root: &RootKeyPair, key: r9p_auth::PublicKey, name: &str) -> Certificate {
+        let body = CertificateBody::new(name, key, Vec::<String>::new(), FROM, UNTIL, root.public)
+            .expect("certificate body");
+        Certificate::sign(&root.private, body).expect("sign")
+    }
+
+    /// Spawns an XX responder certified as `served_name` and returns a client
+    /// config that pins nothing, plus the address.
+    fn responder(served_name: &str) -> (String, PathBuf, RootKeyPair) {
+        let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
+        let dir = env::temp_dir().join(format!("r9p-referral-{}-{serial}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let root = generate_root_key_pair().expect("root");
+        let server_key = generate_key_pair().expect("server key");
+        let client_key = generate_key_pair().expect("client key");
+
+        let server = ServerConfig::new_with_roots(
+            served_name,
+            server_key.private,
+            Vec::new(),
+            [root.public],
+        )
+        .expect("server config")
+        .with_certificate(cert(&root, server_key.public, served_name))
+        .expect("server certificate");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listen");
+        let address = listener.local_addr().expect("addr").to_string();
+        thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                let _ = authenticate_server(stream, &server, Duration::from_secs(2));
+            }
+        });
+
+        let key_path = dir.join("client.key");
+        r9p_auth::write_key_pair(&key_path, &dir.join("client.pub"), &client_key).expect("keys");
+        let cert_path = dir.join("client.crt");
+        cert(&root, client_key.public, "op")
+            .write(&cert_path)
+            .expect("write cert");
+        let conf = dir.join("client.conf");
+        std::fs::write(
+            &conf,
+            format!(
+                "format r9p-session-auth.v1\nrole client\nprivate-key {}\ncertificate {}\nroot {}\n",
+                key_path.display(),
+                cert_path.display(),
+                root.public
+            ),
+        )
+        .expect("write conf");
+        (address, conf, root)
+    }
+
+    fn dial(address: &str, conf: &PathBuf, expected: Option<&str>) -> Result<ClientStream> {
+        let config = ConnectionConfig {
+            address: address.to_string(),
+            uname: "op".to_string(),
+            aname: "/".to_string(),
+            msize: 65_536,
+            auth_config: Some(conf.clone()),
+            authorities: crate::AuthorityBindings::new(),
+        };
+        connect_stream_expecting(&config, Duration::from_secs(2), expected)
+    }
+
+    #[test]
+    fn a_referral_derived_name_reaches_the_handshake_and_is_accepted() {
+        let (address, conf, _root) = responder("terminal-m7");
+        // Exactly what the referral path derives.
+        let boundary = AuthBoundary::parse("p9any:noise-xx@terminal-m7").expect("boundary");
+        let expected = boundary.p9any_domain().expect("domain");
+        assert_eq!(expected, "terminal-m7");
+        assert!(dial(&address, &conf, Some(expected)).is_ok());
+    }
+
+    #[test]
+    fn a_validly_certified_responder_under_another_name_is_rejected() {
+        // The responder holds a genuine certificate from the same root; only the
+        // name differs from what the referral promised.
+        let (address, conf, _root) = responder("terminal-nucbox");
+        let boundary = AuthBoundary::parse("p9any:noise-xx@terminal-m7").expect("boundary");
+        let expected = boundary.p9any_domain().expect("domain");
+        assert!(dial(&address, &conf, Some(expected)).is_err());
+    }
+}

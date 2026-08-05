@@ -18,10 +18,10 @@ pub(super) fn parse_mount_config(global: Config, args: Vec<String>) -> CliResult
         ));
     }
 
+    let authentication = crate::target::client_authentication(&global)?;
     let mut config = MountConfig {
         address: String::new(),
-        auth_config: global.auth_config,
-        authorities: global.authorities,
+        authentication,
         source_path: "/".to_string(),
         mountpoint: String::new(),
         uname: global.uname,

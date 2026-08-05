@@ -82,8 +82,7 @@ fn mount_config(
 ) -> MountConfig {
     MountConfig {
         address: control.address.clone(),
-        auth_config: control.auth_config.clone(),
-        authorities: control.authorities.clone(),
+        authentication: control.authentication.clone(),
         source_path: mount.source_path.clone(),
         mountpoint: mountpoint.to_string_lossy().into_owned(),
         uname: control.uname.clone(),

@@ -215,8 +215,7 @@ mod tests {
                 uname: "test".to_string(),
                 aname: "/".to_string(),
                 msize: 8192,
-                auth_config: None,
-                authorities: crate::AuthorityBindings::default(),
+                authentication: None,
             },
             Duration::from_secs(1),
         )

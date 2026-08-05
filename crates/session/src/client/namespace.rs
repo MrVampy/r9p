@@ -1,6 +1,7 @@
 use super::direct::DirectClient;
 use crate::{
-    AuthorityBindings, ConnectionConfig, Error, RequestTracker, Result, WriteThenReadError,
+    authority::contained_authority, ConnectionConfig, Error, RequestTracker, ResponderName, Result,
+    SessionAuthentication, WriteThenReadError,
 };
 use r9p::{
     fid::Fid,
@@ -45,7 +46,7 @@ pub struct Client {
 struct State {
     root: DirectClient,
     tracker: RequestTracker,
-    authorities: AuthorityBindings,
+    session_auth: Option<SessionAuthentication>,
     service_msize: u32,
     connect_timeout: Duration,
     routes: Mutex<Vec<Arc<Route>>>,
@@ -175,7 +176,7 @@ impl Client {
             state: Arc::new(State {
                 root,
                 tracker,
-                authorities: config.authorities.clone(),
+                session_auth: config.authentication.clone(),
                 service_msize: config.msize,
                 connect_timeout: timeout,
                 routes: Mutex::new(routes),
@@ -604,28 +605,41 @@ impl Client {
             ));
         }
         let authority = text_field("authority_boundary", &route.referral.authority_boundary)?;
-        // The referral names the service; under XX the responder must prove that
-        // name with its certificate. That is what makes a referral safe to take
-        // from an addressing service: coordinator can point a session somewhere,
-        // it cannot change who answers.
-        let boundary = r9p::export_descriptor::AuthBoundary::parse(&authority).ok();
-        let expected_responder = boundary
-            .as_ref()
-            .and_then(r9p::export_descriptor::AuthBoundary::p9any_domain);
+        // An addressing service may point a session somewhere; it may not change
+        // who answers.
+        let authentication = if contained_authority(&authority) {
+            None
+        } else {
+            let boundary = r9p::export_descriptor::AuthBoundary::parse(&authority).ok();
+            let responder = boundary
+                .as_ref()
+                .and_then(r9p::export_descriptor::AuthBoundary::p9any_domain)
+                .ok_or_else(|| {
+                    Error::new(
+                        libc::EACCES,
+                        format!("referral authority boundary names no responder: {authority}"),
+                    )
+                })?;
+            let session_auth = self.state.session_auth.as_ref().ok_or_else(|| {
+                Error::new(
+                    libc::EACCES,
+                    format!("this session has no credential for authority boundary {authority}"),
+                )
+            })?;
+            Some(session_auth.for_responder(ResponderName::new(responder)?))
+        };
         let config = ConnectionConfig {
             address: text_field("endpoint", &route.referral.endpoint)?,
             uname: text_field("uname", &route.referral.uname)?,
             aname: text_field("aname", &route.referral.aname)?,
             msize: self.state.service_msize,
-            auth_config: self.state.authorities.session_auth_config(&authority)?,
-            authorities: AuthorityBindings::new(),
+            authentication,
         };
         let connect_timeout = route_connect_timeout(timeout, self.state.connect_timeout);
-        let connected = DirectClient::connect_expecting(
+        let connected = DirectClient::connect_with_tracker_timeout(
             &config,
             self.state.tracker.clone(),
             connect_timeout,
-            expected_responder,
         )?;
         self.state
             .connected_routes

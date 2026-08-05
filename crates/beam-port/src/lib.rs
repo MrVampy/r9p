@@ -11,8 +11,8 @@ use r9p::{
     stat::Stat,
 };
 use session::{
-    AuthorityBindings, Client as NamespaceClient, ConnectionConfig, Error as SessionError,
-    Result as SessionResult,
+    Client as NamespaceClient, ClientCredential, ConnectionConfig, Error as SessionError,
+    ResponderName, Result as SessionResult, SessionAuthentication,
 };
 use std::{collections::HashMap, path::PathBuf, time::Duration};
 
@@ -25,8 +25,7 @@ struct TargetKey {
     uname: String,
     aname: String,
     msize: u32,
-    auth_config: Option<PathBuf>,
-    authorities: AuthorityBindings,
+    authentication: Option<SessionAuthentication>,
 }
 
 const AUTH_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -188,8 +187,7 @@ fn connect_client(key: &TargetKey) -> SessionResult<NamespaceClient> {
             uname: key.uname.clone(),
             aname: key.aname.clone(),
             msize: key.msize,
-            auth_config: key.auth_config.clone(),
-            authorities: key.authorities.clone(),
+            authentication: key.authentication.clone(),
         },
         AUTH_HANDSHAKE_TIMEOUT,
     )
@@ -202,9 +200,13 @@ fn connect_stream(key: &TargetKey) -> R9pResult<Box<dyn ReadWrite>> {
         .strip_prefix("unix!")
         .or_else(|| key.bind.strip_prefix("unix:"))
     {
-        if key.auth_config.is_some() {
+        if key
+            .authentication
+            .as_ref()
+            .is_some_and(|authentication| authentication.responder().is_some())
+        {
             return Err(R9pError::from(
-                "session auth config is only valid for TCP endpoints",
+                "an expected responder is only meaningful for a TCP endpoint",
             ));
         }
         let stream = UnixStream::connect(Path::new(path))
@@ -213,11 +215,24 @@ fn connect_stream(key: &TargetKey) -> R9pResult<Box<dyn ReadWrite>> {
     }
 
     let stream = blocking::connect_tcp_stream(&key.bind)?;
-    match &key.auth_config {
-        Some(path) => {
-            let auth = r9p_auth::ClientConfig::read(path)?;
-            r9p_auth::authenticate_client(stream, &auth, &key.uname, AUTH_HANDSHAKE_TIMEOUT)
-                .map(|stream| Box::new(stream) as Box<dyn ReadWrite>)
+    match key
+        .authentication
+        .as_ref()
+        .and_then(|authentication| {
+            authentication
+                .responder()
+                .map(|responder| (authentication.credential(), responder))
+        }) {
+        Some((credential, responder)) => {
+            let auth = r9p_auth::ClientConfig::read(credential.config())?;
+            r9p_auth::authenticate_client_to(
+                stream,
+                &auth,
+                responder.as_str(),
+                &key.uname,
+                AUTH_HANDSHAKE_TIMEOUT,
+            )
+            .map(|stream| Box::new(stream) as Box<dyn ReadWrite>)
         }
         None => Ok(Box::new(stream)),
     }
@@ -353,29 +368,10 @@ fn remove_output(client: &NamespaceClient, path: &str) -> SessionResult<String> 
 }
 
 fn target_and_args<'a>(fields: &'a [&'a str]) -> Result<(TargetKey, &'a [&'a str]), String> {
-    let [bind, uname, aname, msize, auth_config, binding_count, rest @ ..] = fields else {
+    let [bind, uname, aname, msize, auth_config, expected_responder, args @ ..] = fields else {
         return Err("invalid_r9p_beam_port_target".to_string());
     };
-    let binding_count = binding_count
-        .parse::<usize>()
-        .map_err(|_| format!("invalid_authority_binding_count:{binding_count}"))?;
-    let binding_fields = binding_count
-        .checked_mul(2)
-        .ok_or_else(|| "authority_binding_count_overflow".to_string())?;
-    if rest.len() < binding_fields {
-        return Err("incomplete_r9p_beam_port_authority_bindings".to_string());
-    }
-    let (raw_bindings, args) = rest.split_at(binding_fields);
-    let mut authorities = AuthorityBindings::new();
-    for pair in raw_bindings.chunks_exact(2) {
-        let boundary = hex::decode_text(pair[0])?;
-        let config_path = PathBuf::from(hex::decode_text(pair[1])?);
-        authorities
-            .insert_session_auth(boundary, config_path)
-            .map_err(|error| error.to_string())?;
-    }
-    target_key(bind, uname, aname, msize, auth_config)
-        .map(|key| (TargetKey { authorities, ..key }, args))
+    target_key(bind, uname, aname, msize, auth_config, expected_responder).map(|key| (key, args))
 }
 
 fn target_key(
@@ -384,19 +380,32 @@ fn target_key(
     aname: &str,
     msize: &str,
     auth_config: &str,
+    expected_responder: &str,
 ) -> Result<TargetKey, String> {
     let auth_config = hex::decode_text(auth_config)?;
+    let expected_responder = hex::decode_text(expected_responder)?;
+    let authentication = if auth_config.is_empty() {
+        if !expected_responder.is_empty() {
+            return Err("r9p_beam_port_responder_without_credential".to_string());
+        }
+        None
+    } else {
+        let credential = ClientCredential::new(auth_config).map_err(|error| error.to_string())?;
+        Some(if expected_responder.is_empty() {
+            SessionAuthentication::contained_root(credential)
+        } else {
+            SessionAuthentication::authenticated_root(
+                credential,
+                ResponderName::new(expected_responder).map_err(|error| error.to_string())?,
+            )
+        })
+    };
     Ok(TargetKey {
         bind: hex::decode_text(bind)?,
         uname: hex::decode_text(uname)?,
         aname: hex::decode_text(aname)?,
         msize: parse_u32("msize", msize)?,
-        auth_config: if auth_config.is_empty() {
-            None
-        } else {
-            Some(PathBuf::from(auth_config))
-        },
-        authorities: AuthorityBindings::new(),
+        authentication,
     })
 }
 
@@ -505,6 +514,7 @@ mod tests {
             "2f",
             "65536",
             "",
+            "",
         );
         assert_eq!(
             parsed,
@@ -513,8 +523,7 @@ mod tests {
                 uname: "codex".to_string(),
                 aname: "/".to_string(),
                 msize: 65_536,
-                auth_config: None,
-                authorities: AuthorityBindings::new(),
+                authentication: None,
             }),
         );
     }
@@ -527,6 +536,7 @@ mod tests {
             "2f",
             "65536",
             "2f6574632f7239702f636c69656e742e636f6e66",
+            "636f6f7264696e61746f72",
         );
         assert_eq!(
             parsed,
@@ -535,31 +545,85 @@ mod tests {
                 uname: "codex".to_string(),
                 aname: "/".to_string(),
                 msize: 65_536,
-                auth_config: Some(PathBuf::from("/etc/r9p/client.conf")),
-                authorities: AuthorityBindings::new(),
+                authentication: Some(SessionAuthentication::authenticated_root(
+                    ClientCredential::new("/etc/r9p/client.conf").expect("credential"),
+                    ResponderName::new("coordinator").expect("responder"),
+                )),
             }),
         );
     }
 
     #[test]
-    fn unix_targets_reject_session_auth_before_connecting() {
+    fn a_different_expected_responder_is_a_different_client() {
+        let target = |responder| {
+            target_key(
+                "746370213139322e302e322e312139353634",
+                "636f646578",
+                "2f",
+                "65536",
+                "2f6574632f7239702f636c69656e742e636f6e66",
+                responder,
+            )
+        };
+        assert_ne!(
+            target("636f6f7264696e61746f72"),
+            target("7465726d696e616c2d6d37")
+        );
+    }
+
+    #[test]
+    fn unix_targets_reject_an_expected_responder_before_connecting() {
         let key = TargetKey {
             bind: "unix:/tmp/r9p-unused.sock".to_string(),
             uname: "codex".to_string(),
             aname: "/".to_string(),
             msize: 65_536,
-            auth_config: Some(PathBuf::from("/etc/r9p/client.conf")),
-            authorities: AuthorityBindings::new(),
+            authentication: Some(SessionAuthentication::authenticated_root(
+                ClientCredential::new("/etc/r9p/client.conf").expect("credential"),
+                ResponderName::new("coordinator").expect("responder"),
+            )),
         };
 
         let error = match connect_stream(&key) {
-            Ok(_) => panic!("unix auth config must be rejected"),
+            Ok(_) => panic!("an expected responder must be rejected on a Unix endpoint"),
             Err(error) => error,
         };
         assert_eq!(
             error.to_string(),
-            "session auth config is only valid for TCP endpoints"
+            "an expected responder is only meaningful for a TCP endpoint"
         );
+    }
+
+    #[test]
+    fn a_contained_root_keeps_its_credential_for_referrals() {
+        let key = target_key(
+            hex_text("unix:/run/coordinator-namespace/9p").as_str(),
+            hex_text("codex.interface").as_str(),
+            hex_text("/").as_str(),
+            "65536",
+            hex_text("/etc/r9p-session-auth/operator.conf").as_str(),
+            "",
+        )
+        .expect("contained root with a credential is legal");
+        let authentication = key.authentication.expect("credential retained");
+        assert!(authentication.responder().is_none());
+        assert_eq!(
+            authentication.credential().config(),
+            Path::new("/etc/r9p-session-auth/operator.conf")
+        );
+    }
+
+    #[test]
+    fn a_responder_without_a_credential_is_rejected() {
+        assert!(target_key(
+            hex_text("tcp!192.0.2.1!9564").as_str(),
+            hex_text("codex.interface").as_str(),
+            hex_text("/").as_str(),
+            "65536",
+            "",
+            hex_text("coordinator").as_str(),
+        )
+        .is_err());
     }
 
     #[test]
@@ -595,8 +659,7 @@ mod tests {
             uname: "codex".to_string(),
             aname: "/".to_string(),
             msize: 65_536,
-            auth_config: None,
-            authorities: AuthorityBindings::new(),
+            authentication: None,
         };
         let stream = connect_stream(&key);
         assert!(stream.is_ok());
@@ -981,7 +1044,7 @@ mod tests {
 
     fn target_fields(bind: &str) -> String {
         format!(
-            "{}\t{}\t{}\t65536\t\t0",
+            "{}\t{}\t{}\t65536\t\t",
             hex_text(bind),
             hex_text("codex"),
             hex_text("/")
@@ -990,7 +1053,7 @@ mod tests {
 
     fn target_fields_with_auth(bind: &str, auth_config_path: &str) -> String {
         format!(
-            "{}\t{}\t{}\t65536\t{}\t0",
+            "{}\t{}\t{}\t65536\t{}\t",
             hex_text(bind),
             hex_text("codex"),
             hex_text("/"),

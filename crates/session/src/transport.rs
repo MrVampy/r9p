@@ -1,4 +1,6 @@
-use crate::{error::client_error, ConnectionConfig, Error, Result};
+use crate::{
+    error::client_error, ClientCredential, ConnectionConfig, Error, ResponderName, Result,
+};
 use r9p::{blocking, multiplex::MultiplexTransport};
 use r9p_auth::{
     authenticate_client, authenticate_client_to, ClientConfig as AuthConfig, SecureStream,
@@ -85,66 +87,46 @@ pub(crate) fn connect_stream(
     config: &ConnectionConfig,
     connect_timeout: Duration,
 ) -> Result<ClientStream> {
-    connect_stream_expecting(config, connect_timeout, None)
-}
-
-/// `expected_responder` is the service name a referral said would answer. It is
-/// a private seam on purpose: out-of-tree consumers construct `ConnectionConfig`
-/// directly, so a new required field there breaks every one of them. Root
-/// connects pass `None` and fall back to the name in the auth config.
-pub(crate) fn connect_stream_expecting(
-    config: &ConnectionConfig,
-    connect_timeout: Duration,
-    expected_responder: Option<&str>,
-) -> Result<ClientStream> {
     match parse_connection_target(&config.address)? {
         ConnectTarget::Tcp(socket) => {
             let stream = blocking::connect_tcp_stream(&socket).map_err(client_error)?;
             stream
                 .set_write_timeout(Some(TCP_WRITE_TIMEOUT))
                 .map_err(|error| Error::io("set TCP write timeout", error))?;
-            match &config.auth_config {
-                Some(path) => {
-                    let auth = AuthConfig::read(path).map_err(client_error)?;
+            match root_authentication(config) {
+                Some((credential, responder)) => {
+                    let auth = AuthConfig::read(credential.config()).map_err(client_error)?;
                     let handshake_timeout = if connect_timeout.is_zero() {
                         DEFAULT_AUTH_HANDSHAKE_TIMEOUT
                     } else {
                         connect_timeout
                     };
-                    // The domain comes from the client config. A certified
-                    // config that names no service is dialled through
-                    // authenticate_client_to by the caller that knows which
-                    // service it wants; it is deliberately not a field on the
-                    // public ConnectionConfig, because out-of-tree consumers
-                    // construct that struct and a new required field breaks
-                    // every one of them.
-                    match (expected_responder, auth.domain()) {
-                        (Some(domain), _) => authenticate_client_to(
-                            stream,
-                            &auth,
-                            domain,
-                            &config.uname,
-                            handshake_timeout,
-                        ),
-                        (None, Some(_)) => {
-                            authenticate_client(stream, &auth, &config.uname, handshake_timeout)
-                        }
-                        (None, None) => Err(r9p::error::Error::from(
-                            "this auth config names no service and no referral supplied one",
-                        )),
-                    }
+                    authenticate_client_to(
+                        stream,
+                        &auth,
+                        responder.as_str(),
+                        &config.uname,
+                        handshake_timeout,
+                    )
                     .map(ClientStream::Secure)
                     .map_err(client_error)
                 }
                 None => Ok(ClientStream::Tcp(stream)),
             }
         }
-        ConnectTarget::Unix(path) if config.auth_config.is_none() => connect_unix_stream(&path),
+        ConnectTarget::Unix(path) if root_authentication(config).is_none() => {
+            connect_unix_stream(&path)
+        }
         ConnectTarget::Unix(_) => Err(Error::new(
             libc::EINVAL,
-            "session auth config is only valid for TCP endpoints",
+            "an expected responder is only meaningful for a TCP endpoint",
         )),
     }
+}
+
+fn root_authentication(config: &ConnectionConfig) -> Option<(&ClientCredential, &ResponderName)> {
+    let authentication = config.authentication.as_ref()?;
+    Some((authentication.credential(), authentication.responder()?))
 }
 
 pub(crate) fn parse_connection_target(address: &str) -> Result<ConnectTarget> {
@@ -314,10 +296,14 @@ mod referral_binding_tests {
             uname: "op".to_string(),
             aname: "/".to_string(),
             msize: 65_536,
-            auth_config: Some(conf.clone()),
-            authorities: crate::AuthorityBindings::new(),
+            authentication: expected.map(|responder| {
+                crate::SessionAuthentication::authenticated_root(
+                    ClientCredential::new(conf.clone()).expect("credential"),
+                    ResponderName::new(responder).expect("responder"),
+                )
+            }),
         };
-        connect_stream_expecting(&config, Duration::from_secs(2), expected)
+        connect_stream(&config, Duration::from_secs(2))
     }
 
     #[test]

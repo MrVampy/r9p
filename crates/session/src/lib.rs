@@ -12,14 +12,15 @@ mod request;
 mod resumable_fid;
 mod transport;
 
-pub use authority::AuthorityBindings;
 pub use cache::{
     decode_dir_entries, is_dir, is_symlink, read_open_directory_entries, same_qid, DirCache,
     DirEntry, Freshness, NamespaceCache, NamespaceCacheStats, StaleReason,
 };
 pub use client::Client;
 pub use client_session::ClientSession;
-pub use connection_config::ConnectionConfig;
+pub use connection_config::{
+    ClientCredential, ConnectionConfig, ResponderName, SessionAuthentication,
+};
 pub use epoch::SessionEpoch;
 pub use error::{errno_for_9p_error, p9_error, Error, Result, WriteThenReadError};
 pub use opened_fid::{ConcurrentReadFid, OpenedFid};

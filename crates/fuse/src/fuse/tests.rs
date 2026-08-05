@@ -242,8 +242,7 @@ fn init_leaves_caller_umask_application_to_linux() {
 fn mount_config_normalization_keeps_worker_and_background_limits_nonzero() {
     let mut config = Config {
         address: "127.0.0.1:564".to_string(),
-        auth_config: None,
-        authorities: session::AuthorityBindings::new(),
+        authentication: None,
         source_path: "/".to_string(),
         mountpoint: "/tmp/r9p-mount".to_string(),
         uname: "codex".to_string(),

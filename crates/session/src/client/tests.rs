@@ -33,8 +33,7 @@ fn connection(address: String) -> ConnectionConfig {
         uname: "codex".to_string(),
         aname: "/".to_string(),
         msize: 8192,
-        auth_config: None,
-        authorities: crate::AuthorityBindings::new(),
+        authentication: None,
     }
 }
 

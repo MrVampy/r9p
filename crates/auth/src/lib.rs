@@ -12,8 +12,8 @@ pub use cert::{
 };
 pub use config::{ClientConfig, ServerConfig};
 pub use handshake::{
-    authenticate_client, authenticate_client_to, authenticate_server, authenticate_server_attested,
-    AuthenticatedSession, AuthenticationTimeouts, AuthenticationTransport, PeerIdentity,
+    authenticate_client, authenticate_client_to, authenticate_server, AuthenticatedSession,
+    AuthenticationTimeouts, AuthenticationTransport, PeerIdentity,
 };
 pub use key::{
     generate_key_pair, provision_key_pair, write_key_pair, KeyPair, PrivateKey, PublicKey,

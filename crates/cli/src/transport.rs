@@ -8,7 +8,7 @@ use r9p::{
     codec,
     message::RMessage,
 };
-use r9p_auth::{authenticate_client, ClientConfig as AuthConfig};
+use r9p_auth::ClientConfig as AuthConfig;
 
 use crate::errors::{cli_error, CliResult};
 use crate::target::{namespace_socket, split_namespace_path, Target};
@@ -52,17 +52,13 @@ pub(crate) fn dial_address(
             let timeout = config
                 .request_timeout
                 .unwrap_or_else(|| Duration::from_secs(30));
-            let stream = match (&config.auth_domain, auth.domain()) {
-                (Some(domain), _) => {
-                    r9p_auth::authenticate_client_to(stream, &auth, domain, &config.uname, timeout)?
-                }
-                (None, Some(_)) => authenticate_client(stream, &auth, &config.uname, timeout)?,
-                (None, None) => {
-                    return Err(cli_error(
-                        "this auth config names no service; pass --auth-domain",
-                    ))
-                }
+            let Some(responder) = config.auth_domain.as_deref() else {
+                return Err(cli_error(
+                    "an authenticated dial must state the responder it expects; pass --auth-domain",
+                ));
             };
+            let stream =
+                r9p_auth::authenticate_client_to(stream, &auth, responder, &config.uname, timeout)?;
             Ok(Box::new(stream))
         }
         None => Ok(Box::new(stream)),

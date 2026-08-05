@@ -47,13 +47,13 @@ fn session_serve_cmd(config: Config, mut args: Vec<String>) -> CliResult<()> {
             ))
         }
     };
+    let authentication = crate::target::client_authentication(&config)?;
     let control = ControlConfig {
         address,
         uname: config.uname,
         aname: config.aname,
         msize: config.msize,
-        auth_config: config.auth_config,
-        authorities: config.authorities,
+        authentication,
         connect_timeout: timeout_or_default(config.request_timeout),
         request_timeout: timeout_or_default(config.control_timeout.or(config.request_timeout)),
         change_feed_path,

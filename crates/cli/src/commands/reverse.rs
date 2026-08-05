@@ -464,7 +464,6 @@ mod tests {
             auth_domain: None,
             address: None,
             auth_config: None,
-            authorities: session::AuthorityBindings::new(),
             aname: String::new(),
             uname: "tester".to_string(),
             msize: 65_536,

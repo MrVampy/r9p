@@ -32,8 +32,7 @@ pub(crate) fn connect_path(target: &Target) -> CliResult<(NamespaceClient, Strin
             uname: target.config.uname.clone(),
             aname: target.config.aname.clone(),
             msize: target.config.msize,
-            auth_config: target.config.auth_config.clone(),
-            authorities: target.config.authorities.clone(),
+            authentication: crate::target::client_authentication(&target.config)?,
         },
         target.config.request_timeout.unwrap_or_default(),
     )?;

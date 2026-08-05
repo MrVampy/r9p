@@ -7,11 +7,10 @@ use crate::usage;
 pub(crate) struct Config {
     pub(crate) address: Option<String>,
     pub(crate) auth_config: Option<PathBuf>,
-    /// Service name to authenticate to. A certified client config names no
-    /// service, so the domain comes from the connection and is what the
-    /// responder's certificate must prove.
+    /// The responder this dial expects. One service-agnostic credential
+    /// authenticates every boundary, so the caller states which service must
+    /// answer; referrals supply their own from the authority boundary.
     pub(crate) auth_domain: Option<String>,
-    pub(crate) authorities: session::AuthorityBindings,
     pub(crate) aname: String,
     pub(crate) uname: String,
     pub(crate) msize: u32,
@@ -25,6 +24,27 @@ pub(crate) struct Config {
 pub(crate) struct Target {
     pub(crate) config: Config,
     pub(crate) path: String,
+}
+
+pub(crate) fn client_authentication(
+    config: &Config,
+) -> CliResult<Option<session::SessionAuthentication>> {
+    let Some(path) = config.auth_config.clone() else {
+        if config.auth_domain.is_some() {
+            return Err(cli_error("--auth-domain requires --auth-config"));
+        }
+        return Ok(None);
+    };
+    let credential =
+        session::ClientCredential::new(path).map_err(|error| cli_error(error.to_string()))?;
+    let authentication = match &config.auth_domain {
+        Some(domain) => session::SessionAuthentication::authenticated_root(
+            credential,
+            session::ResponderName::new(domain).map_err(|error| cli_error(error.to_string()))?,
+        ),
+        None => session::SessionAuthentication::contained_root(credential),
+    };
+    Ok(Some(authentication))
 }
 
 pub(crate) fn connection_target(config: Config, args: Vec<String>) -> CliResult<Target> {

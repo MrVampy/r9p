@@ -61,7 +61,6 @@ pub struct PeerIdentity {
 pub struct AuthenticatedSession<S = TcpStream> {
     pub stream: SecureStream<S>,
     pub peer: PeerIdentity,
-    pub preauthorized: bool,
 }
 
 impl PeerIdentity {
@@ -297,26 +296,9 @@ fn client_ik<S: AuthenticationTransport>(
 }
 
 pub fn authenticate_server<S: AuthenticationTransport>(
-    stream: S,
-    config: &ServerConfig,
-    timeout: Duration,
-) -> Result<AuthenticatedSession<S>> {
-    authenticate_server_inner(stream, config, timeout, false)
-}
-
-pub fn authenticate_server_attested<S: AuthenticationTransport>(
-    stream: S,
-    config: &ServerConfig,
-    timeout: Duration,
-) -> Result<AuthenticatedSession<S>> {
-    authenticate_server_inner(stream, config, timeout, true)
-}
-
-fn authenticate_server_inner<S: AuthenticationTransport>(
     mut stream: S,
     config: &ServerConfig,
     timeout: Duration,
-    allow_attested: bool,
 ) -> Result<AuthenticatedSession<S>> {
     stream.configure_authentication_transport()?;
     let previous = stream.install_authentication_timeout(timeout)?;
@@ -324,20 +306,15 @@ fn authenticate_server_inner<S: AuthenticationTransport>(
         p9any::negotiate_server(&mut stream, config.domain(), config.can_prove_identity())?;
     let prologue = prologue(config.domain());
 
-    let (identity, transport) = match protocol {
+    let (peer, transport) = match protocol {
         Protocol::NoiseXx => server_xx(&mut stream, config, &prologue)?,
         // Rollout scaffolding. Deleted once every client speaks XX.
-        Protocol::NoiseIk => server_ik(&mut stream, config, &prologue, allow_attested)?,
+        Protocol::NoiseIk => server_ik(&mut stream, config, &prologue)?,
     };
-    let AdmittedIdentity {
-        peer,
-        preauthorized,
-    } = identity;
     stream.restore_authentication_timeouts(previous)?;
     Ok(AuthenticatedSession {
         stream: SecureStream::new(stream, transport),
         peer,
-        preauthorized,
     })
 }
 
@@ -347,7 +324,7 @@ fn server_xx<S: AuthenticationTransport>(
     stream: &mut S,
     config: &ServerConfig,
     prologue: &[u8],
-) -> Result<(AdmittedIdentity, snow::StatelessTransportState)> {
+) -> Result<(PeerIdentity, snow::StatelessTransportState)> {
     let own = config
         .certificate()
         .ok_or_else(|| Error::from("XX requires this server to hold a certificate"))?;
@@ -392,8 +369,7 @@ fn server_ik<S: AuthenticationTransport>(
     stream: &mut S,
     config: &ServerConfig,
     prologue: &[u8],
-    allow_attested: bool,
-) -> Result<(AdmittedIdentity, snow::StatelessTransportState)> {
+) -> Result<(PeerIdentity, snow::StatelessTransportState)> {
     let mut handshake = snow::Builder::new(noise_params()?)
         .prologue(prologue)
         .map_err(noise_error("configure authentication domain"))?
@@ -420,20 +396,16 @@ fn server_ik<S: AuthenticationTransport>(
         let principal = String::from_utf8(payload.to_vec())
             .map_err(|_| Error::from("session principal is not utf-8"))?;
         validate_principal(&principal)?;
-        let preauthorized = config.authorize(public_key, &principal);
-        if !preauthorized && !allow_attested {
+        if !config.authorize(public_key, &principal) {
             return Err(Error::from(format!(
                 "client key is not authorized for principal {principal}"
             )));
         }
-        AdmittedIdentity {
-            peer: PeerIdentity {
-                principal,
-                public_key,
-                groups: BTreeSet::new(),
-                certified: false,
-            },
-            preauthorized,
+        PeerIdentity {
+            principal,
+            public_key,
+            groups: BTreeSet::new(),
+            certified: false,
         }
     };
 
@@ -443,11 +415,6 @@ fn server_ik<S: AuthenticationTransport>(
         .map_err(noise_error("write server authentication message"))?;
     write_frame(stream, &second[..second_len])?;
     Ok((identity, finish_handshake(handshake)?))
-}
-
-struct AdmittedIdentity {
-    peer: PeerIdentity,
-    preauthorized: bool,
 }
 
 /// Admits a certificate-bearing client.
@@ -460,7 +427,7 @@ fn certified_identity(
     config: &ServerConfig,
     body: &[u8],
     public_key: PublicKey,
-) -> Result<AdmittedIdentity> {
+) -> Result<PeerIdentity> {
     if config.roots().is_empty() {
         return Err(Error::from(
             "client presented a certificate but this server accepts none",
@@ -486,17 +453,11 @@ fn certified_identity(
     for root in config.roots() {
         match certificate.verify(*root, now) {
             Ok(()) => {
-                let peer = PeerIdentity {
+                return Ok(PeerIdentity {
                     principal: certificate.body().name().to_string(),
                     public_key,
                     groups: certificate.body().groups().map(str::to_string).collect(),
                     certified: true,
-                };
-                // Preauthorized: the name is proven rather than asserted here,
-                // which is a stronger claim than a peer line makes.
-                return Ok(AdmittedIdentity {
-                    peer,
-                    preauthorized: true,
                 });
             }
             Err(error) => refusal = Some(error),
@@ -722,47 +683,6 @@ mod tests {
             .join()
             .map_err(|_| Error::from("auth server panicked"))?
             .is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn attested_server_defers_an_unlisted_key_to_application_admission() -> Result<()> {
-        let server_key = generate_key_pair()?;
-        let bootstrap_key = generate_key_pair()?;
-        let service_key = generate_key_pair()?;
-        let server_config = ServerConfig::new(
-            "vault",
-            server_key.private.clone(),
-            [(bootstrap_key.public, "codex".to_string())],
-        )?;
-        let client_config = ClientConfig::new("vault", service_key.private, server_key.public)?;
-        let listener =
-            TcpListener::bind("127.0.0.1:0").map_err(|error| Error::from(error.to_string()))?;
-        let address = listener
-            .local_addr()
-            .map_err(|error| Error::from(error.to_string()))?;
-        let expected_public_key = service_key.public;
-        let server = thread::spawn(move || -> Result<AuthenticatedSession> {
-            let (stream, _) = listener
-                .accept()
-                .map_err(|error| Error::from(error.to_string()))?;
-            authenticate_server_attested(stream, &server_config, Duration::from_secs(2))
-        });
-
-        let stream = TcpStream::connect(address).map_err(|error| Error::from(error.to_string()))?;
-        let _stream = authenticate_client(
-            stream,
-            &client_config,
-            "/srv/infra/example",
-            Duration::from_secs(2),
-        )?;
-        let session = server
-            .join()
-            .map_err(|_| Error::from("auth server panicked"))??;
-
-        assert_eq!(session.peer.principal(), "/srv/infra/example");
-        assert_eq!(session.peer.public_key(), expected_public_key);
-        assert!(!session.preauthorized);
         Ok(())
     }
 

@@ -20,8 +20,7 @@ pub fn default_congestion_threshold(max_background: u16) -> u16 {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub address: String,
-    pub auth_config: Option<PathBuf>,
-    pub authorities: session::AuthorityBindings,
+    pub authentication: Option<session::SessionAuthentication>,
     pub source_path: String,
     pub mountpoint: String,
     pub uname: String,
@@ -61,8 +60,7 @@ impl Config {
             uname: self.uname.clone(),
             aname: self.aname.clone(),
             msize: self.msize,
-            auth_config: self.auth_config.clone(),
-            authorities: self.authorities.clone(),
+            authentication: self.authentication.clone(),
         }
     }
 }

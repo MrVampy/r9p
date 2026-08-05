@@ -131,15 +131,17 @@
  *   open for its initial write; the other operations create, replace, and
  *   remove. All outbound client operations follow 9P2000.R referrals
  *   internally.
- * - r9p_front_bind_client_authority binds a portable referral authority name
- *   to host-local client auth material. The local path is client mechanism
- *   and never appears in the served namespace.
+ * - r9p_front_set_client_authentication sets the one credential outbound
+ *   client sessions authenticate with, and the responder a root dial expects.
+ *   Pass an empty responder when the root transport is itself the boundary;
+ *   referrals supply their own. The local path is client mechanism and never
+ *   appears in the served namespace.
  */
 
 #include <stddef.h>
 #include <stdint.h>
 
-#define R9P_FRONT_ABI_VERSION UINT32_C(21)
+#define R9P_FRONT_ABI_VERSION UINT32_C(22)
 #define R9P_FRONT_CAP_PUSHED_NAMESPACE_METADATA (UINT64_C(1) << 0)
 #define R9P_FRONT_CAP_REQUEST_CONTEXT_V2 (UINT64_C(1) << 1)
 #define R9P_FRONT_CAP_SYNTHETIC_READ_RELAY (UINT64_C(1) << 2)
@@ -147,7 +149,7 @@
 #define R9P_FRONT_CAP_ATOMIC_CREATE_WRITE (UINT64_C(1) << 4)
 #define R9P_FRONT_CAP_NAMESPACE_MUTATION_RELAYS (UINT64_C(1) << 5)
 #define R9P_FRONT_CAP_AUTHENTICATED_SERVE (UINT64_C(1) << 6)
-#define R9P_FRONT_CAP_CLIENT_AUTHORITY_BINDINGS (UINT64_C(1) << 7)
+#define R9P_FRONT_CAP_CLIENT_SESSION_AUTHENTICATION (UINT64_C(1) << 7)
 #define R9P_FRONT_CAP_SNAPSHOT_READ_RELAY (UINT64_C(1) << 8)
 
 typedef struct r9p_front r9p_front;
@@ -156,10 +158,10 @@ uint32_t r9p_front_abi_version(void);
 uint64_t r9p_front_capabilities(void);
 r9p_front *r9p_front_new(void);
 void r9p_front_free(r9p_front *front);
-int32_t r9p_front_bind_client_authority(
-    r9p_front *front, const char *authority_boundary,
-    size_t authority_boundary_len, const char *auth_config_path,
-    size_t auth_config_path_len);
+int32_t r9p_front_set_client_authentication(
+    r9p_front *front, const char *auth_config_path,
+    size_t auth_config_path_len, const char *expected_responder,
+    size_t expected_responder_len);
 
 int32_t r9p_front_set(r9p_front *front, const char *path, size_t path_len,
                       const uint8_t *bytes, size_t bytes_len);

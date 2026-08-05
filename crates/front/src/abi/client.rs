@@ -5,34 +5,47 @@ use super::{bytes_arg, clear_last_error, set_last_error, str_arg, FrontAbi, INVA
 
 const CLIENT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Sets the one credential this front's client sessions authenticate with and
+/// the responder a root dial expects. Referrals taken from that session supply
+/// their own responder name, so no per-service binding is ever needed.
 #[no_mangle]
-pub unsafe extern "C" fn r9p_front_bind_client_authority(
+pub unsafe extern "C" fn r9p_front_set_client_authentication(
     handle: *mut FrontAbi,
-    authority_boundary: *const c_char,
-    authority_boundary_len: usize,
     auth_config_path: *const c_char,
     auth_config_path_len: usize,
+    expected_responder: *const c_char,
+    expected_responder_len: usize,
 ) -> i32 {
     let Some(abi) = (unsafe { handle.as_ref() }) else {
         return INVALID;
     };
-    let (Some(authority_boundary), Some(auth_config_path)) = (
-        unsafe { str_arg(authority_boundary, authority_boundary_len) },
+    let (Some(auth_config_path), Some(expected_responder)) = (
         unsafe { str_arg(auth_config_path, auth_config_path_len) },
+        unsafe { str_arg(expected_responder, expected_responder_len) },
     ) else {
         return INVALID;
     };
-    let mut authorities = match abi.client_authorities.lock() {
-        Ok(authorities) => authorities,
+    let credential = match session::ClientCredential::new(auth_config_path) {
+        Ok(credential) => credential,
         Err(error) => return set_last_error(abi, error),
     };
-    match authorities.insert_session_auth(authority_boundary, PathBuf::from(auth_config_path)) {
-        Ok(()) => {
-            clear_last_error(abi);
-            OK
+    let authentication = if expected_responder.is_empty() {
+        session::SessionAuthentication::contained_root(credential)
+    } else {
+        match session::ResponderName::new(expected_responder) {
+            Ok(responder) => {
+                session::SessionAuthentication::authenticated_root(credential, responder)
+            }
+            Err(error) => return set_last_error(abi, error),
         }
-        Err(error) => set_last_error(abi, error),
-    }
+    };
+    let mut stored = match abi.client_authentication.lock() {
+        Ok(stored) => stored,
+        Err(error) => return set_last_error(abi, error),
+    };
+    *stored = Some(authentication);
+    clear_last_error(abi);
+    OK
 }
 
 #[no_mangle]
@@ -354,10 +367,10 @@ fn connect_client(
     aname: &str,
     msize: u32,
 ) -> session::Result<Client> {
-    let authorities = abi
-        .client_authorities
+    let authentication = abi
+        .client_authentication
         .lock()
-        .map_err(|_| session::Error::new(libc::EIO, "front client authority lock poisoned"))?
+        .map_err(|_| session::Error::new(libc::EIO, "front client authentication lock poisoned"))?
         .clone();
     Client::connect_with_timeout(
         &ConnectionConfig {
@@ -365,8 +378,7 @@ fn connect_client(
             uname: uname.to_string(),
             aname: aname.to_string(),
             msize,
-            auth_config: None,
-            authorities,
+            authentication,
         },
         CLIENT_CONNECT_TIMEOUT,
     )

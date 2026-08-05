@@ -1,7 +1,7 @@
 use crate::{
     error::client_error,
     request::RequestTracker,
-    transport::{connect_stream, connect_stream_expecting},
+    transport::connect_stream,
     ConnectionConfig, Error, Result, WriteThenReadError,
 };
 use r9p::{
@@ -33,27 +33,9 @@ impl DirectClient {
         tracker: RequestTracker,
         timeout: Duration,
     ) -> Result<Self> {
-        Self::connect_expecting(config, tracker, timeout, None)
-    }
-
-    /// `expected_responder` is the service name a referral said would answer, so
-    /// the responder's certificate can be checked against it. Crate-private: it
-    /// deliberately does not reach `ConnectionConfig`, which out-of-tree
-    /// consumers construct.
-    pub(crate) fn connect_expecting(
-        config: &ConnectionConfig,
-        tracker: RequestTracker,
-        timeout: Duration,
-        expected_responder: Option<&str>,
-    ) -> Result<Self> {
         let started = Instant::now();
         loop {
-            match Self::connect_with_tracker_once(
-                config,
-                tracker.clone(),
-                timeout,
-                expected_responder,
-            ) {
+            match Self::connect_with_tracker_once(config, tracker.clone(), timeout) {
                 Ok(client) => return Ok(client),
                 Err(error) if connect_should_retry(&error, timeout, started) => {
                     thread::sleep(connect_retry_sleep(timeout, started));
@@ -67,9 +49,8 @@ impl DirectClient {
         config: &ConnectionConfig,
         tracker: RequestTracker,
         connect_timeout: Duration,
-        expected_responder: Option<&str>,
     ) -> Result<Self> {
-        let stream = connect_stream_expecting(config, connect_timeout, expected_responder)?;
+        let stream = connect_stream(config, connect_timeout)?;
         let inner = MultiplexedClient::connect_with_variant(
             stream,
             &config.uname,

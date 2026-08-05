@@ -11,7 +11,7 @@ mod tree;
 
 use crate::feed::{start_feed_worker, FeedEventBus, FeedState, FeedWorkerConfig, FeedWorkerHandle};
 use crate::{
-    AuthorityBindings, Client, ClientSession, ConnectionConfig, Error, NamespaceCache, Result,
+    Client, ClientSession, ConnectionConfig, Error, NamespaceCache, Result, SessionAuthentication,
     SessionEpoch, ORDWR, OREAD,
 };
 pub use request::{parse_request, ControlRequest};
@@ -31,8 +31,7 @@ pub struct ControlConfig {
     pub uname: String,
     pub aname: String,
     pub msize: u32,
-    pub auth_config: Option<PathBuf>,
-    pub authorities: AuthorityBindings,
+    pub authentication: Option<SessionAuthentication>,
     pub connect_timeout: Duration,
     pub request_timeout: Duration,
     pub change_feed_path: Option<String>,
@@ -78,8 +77,7 @@ impl ControlRuntime {
                 uname: config.uname.clone(),
                 aname: config.aname.clone(),
                 msize: config.msize,
-                auth_config: config.auth_config.clone(),
-                authorities: config.authorities.clone(),
+                authentication: config.authentication.clone(),
             },
             config.connect_timeout,
         )?;
@@ -263,8 +261,7 @@ pub fn request_control_socket(
             uname: "session".to_string(),
             aname: String::new(),
             msize: 65_536,
-            auth_config: None,
-            authorities: AuthorityBindings::new(),
+            authentication: None,
         },
         timeout,
     )?;

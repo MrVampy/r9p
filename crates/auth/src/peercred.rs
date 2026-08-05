@@ -12,7 +12,6 @@ pub enum TransportIdentity {
     Authenticated {
         principal: Arc<str>,
         public_key: PublicKey,
-        preauthorized: bool,
     },
     UnixPeer {
         uid: u32,
@@ -25,11 +24,10 @@ impl TransportIdentity {
         Self::Local
     }
 
-    pub fn authenticated(peer: &PeerIdentity, preauthorized: bool) -> Self {
+    pub fn authenticated(peer: &PeerIdentity) -> Self {
         Self::Authenticated {
             principal: Arc::<str>::from(peer.principal()),
             public_key: peer.public_key(),
-            preauthorized,
         }
     }
 
@@ -86,16 +84,8 @@ impl TransportIdentity {
     pub fn transport_authorizes_uname(&self, uname: &str) -> bool {
         match self {
             Self::Local => true,
-            Self::Authenticated {
-                principal,
-                preauthorized: true,
-                ..
-            } => principal.as_ref() == uname,
-            Self::Authenticated {
-                preauthorized: false,
-                ..
-            }
-            | Self::UnixPeer { .. } => false,
+            Self::Authenticated { principal, .. } => principal.as_ref() == uname,
+            Self::UnixPeer { .. } => false,
         }
     }
 }
@@ -129,19 +119,17 @@ mod tests {
     }
 
     #[test]
-    fn authenticated_identity_separates_attestation_from_preauthorization() -> Result<()> {
+    fn an_authenticated_identity_authorizes_only_its_own_principal() -> Result<()> {
         let key = generate_key_pair()?;
-        let peer = PeerIdentity::new("codex", key.public)?;
-        let deferred = TransportIdentity::authenticated(&peer, false);
-        let preauthorized = TransportIdentity::authenticated(&peer, true);
+        let peer = PeerIdentity::new("codex.interface", key.public)?;
+        let identity = TransportIdentity::authenticated(&peer);
 
         assert_eq!(
-            deferred.subject_id(),
+            identity.subject_id(),
             format!("{NOISE_SUBJECT_PREFIX}{}", key.public)
         );
-        assert!(!deferred.transport_authorizes_uname("codex"));
-        assert!(preauthorized.transport_authorizes_uname("codex"));
-        assert!(!preauthorized.transport_authorizes_uname("root"));
+        assert!(identity.transport_authorizes_uname("codex.interface"));
+        assert!(!identity.transport_authorizes_uname("root"));
         Ok(())
     }
 

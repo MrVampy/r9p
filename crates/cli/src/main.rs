@@ -97,7 +97,6 @@ pub(crate) fn parse_global_options(args: &mut Vec<String>) -> CliResult<Config> 
         auth_domain: None,
         address: None,
         auth_config: None,
-        authorities: session::AuthorityBindings::new(),
         aname: String::new(),
         uname: env::var("USER").unwrap_or_else(|_| "none".to_string()),
         msize: DEFAULT_MSIZE,
@@ -140,7 +139,6 @@ pub(crate) fn parse_global_options(args: &mut Vec<String>) -> CliResult<Config> 
             || arg == "--control-timeout"
             || arg == "--auth-config"
             || arg == "--auth-domain"
-            || arg == "--authority-auth"
         {
             let value = args
                 .get(i + 1)
@@ -152,11 +150,6 @@ pub(crate) fn parse_global_options(args: &mut Vec<String>) -> CliResult<Config> 
         }
         if let Some(value) = arg.strip_prefix("--bind=") {
             set_global_option(&mut config, "--bind", value.to_string())?;
-            i += 1;
-            continue;
-        }
-        if let Some(value) = arg.strip_prefix("--authority-auth=") {
-            set_global_option(&mut config, "--authority-auth", value.to_string())?;
             i += 1;
             continue;
         }
@@ -191,15 +184,6 @@ fn set_global_option(config: &mut Config, option: &str, value: String) -> CliRes
         "-a" | "--bind" => config.address = Some(value),
         "--auth-config" => config.auth_config = Some(value.into()),
         "--auth-domain" => config.auth_domain = Some(value.to_string()),
-        "--authority-auth" => {
-            let (authority, path) = value.split_once('=').ok_or_else(|| {
-                cli_error("--authority-auth must be AUTHORITY=ABSOLUTE_CONFIG_PATH")
-            })?;
-            config
-                .authorities
-                .insert_session_auth(authority, path)
-                .map_err(|error| cli_error(error.to_string()))?;
-        }
         "-A" => config.aname = value,
         "-u" => config.uname = value,
         "-m" => {
@@ -235,7 +219,7 @@ fn parse_request_timeout(value: &str) -> CliResult<Option<Duration>> {
 
 pub(crate) fn usage() -> ! {
     eprintln!(
-        "usage: r9p [-n] [--machine] [-a|--bind address] [-A aname] [-u uname] [-m msize] [--auth-config path] [--auth-domain name] [--authority-auth AUTHORITY=ABSOLUTE_CONFIG_PATH] [--request-timeout seconds] [--control-timeout seconds] cmd args..."
+        "usage: r9p [-n] [--machine] [-a|--bind address] [-A aname] [-u uname] [-m msize] [--auth-config path] [--auth-domain name] [--request-timeout seconds] [--control-timeout seconds] cmd args..."
     );
     eprintln!("possible cmds:");
     eprintln!("  auth-keygen --private path --public path");

@@ -1,5 +1,5 @@
 use session::{Client, ConnectionConfig};
-use std::{ffi::c_char, path::PathBuf, time::Duration};
+use std::{ffi::c_char, time::Duration};
 
 use super::{bytes_arg, clear_last_error, set_last_error, str_arg, FrontAbi, INVALID, OK};
 

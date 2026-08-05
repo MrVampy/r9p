@@ -17,7 +17,7 @@ use crate::{
 pub use request::{parse_request, ControlRequest};
 use std::{
     fs,
-    path::{Path, PathBuf},
+    path::Path,
     thread,
     time::Duration,
 };

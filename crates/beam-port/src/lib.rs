@@ -14,7 +14,7 @@ use session::{
     Client as NamespaceClient, ClientCredential, ConnectionConfig, Error as SessionError,
     ResponderName, Result as SessionResult, SessionAuthentication,
 };
-use std::{collections::HashMap, path::PathBuf, time::Duration};
+use std::{collections::HashMap, time::Duration};
 
 #[cfg(unix)]
 use std::{os::unix::net::UnixStream, path::Path};

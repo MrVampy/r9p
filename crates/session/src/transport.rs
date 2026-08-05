@@ -3,7 +3,7 @@ use crate::{
 };
 use r9p::{blocking, multiplex::MultiplexTransport};
 use r9p_auth::{
-    authenticate_client, authenticate_client_to, ClientConfig as AuthConfig, SecureStream,
+    authenticate_client_to, ClientConfig as AuthConfig, SecureStream,
 };
 use std::{
     env,

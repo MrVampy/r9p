@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::{Error, Result};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ClientCredential {
     config: PathBuf,
 }
@@ -24,7 +24,7 @@ impl ClientCredential {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ResponderName(String);
 
 impl ResponderName {
@@ -42,7 +42,7 @@ impl ResponderName {
 
 /// A responder without a credential is unrepresentable: there would be nothing
 /// to authenticate with.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct SessionAuthentication {
     credential: ClientCredential,
     root_responder: Option<ResponderName>,

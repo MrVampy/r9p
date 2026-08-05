@@ -219,3 +219,18 @@ binding. After, it is the input `r9p-cert` signs from — the role
 Migration must tolerate a mixed fleet: some hosts naming keys locally while
 others read names from credentials, since a simultaneous fleet-wide switch is
 exactly the failure mode this is meant to remove.
+
+## The machinery is still interiorized
+
+Certificates exteriorized the identity *model* — names travel as signed data and
+coordinator addresses without being able to impersonate. They left the identity
+*machinery* inside every program: eight `ConnectionConfig` sites each read a
+private key, hold a certificate, and know what a root is. Five of those were
+first patched to `None` to satisfy the compiler, which compiled cleanly and
+silently disabled the feature until an end-to-end test caught it.
+
+`docs/design/auth-agent.md` is the design note. In short: a local
+factotum-shaped agent holding one principal's own keys, relaying handshake bytes
+rather than proxying traffic, exposed as files. Not an issuer, not networked,
+not a keystore, not coordinator. The test is what it deletes — `--auth-domain`,
+`--auth-config`, and key handling from all eight sites.

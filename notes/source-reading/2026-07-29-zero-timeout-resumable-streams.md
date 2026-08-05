@@ -21,7 +21,7 @@ read without turning it into an immediate timeout?
   - `open_binding`
 - `crates/core/src/multiplex/client.rs`
   - `MultiplexedClient::wait_pending_response_timeout`
-- `docs/event-driven-9p.md`
+- `docs/guides/event-driven-9p.md`
   - blocking reads as the subscription primitive
 - `../vault-apps/agents/crates/runner/src/bin/agents-operating-exec-client.rs`
   - the Codex exec-server bridge selects `r9p con --resume` with request

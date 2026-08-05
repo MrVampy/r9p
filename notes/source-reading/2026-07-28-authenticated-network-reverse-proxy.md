@@ -14,7 +14,7 @@ host-specific forwarding service or making coordinator carry the byte path?
 - `crates/reverse/src/export.rs`
 - `crates/reverse/src/session_proxy.rs`
 - `crates/cli/src/commands/reverse.rs`
-- `docs/architecture.md`
+- `docs/design/architecture.md`
 - `docs/source-map.md`
 
 ## Findings

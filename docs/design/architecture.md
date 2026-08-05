@@ -158,7 +158,7 @@ observation cadence. Read deadlines remain bounded liveness and shutdown
 limits.
 
 The generic pattern is described in
-[`event-driven-9p.md`](event-driven-9p.md). A retained blocking read is the
+[`event-driven-9p.md`](../guides/event-driven-9p.md). A retained blocking read is the
 subscription. Implicit per-fid streams admit one outstanding read per fid;
 explicit positional feeds may pipeline independent tagged reads when their file
 contract makes offsets replay-safe. Cancellation flushes each outstanding tag

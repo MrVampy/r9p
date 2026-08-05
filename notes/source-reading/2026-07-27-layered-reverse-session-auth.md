@@ -18,7 +18,7 @@ without trusting the broker's loopback proxy as caller identity?
 - `crates/core/src/server/connection.rs`
 - `crates/core/src/multiplex/mod.rs`
 - `README.md`
-- `docs/architecture.md`
+- `docs/design/architecture.md`
 
 ## Findings
 

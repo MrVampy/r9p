@@ -26,7 +26,7 @@ same Front?
   - `request_on`
   - `server_loop`
   - `await_response`
-- `docs/event-driven-9p.md`
+- `docs/guides/event-driven-9p.md`
   - blocking subscription and dedicated control-headroom guidance
 
 ## Findings

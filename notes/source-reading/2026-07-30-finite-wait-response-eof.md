@@ -43,7 +43,7 @@ it?
   or beyond its length returns empty.
 - Explicit cursor-keyed terminal update records retain their existing
   final-chunk retirement rule.
-- `docs/event-driven-9p.md` now states the finite-record EOF contract.
+- `docs/guides/event-driven-9p.md` now states the finite-record EOF contract.
 
 ## Open Questions
 

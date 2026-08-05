@@ -13,7 +13,7 @@ delegating namespace operations to BEAM?
 - `src/server.rs`
 - `src/flush.rs`
 - `src/message.rs`
-- `docs/architecture.md`
+- `docs/design/architecture.md`
 - `refs/plan9port/src/lib9p/srv.c`
 - `refs/plan9port/include/9p.h`
 - `refs/plan9port/man/man9/flush.9p`

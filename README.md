@@ -64,7 +64,7 @@ Live files use retained fids, blocking tagged reads, and `Tflush`
 cancellation. Whether one fid may carry one or several pending reads depends on
 whether the file uses an implicit per-fid cursor or independent positional
 cursors. See
-[`docs/event-driven-9p.md`](docs/event-driven-9p.md) for the complete pattern.
+[`docs/guides/event-driven-9p.md`](docs/guides/event-driven-9p.md) for the complete pattern.
 
 The server core also owns the invariant part of `Twstat`. It rejects attempts
 to change `type`, `dev`, `qid`, `atime`, `uid`, `muid`, or a file's type bits

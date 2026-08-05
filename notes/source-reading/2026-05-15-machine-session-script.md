@@ -16,7 +16,7 @@ one 9P connection and attach while staying backend-neutral?
 - `src/blocking.rs`
 - `tests/cli_machine.rs`
 - `README.md`
-- `docs/architecture.md`
+- `docs/design/architecture.md`
 
 ## Findings
 

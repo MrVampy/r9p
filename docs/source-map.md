@@ -84,7 +84,7 @@ This map defines the local sources agents should inspect before making source-sp
   - The recent or cursor path is a one-shot catch-up source after connection
     loss, never a periodic polling source. The configured delay bounds
     reconnect attempts only.
-- `docs/event-driven-9p.md`
+- `docs/guides/event-driven-9p.md`
   - Generic retained-fid, blocking-read, tagged-concurrency, cancellation,
     backpressure, and reconnect pattern for event-driven 9P applications.
 - `crates/core/src/stat.rs`

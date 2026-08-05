@@ -75,7 +75,7 @@ ordinary 64-bit offset without assigning service-specific meaning to it.
 
 ## Effect
 
-- Added `docs/event-driven-9p.md` as the generic application guide.
+- Added `docs/guides/event-driven-9p.md` as the generic application guide.
 - Kept implicit-stream and positional-feed semantics out of the wire dialect.
 - Made concurrent retained reads track their outstanding tags.
 - Made cancellation await `Rflush` for every outstanding read before

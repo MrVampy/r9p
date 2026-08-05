@@ -331,11 +331,11 @@ mod tests {
         let server = crate::generate_key_pair()?;
         let key_path = dir.join("private");
         crate::write_key_pair(&key_path, &dir.join("public"), &server)?;
-        let cert_path = dir.join("vault.crt");
+        let cert_path = dir.join("coordinator.crt");
         Certificate::sign(
             &root.private,
             CertificateBody::new(
-                "vault",
+                "coordinator",
                 server.public,
                 Vec::<String>::new(),
                 1_000,
@@ -346,7 +346,7 @@ mod tests {
         .write(&cert_path)?;
         let config_path = dir.join("server.conf");
         let body = format!(
-            "format {CONFIG_FORMAT}\nrole server\ndomain vault\nprivate-key {}\ncertificate {}\nroot {}\n",
+            "format {CONFIG_FORMAT}\nrole server\ndomain coordinator\nprivate-key {}\ncertificate {}\nroot {}\n",
             key_path.display(),
             cert_path.display(),
             root.public
@@ -359,7 +359,7 @@ mod tests {
         write(
             &without_certificate,
             &format!(
-                "format {CONFIG_FORMAT}\nrole server\ndomain vault\nprivate-key {}\nroot {}\n",
+                "format {CONFIG_FORMAT}\nrole server\ndomain coordinator\nprivate-key {}\nroot {}\n",
                 key_path.display(),
                 root.public
             ),
@@ -504,7 +504,7 @@ mod tests {
     #[test]
     fn a_server_config_without_a_root_is_refused() -> Result<()> {
         let pair = crate::generate_key_pair()?;
-        assert!(ServerConfig::new("vault", pair.private, Vec::new()).is_err());
+        assert!(ServerConfig::new("coordinator", pair.private, Vec::new()).is_err());
         Ok(())
     }
 }

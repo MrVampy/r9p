@@ -84,11 +84,11 @@ mod tests {
             let (mut stream, _) = listener
                 .accept()
                 .map_err(|error| Error::from(error.to_string()))?;
-            negotiate_server(&mut stream, "vault")
+            negotiate_server(&mut stream, "coordinator")
         });
         let mut stream = std::net::TcpStream::connect(address)
             .map_err(|error| Error::from(error.to_string()))?;
-        negotiate_client(&mut stream, "vault")?;
+        negotiate_client(&mut stream, "coordinator")?;
         server
             .join()
             .map_err(|_| Error::from("p9any server panicked"))??;
@@ -106,7 +106,7 @@ mod tests {
             let (mut stream, _) = listener
                 .accept()
                 .map_err(|error| Error::from(error.to_string()))?;
-            negotiate_server(&mut stream, "vault")
+            negotiate_server(&mut stream, "coordinator")
         });
         let mut stream = std::net::TcpStream::connect(address)
             .map_err(|error| Error::from(error.to_string()))?;

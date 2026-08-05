@@ -469,7 +469,7 @@ mod tests {
 
     fn global() -> Config {
         Config {
-            auth_domain: Some("vault".to_string()),
+            auth_domain: Some("coordinator".to_string()),
             address: None,
             auth_config: None,
             aname: String::new(),

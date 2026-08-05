@@ -617,7 +617,7 @@ mod tests {
 
     #[test]
     fn a_client_certificate_from_an_unknown_root_is_refused() -> Result<()> {
-        let (_root, server, _client) = xx_pair("vault", "op")?;
+        let (_root, server, _client) = xx_pair("coordinator", "op")?;
         let other = generate_root_key_pair()?;
         let client_key = generate_key_pair()?;
         let client = ClientConfig::certified(
@@ -633,13 +633,13 @@ mod tests {
             [other.public],
         )?;
 
-        assert!(xx_once(server, &client, "vault", "op").is_err());
+        assert!(xx_once(server, &client, "coordinator", "op").is_err());
         Ok(())
     }
 
     #[test]
     fn an_expired_client_certificate_is_refused() -> Result<()> {
-        let (root, server, _client) = xx_pair("vault", "op")?;
+        let (root, server, _client) = xx_pair("coordinator", "op")?;
         let client_key = generate_key_pair()?;
         let client = ClientConfig::certified(
             client_key.private.clone(),
@@ -647,7 +647,7 @@ mod tests {
             [root.public],
         )?;
 
-        assert!(xx_once(server, &client, "vault", "op").is_err());
+        assert!(xx_once(server, &client, "coordinator", "op").is_err());
         Ok(())
     }
 
@@ -656,8 +656,8 @@ mod tests {
         let root = generate_root_key_pair()?;
         let server_key = generate_key_pair()?;
 
-        assert!(ServerConfig::new("vault", server_key.private.clone(), Vec::new()).is_err());
-        assert!(ServerConfig::new("vault", server_key.private, [root.public]).is_ok());
+        assert!(ServerConfig::new("coordinator", server_key.private.clone(), Vec::new()).is_err());
+        assert!(ServerConfig::new("coordinator", server_key.private, [root.public]).is_ok());
         Ok(())
     }
 }

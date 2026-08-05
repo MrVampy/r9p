@@ -40,7 +40,7 @@ fn server_auth_config() -> (PathBuf, PathBuf) {
     r9p_auth::Certificate::sign(
         &signing_root.private,
         r9p_auth::CertificateBody::new(
-            "vault",
+            "coordinator",
             server.public,
             Vec::<String>::new(),
             1,
@@ -56,7 +56,7 @@ fn server_auth_config() -> (PathBuf, PathBuf) {
     fs::write(
         &config,
         format!(
-            "format r9p-session-auth.v1\nrole server\ndomain vault\nprivate-key {}\ncertificate {}\nroot {}\n",
+            "format r9p-session-auth.v1\nrole server\ndomain coordinator\nprivate-key {}\ncertificate {}\nroot {}\n",
             private.display(),
             certificate.display(),
             signing_root.public
@@ -159,7 +159,7 @@ fn parses_non_loopback_export_bind_with_enforced_session_auth() {
                 .expect("socket address")
         )
     );
-    assert_eq!(config.auth.render(), "p9any:noise-xx@vault");
+    assert_eq!(config.auth.render(), "p9any:noise-xx@coordinator");
     fs::remove_dir_all(root).expect("remove auth test directory");
 }
 

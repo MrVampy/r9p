@@ -29,6 +29,7 @@ const ROOT_QID: Qid = Qid::dir(1);
 
 fn connection(address: String) -> ConnectionConfig {
     ConnectionConfig {
+        auth_domain: None,
         address,
         uname: "codex".to_string(),
         aname: "/".to_string(),

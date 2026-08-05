@@ -57,6 +57,7 @@ pub struct Config {
 impl Config {
     pub(super) fn connection(&self) -> session::ConnectionConfig {
         session::ConnectionConfig {
+            auth_domain: None,
             address: self.address.clone(),
             uname: self.uname.clone(),
             aname: self.aname.clone(),

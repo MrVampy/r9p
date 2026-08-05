@@ -8,5 +8,8 @@ pub struct ConnectionConfig {
     pub aname: String,
     pub msize: u32,
     pub auth_config: Option<PathBuf>,
+    /// Service name to authenticate to when the auth config names none.
+    /// Under XX this is what the responder's certificate must prove.
+    pub auth_domain: Option<String>,
     pub authorities: AuthorityBindings,
 }

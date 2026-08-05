@@ -7,6 +7,10 @@ use crate::usage;
 pub(crate) struct Config {
     pub(crate) address: Option<String>,
     pub(crate) auth_config: Option<PathBuf>,
+    /// Service name to authenticate to. A certified client config names no
+    /// service, so the domain comes from the connection and is what the
+    /// responder's certificate must prove.
+    pub(crate) auth_domain: Option<String>,
     pub(crate) authorities: session::AuthorityBindings,
     pub(crate) aname: String,
     pub(crate) uname: String,

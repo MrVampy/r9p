@@ -52,7 +52,17 @@ pub(crate) fn dial_address(
             let timeout = config
                 .request_timeout
                 .unwrap_or_else(|| Duration::from_secs(30));
-            let stream = authenticate_client(stream, &auth, &config.uname, timeout)?;
+            let stream = match (&config.auth_domain, auth.domain()) {
+                (Some(domain), _) => {
+                    r9p_auth::authenticate_client_to(stream, &auth, domain, &config.uname, timeout)?
+                }
+                (None, Some(_)) => authenticate_client(stream, &auth, &config.uname, timeout)?,
+                (None, None) => {
+                    return Err(cli_error(
+                        "this auth config names no service; pass --auth-domain",
+                    ))
+                }
+            };
             Ok(Box::new(stream))
         }
         None => Ok(Box::new(stream)),

@@ -1,6 +1,8 @@
 use crate::{error::client_error, ConnectionConfig, Error, Result};
 use r9p::{blocking, multiplex::MultiplexTransport};
-use r9p_auth::{authenticate_client, ClientConfig as AuthConfig, SecureStream};
+use r9p_auth::{
+    authenticate_client, authenticate_client_to, ClientConfig as AuthConfig, SecureStream,
+};
 use std::{
     env,
     io::{self, Read, Write},
@@ -97,9 +99,23 @@ pub(crate) fn connect_stream(
                     } else {
                         connect_timeout
                     };
-                    authenticate_client(stream, &auth, &config.uname, handshake_timeout)
-                        .map(ClientStream::Secure)
-                        .map_err(client_error)
+                    match (&config.auth_domain, auth.domain()) {
+                        (Some(domain), _) => authenticate_client_to(
+                            stream,
+                            &auth,
+                            domain,
+                            &config.uname,
+                            handshake_timeout,
+                        ),
+                        (None, Some(_)) => {
+                            authenticate_client(stream, &auth, &config.uname, handshake_timeout)
+                        }
+                        (None, None) => Err(r9p::error::Error::from(
+                            "this auth config names no service; supply an auth domain",
+                        )),
+                    }
+                    .map(ClientStream::Secure)
+                    .map_err(client_error)
                 }
                 None => Ok(ClientStream::Tcp(stream)),
             }

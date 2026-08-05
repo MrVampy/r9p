@@ -361,6 +361,7 @@ fn connect_client(
         .clone();
     Client::connect_with_timeout(
         &ConnectionConfig {
+            auth_domain: None,
             address: endpoint_bind.to_string(),
             uname: uname.to_string(),
             aname: aname.to_string(),

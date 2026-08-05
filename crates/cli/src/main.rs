@@ -94,6 +94,7 @@ fn run() -> CliResult<()> {
 
 pub(crate) fn parse_global_options(args: &mut Vec<String>) -> CliResult<Config> {
     let mut config = Config {
+        auth_domain: None,
         address: None,
         auth_config: None,
         authorities: session::AuthorityBindings::new(),
@@ -138,6 +139,7 @@ pub(crate) fn parse_global_options(args: &mut Vec<String>) -> CliResult<Config> 
             || arg == "--request-timeout"
             || arg == "--control-timeout"
             || arg == "--auth-config"
+            || arg == "--auth-domain"
             || arg == "--authority-auth"
         {
             let value = args
@@ -188,6 +190,7 @@ fn set_global_option(config: &mut Config, option: &str, value: String) -> CliRes
     match option {
         "-a" | "--bind" => config.address = Some(value),
         "--auth-config" => config.auth_config = Some(value.into()),
+        "--auth-domain" => config.auth_domain = Some(value.to_string()),
         "--authority-auth" => {
             let (authority, path) = value.split_once('=').ok_or_else(|| {
                 cli_error("--authority-auth must be AUTHORITY=ABSOLUTE_CONFIG_PATH")
@@ -232,7 +235,7 @@ fn parse_request_timeout(value: &str) -> CliResult<Option<Duration>> {
 
 pub(crate) fn usage() -> ! {
     eprintln!(
-        "usage: r9p [-n] [--machine] [-a|--bind address] [-A aname] [-u uname] [-m msize] [--auth-config path] [--authority-auth AUTHORITY=ABSOLUTE_CONFIG_PATH] [--request-timeout seconds] [--control-timeout seconds] cmd args..."
+        "usage: r9p [-n] [--machine] [-a|--bind address] [-A aname] [-u uname] [-m msize] [--auth-config path] [--auth-domain name] [--authority-auth AUTHORITY=ABSOLUTE_CONFIG_PATH] [--request-timeout seconds] [--control-timeout seconds] cmd args..."
     );
     eprintln!("possible cmds:");
     eprintln!("  auth-keygen --private path --public path");

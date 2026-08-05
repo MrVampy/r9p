@@ -124,6 +124,7 @@ fn stream_target(target: &Target) -> CliResult<(ConnectionConfig, String, Durati
     let timeout = target.config.request_timeout.unwrap_or(Duration::ZERO);
     Ok((
         ConnectionConfig {
+            auth_domain: target.config.auth_domain.clone(),
             address,
             uname: target.config.uname.clone(),
             aname: target.config.aname.clone(),

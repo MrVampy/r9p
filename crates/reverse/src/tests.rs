@@ -71,12 +71,12 @@ fn reverse_transport_socket_disables_nagle() -> Result<(), Box<dyn std::error::E
 #[test]
 fn session_proxy_terminates_client_auth_behind_a_local_endpoint(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let root = generate_root_key_pair()?;
+    let signing_root = generate_root_key_pair()?;
     let service_key = generate_key_pair()?;
     let runtime_key = generate_key_pair()?;
     let upstream = std::net::TcpListener::bind(address(Ipv4Addr::LOCALHOST, 0))?;
     let upstream_endpoint = upstream.local_addr()?;
-    let service_auth = certified_server(&root, "r9p-session-proxy-test", &service_key)?;
+    let service_auth = certified_server(&signing_root, "r9p-session-proxy-test", &service_key)?;
     let server = thread::spawn(
         move || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let (stream, _) = upstream.accept()?;
@@ -94,7 +94,7 @@ fn session_proxy_terminates_client_auth_behind_a_local_endpoint(
     let proxy = SessionProxy::start(SessionProxyConfig {
         bind: ProxyEndpoint::tcp(address(Ipv4Addr::LOCALHOST, 0)),
         upstream: upstream_endpoint,
-        auth: certified_client(&root, "/srv/example/runtime/m7", &runtime_key)?,
+        auth: certified_client(&signing_root, "/srv/example/runtime/m7", &runtime_key)?,
         expected_responder: "r9p-session-proxy-test".to_string(),
         principal: "/srv/example/runtime/m7".to_string(),
         max_sessions: 2,
@@ -118,14 +118,14 @@ fn session_proxy_terminates_client_auth_behind_a_local_endpoint(
 
 #[test]
 fn reverse_export_serves_a_writable_file_tree() -> Result<(), Box<dyn std::error::Error>> {
-    let root = generate_root_key_pair()?;
+    let signing_root = generate_root_key_pair()?;
     let server = generate_key_pair()?;
     let client = generate_key_pair()?;
     let broker = ReverseBroker::start(BrokerConfig {
         reverse_bind: address(Ipv4Addr::LOCALHOST, 0),
         proxy_bind: ProxyEndpoint::tcp(address(Ipv4Addr::LOCALHOST, 0)),
         proxy_exposure: ProxyExposure::Local,
-        auth: certified_server(&root, "r9p-reverse-test", &server)?,
+        auth: certified_server(&signing_root, "r9p-reverse-test", &server)?,
         peer_principal: "laptop".to_string(),
         max_waiting_streams: 4,
         authentication_timeout: Duration::from_secs(2),
@@ -135,7 +135,7 @@ fn reverse_export_serves_a_writable_file_tree() -> Result<(), Box<dyn std::error
     fs::write(root.path.join("specimen.txt"), b"from laptop\n")?;
     let export = FilesystemExport::start(FilesystemExportConfig {
         broker_endpoint: broker.reverse_endpoint(),
-        auth: certified_client(&root, "laptop", &client)?,
+        auth: certified_client(&signing_root, "laptop", &client)?,
         expected_responder: "r9p-reverse-test".to_string(),
         principal: "laptop".to_string(),
         root: root.path.clone(),
@@ -188,14 +188,14 @@ fn reverse_export_serves_a_writable_file_tree() -> Result<(), Box<dyn std::error
 
 #[test]
 fn reverse_export_serves_an_application_owned_tree() -> Result<(), Box<dyn std::error::Error>> {
-    let root = generate_root_key_pair()?;
+    let signing_root = generate_root_key_pair()?;
     let server = generate_key_pair()?;
     let client = generate_key_pair()?;
     let broker = ReverseBroker::start(BrokerConfig {
         reverse_bind: address(Ipv4Addr::LOCALHOST, 0),
         proxy_bind: ProxyEndpoint::tcp(address(Ipv4Addr::LOCALHOST, 0)),
         proxy_exposure: ProxyExposure::Local,
-        auth: certified_server(&root, "r9p-reverse-tree-test", &server)?,
+        auth: certified_server(&signing_root, "r9p-reverse-tree-test", &server)?,
         peer_principal: "participant".to_string(),
         max_waiting_streams: 2,
         authentication_timeout: Duration::from_secs(2),
@@ -204,7 +204,7 @@ fn reverse_export_serves_an_application_owned_tree() -> Result<(), Box<dyn std::
     let export = ReverseExport::start_handler(
         ReverseExportConfig {
             broker_endpoint: broker.reverse_endpoint(),
-            auth: certified_client(&root, "participant", &client)?,
+            auth: certified_client(&signing_root, "participant", &client)?,
             expected_responder: "r9p-reverse-tree-test".to_string(),
             principal: "participant".to_string(),
             connection_pool: 2,
@@ -237,7 +237,7 @@ fn reverse_export_serves_an_application_owned_tree() -> Result<(), Box<dyn std::
 #[test]
 fn reverse_export_holds_idle_pool_and_authenticates_the_end_service_peer(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let root = generate_root_key_pair()?;
+    let signing_root = generate_root_key_pair()?;
     let broker_key = generate_key_pair()?;
     let exporter_key = generate_key_pair()?;
     let service_key = generate_key_pair()?;
@@ -247,7 +247,7 @@ fn reverse_export_holds_idle_pool_and_authenticates_the_end_service_peer(
         reverse_bind: address(Ipv4Addr::LOCALHOST, 0),
         proxy_bind: ProxyEndpoint::tcp(address(Ipv4Addr::LOCALHOST, 0)),
         proxy_exposure: ProxyExposure::Local,
-        auth: certified_server(&root, "r9p-reverse-placement-test", &broker_key)?,
+        auth: certified_server(&signing_root, "r9p-reverse-placement-test", &broker_key)?,
         peer_principal: "example-exporter".to_string(),
         max_waiting_streams: 2,
         authentication_timeout: Duration::from_secs(2),
@@ -256,7 +256,7 @@ fn reverse_export_holds_idle_pool_and_authenticates_the_end_service_peer(
     let export = ReverseExport::start_authenticated_handler(
         ReverseExportConfig {
             broker_endpoint: broker.reverse_endpoint(),
-            auth: certified_client(&root, "example-exporter", &exporter_key)?,
+            auth: certified_client(&signing_root, "example-exporter", &exporter_key)?,
             expected_responder: "r9p-reverse-placement-test".to_string(),
             principal: "example-exporter".to_string(),
             connection_pool: 2,
@@ -272,7 +272,7 @@ fn reverse_export_holds_idle_pool_and_authenticates_the_end_service_peer(
                 ..R9pServerConfig::default()
             },
         },
-        certified_server(&root, "agents-profile-service", &service_key)?,
+        certified_server(&signing_root, "agents-profile-service", &service_key)?,
         Duration::from_secs(1),
         || Ok(IdentityHandler),
     )?;
@@ -285,7 +285,7 @@ fn reverse_export_holds_idle_pool_and_authenticates_the_end_service_peer(
 
     let unauthorized = authenticate_client_to(
         std::net::TcpStream::connect(tcp_proxy_endpoint(&broker)?)?,
-        &certified_client(&root, "intruder", &intruder_key)?,
+        &certified_client(&signing_root, "intruder", &intruder_key)?,
         "agents-profile-service",
         "/srv/example/runtime/m7",
         Duration::from_secs(2),
@@ -295,7 +295,7 @@ fn reverse_export_holds_idle_pool_and_authenticates_the_end_service_peer(
 
     let stream = authenticate_client_to(
         std::net::TcpStream::connect(tcp_proxy_endpoint(&broker)?)?,
-        &certified_client(&root, "/srv/example/runtime/m7", &runtime_key)?,
+        &certified_client(&signing_root, "/srv/example/runtime/m7", &runtime_key)?,
         "agents-profile-service",
         "/srv/example/runtime/m7",
         Duration::from_secs(2),
@@ -309,7 +309,7 @@ fn reverse_export_holds_idle_pool_and_authenticates_the_end_service_peer(
 #[cfg(unix)]
 #[test]
 fn reverse_broker_exposes_a_unix_proxy_endpoint() -> Result<(), Box<dyn std::error::Error>> {
-    let root = generate_root_key_pair()?;
+    let signing_root = generate_root_key_pair()?;
     let server = generate_key_pair()?;
     let client = generate_key_pair()?;
     let runtime = TestRoot::new()?;
@@ -318,7 +318,7 @@ fn reverse_broker_exposes_a_unix_proxy_endpoint() -> Result<(), Box<dyn std::err
         reverse_bind: address(Ipv4Addr::LOCALHOST, 0),
         proxy_bind: ProxyEndpoint::unix(&socket),
         proxy_exposure: ProxyExposure::Local,
-        auth: certified_server(&root, "r9p-reverse-unix-test", &server)?,
+        auth: certified_server(&signing_root, "r9p-reverse-unix-test", &server)?,
         peer_principal: "participant".to_string(),
         max_waiting_streams: 2,
         authentication_timeout: Duration::from_secs(2),
@@ -327,7 +327,7 @@ fn reverse_broker_exposes_a_unix_proxy_endpoint() -> Result<(), Box<dyn std::err
     let export = ReverseExport::start_handler(
         ReverseExportConfig {
             broker_endpoint: broker.reverse_endpoint(),
-            auth: certified_client(&root, "participant", &client)?,
+            auth: certified_client(&signing_root, "participant", &client)?,
             expected_responder: "r9p-reverse-unix-test".to_string(),
             principal: "participant".to_string(),
             connection_pool: 2,
@@ -360,11 +360,11 @@ fn reverse_broker_exposes_a_unix_proxy_endpoint() -> Result<(), Box<dyn std::err
 
 #[test]
 fn reverse_broker_discards_closed_idle_streams() -> Result<(), Box<dyn std::error::Error>> {
-    let root = generate_root_key_pair()?;
+    let signing_root = generate_root_key_pair()?;
     let server = generate_key_pair()?;
     let client = generate_key_pair()?;
-    let server_config = certified_server(&root, "r9p-reverse-stale-test", &server)?;
-    let client_config = certified_client(&root, "laptop", &client)?;
+    let server_config = certified_server(&signing_root, "r9p-reverse-stale-test", &server)?;
+    let client_config = certified_client(&signing_root, "laptop", &client)?;
     let broker = ReverseBroker::start(BrokerConfig {
         reverse_bind: address(Ipv4Addr::LOCALHOST, 0),
         proxy_bind: ProxyEndpoint::tcp(address(Ipv4Addr::LOCALHOST, 0)),

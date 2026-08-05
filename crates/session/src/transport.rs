@@ -259,13 +259,8 @@ mod referral_binding_tests {
         let server_key = generate_key_pair().expect("server key");
         let client_key = generate_key_pair().expect("client key");
 
-        let server = ServerConfig::new_with_roots(
-            served_name,
-            server_key.private,
-            Vec::new(),
-            [root.public],
-        )
-        .expect("server config")
+        let server = ServerConfig::new(served_name, server_key.private, [root.public])
+            .expect("server config")
         .with_certificate(cert(&root, server_key.public, served_name))
         .expect("server certificate");
 

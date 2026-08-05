@@ -399,8 +399,10 @@ mod tests {
             root.public,
         )?;
         let certificate = Certificate::sign(&root.private, body)?;
-        let config = ClientConfig::new("vault", client.private, server.public)?;
-        assert!(config.with_certificate(certificate).is_err());
+        assert!(
+            ClientConfig::certified(client.private, certificate, [root.public]).is_err(),
+            "a certificate issued for another key was accepted"
+        );
         Ok(())
     }
 

@@ -435,8 +435,6 @@ mod tests {
 
     const VALID_FROM: crate::UnixSeconds = 1_000;
     const VALID_UNTIL: crate::UnixSeconds = 4_000_000_000;
-    use crate::generate_key_pair;
-    use std::{net::TcpListener, thread};
 
     fn issue(
         root: &RootKeyPair,

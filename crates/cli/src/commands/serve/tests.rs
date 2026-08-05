@@ -31,18 +31,35 @@ fn server_auth_config() -> (PathBuf, PathBuf) {
         NEXT_AUTH_CONFIG.fetch_add(1, Ordering::Relaxed)
     ));
     fs::create_dir(&root).expect("auth test directory");
+    let signing_root = r9p_auth::generate_root_key_pair().expect("root key pair");
     let server = r9p_auth::generate_key_pair().expect("server key pair");
-    let client = r9p_auth::generate_key_pair().expect("client key pair");
     let private = root.join("server.key");
     let public = root.join("server.pub");
     r9p_auth::write_key_pair(&private, &public, &server).expect("write server key pair");
+    let certificate = root.join("server.crt");
+    r9p_auth::Certificate::sign(
+        &signing_root.private,
+        r9p_auth::CertificateBody::new(
+            "vault",
+            server.public,
+            Vec::<String>::new(),
+            1,
+            4_000_000_000,
+            signing_root.public,
+        )
+        .expect("certificate body"),
+    )
+    .expect("sign certificate")
+    .write(&certificate)
+    .expect("write certificate");
     let config = root.join("server.conf");
     fs::write(
         &config,
         format!(
-            "format r9p-session-auth.v1\nrole server\ndomain vault\nprivate-key {}\npeer {} codex\n",
+            "format r9p-session-auth.v1\nrole server\ndomain vault\nprivate-key {}\ncertificate {}\nroot {}\n",
             private.display(),
-            client.public
+            certificate.display(),
+            signing_root.public
         ),
     )
     .expect("write server auth config");

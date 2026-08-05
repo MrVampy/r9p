@@ -19,7 +19,7 @@ mod tests {
         for boundary in [
             "p9any:noise-xx@agents",
             "p9any:noise-xx@another-service",
-            "p9any:noise-ik@agents",
+            "p9any:noise-xx@agents",
         ] {
             assert!(!contained_authority(boundary), "{boundary}");
         }

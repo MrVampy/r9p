@@ -97,7 +97,7 @@ impl FileTree for ProtocolTree {
             uname: b"glenda".to_vec(),
             aname: b"/".to_vec(),
             exported_root: b"/".to_vec(),
-            authority_boundary: b"p9any:noise-ik@sources".to_vec(),
+            authority_boundary: b"p9any:noise-xx@sources".to_vec(),
             generation: 1,
             valid_for_ms: 10_000,
         }])

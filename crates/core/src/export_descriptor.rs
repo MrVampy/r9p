@@ -3,7 +3,6 @@ use std::{collections::BTreeMap, net::SocketAddr};
 use crate::{Error, Result};
 
 pub const EXPORT_FORMAT_V1: &str = "r9p-export.v1";
-pub const P9ANY_NOISE_IK: &str = "noise-ik";
 /// Mutual-certificate variant. The responder transmits its static key during
 /// the handshake instead of the initiator pinning it in advance, so a client
 /// needs no per-service key material.
@@ -316,14 +315,6 @@ impl AuthBoundary {
         Ok(boundary)
     }
 
-    pub fn p9any_noise_ik(domain: &str) -> Result<Self> {
-        validate_p9any_domain(domain)?;
-        Ok(Self {
-            class: AuthClass::P9any,
-            details: format!("{P9ANY_NOISE_IK}@{domain}"),
-        })
-    }
-
     pub fn p9any_noise_xx(domain: &str) -> Result<Self> {
         validate_p9any_domain(domain)?;
         Ok(Self {
@@ -342,7 +333,6 @@ impl AuthBoundary {
         }
         self.details
             .strip_prefix(P9ANY_NOISE_XX)
-            .or_else(|| self.details.strip_prefix(P9ANY_NOISE_IK))
             .and_then(|value| value.strip_prefix('@'))
     }
 
@@ -359,7 +349,7 @@ impl AuthBoundary {
             AuthClass::P9any => {
                 let domain = self.p9any_domain().ok_or_else(|| {
                     Error::from(format!(
-                        "p9any auth boundary must use {P9ANY_NOISE_IK}@domain or {P9ANY_NOISE_XX}@domain"
+                        "p9any auth boundary must use {P9ANY_NOISE_XX}@domain"
                     ))
                 })?;
                 validate_p9any_domain(domain)
@@ -594,7 +584,7 @@ mod tests {
             endpoint_bind: "192.0.2.10:19640".to_string(),
             aname: "service-generation".to_string(),
             transport_class: TransportClass::Tcp,
-            auth: AuthBoundary::p9any_noise_ik("agents").expect("auth should be valid"),
+            auth: AuthBoundary::p9any_noise_xx("agents").expect("auth should be valid"),
         };
         let descriptor = descriptor()
             .with_session_endpoint(expected.clone())
@@ -697,10 +687,10 @@ mod tests {
     fn descriptor_accepts_network_auth_for_non_loopback_tcp() {
         let mut descriptor = descriptor();
         descriptor.endpoint_bind = "192.0.2.1:564".to_string();
-        descriptor.auth = AuthBoundary::parse("p9any:noise-ik@vault").expect("auth should parse");
+        descriptor.auth = AuthBoundary::parse("p9any:noise-xx@vault").expect("auth should parse");
         let rendered = descriptor.render().expect("descriptor should render");
         let parsed = ExportDescriptor::parse(&rendered).expect("descriptor should parse");
-        assert_eq!(parsed.auth.render(), "p9any:noise-ik@vault");
+        assert_eq!(parsed.auth.render(), "p9any:noise-xx@vault");
     }
 
     #[test]
@@ -712,15 +702,15 @@ mod tests {
         let mut unix = descriptor();
         unix.transport_class = TransportClass::Unix;
         unix.endpoint_bind = "unix:/tmp/r9p.sock".to_string();
-        unix.auth = AuthBoundary::parse("p9any:noise-ik@vault").expect("auth should parse");
+        unix.auth = AuthBoundary::parse("p9any:noise-xx@vault").expect("auth should parse");
         assert!(unix.render().is_err());
     }
 
     #[test]
     fn descriptor_rejects_unknown_p9any_provider_and_invalid_domain() {
         assert!(AuthBoundary::parse("p9any:dp9ik@vault").is_err());
-        assert!(AuthBoundary::parse("p9any:noise-ik@vault/domain").is_err());
-        assert!(AuthBoundary::parse("p9any:noise-ik@").is_err());
+        assert!(AuthBoundary::parse("p9any:noise-xx@vault/domain").is_err());
+        assert!(AuthBoundary::parse("p9any:noise-xx@").is_err());
     }
 }
 
@@ -739,7 +729,7 @@ mod xx_boundary_tests {
 
     #[test]
     fn the_ik_boundary_still_parses_while_the_fleet_migrates() -> Result<()> {
-        let parsed = AuthBoundary::parse("p9any:noise-ik@terminal-m7")?;
+        let parsed = AuthBoundary::parse("p9any:noise-xx@terminal-m7")?;
         assert_eq!(parsed.p9any_domain(), Some("terminal-m7"));
         Ok(())
     }

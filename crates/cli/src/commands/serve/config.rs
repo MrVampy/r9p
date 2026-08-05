@@ -196,7 +196,7 @@ pub(super) fn parse_export_config(global: Config, args: Vec<String>) -> CliResul
     let auth = match &auth_config {
         Some(path) => {
             let config = r9p_auth::ServerConfig::read(path)?;
-            AuthBoundary::p9any_noise_ik(config.domain())?
+            AuthBoundary::p9any_noise_xx(config.domain())?
         }
         None => AuthBoundary::none(),
     };

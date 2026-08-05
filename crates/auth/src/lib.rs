@@ -23,12 +23,10 @@ pub use peercred::{
 };
 pub use stream::SecureStream;
 
-pub const AUTH_PROTOCOL: &str = r9p::export_descriptor::P9ANY_NOISE_IK;
 pub const AUTH_PROTOCOL_XX: &str = r9p::export_descriptor::P9ANY_NOISE_XX;
 pub const CONFIG_FORMAT: &str = "r9p-session-auth.v1";
 pub const SESSION_AUTH_SERVER_CONFIG_ENV: &str = "R9P_SESSION_AUTH_SERVER_CONFIG";
 
-pub(crate) const NOISE_PATTERN: &str = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
 /// XX transmits both statics inside the handshake, each encrypted, so neither
 /// side needs the other's key beforehand and neither leaks it to an observer.
 pub(crate) const NOISE_PATTERN_XX: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";

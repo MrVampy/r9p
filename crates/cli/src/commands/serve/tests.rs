@@ -142,7 +142,7 @@ fn parses_non_loopback_export_bind_with_enforced_session_auth() {
                 .expect("socket address")
         )
     );
-    assert_eq!(config.auth.render(), "p9any:noise-ik@vault");
+    assert_eq!(config.auth.render(), "p9any:noise-xx@vault");
     fs::remove_dir_all(root).expect("remove auth test directory");
 }
 

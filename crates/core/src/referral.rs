@@ -122,7 +122,7 @@ mod tests {
             uname: b"codex".to_vec(),
             aname: b"/".to_vec(),
             exported_root: b"/".to_vec(),
-            authority_boundary: b"p9any:noise-ik@agents".to_vec(),
+            authority_boundary: b"p9any:noise-xx@agents".to_vec(),
             generation: 3,
             valid_for_ms: 10_000,
         }

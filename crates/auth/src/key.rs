@@ -1,4 +1,4 @@
-use crate::NOISE_PATTERN;
+use crate::NOISE_PATTERN_XX;
 use r9p::error::{Error, Result};
 use snow::{
     params::{DHChoice, NoiseParams},
@@ -119,7 +119,7 @@ impl fmt::Display for PublicKey {
 }
 
 pub fn generate_key_pair() -> Result<KeyPair> {
-    let params: NoiseParams = NOISE_PATTERN
+    let params: NoiseParams = NOISE_PATTERN_XX
         .parse()
         .map_err(|error| Error::from(format!("parse Noise pattern: {error}")))?;
     let pair = snow::Builder::new(params)

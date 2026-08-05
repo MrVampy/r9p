@@ -256,6 +256,8 @@ fn is_protocol_error(message: &str) -> bool {
 
 fn is_transport_message(message: &str) -> bool {
     (message.starts_with("connect ") && message.contains("(os error "))
+        || ((message.starts_with("read p9any ") || message.starts_with("write p9any "))
+            && message.contains("(os error "))
         || message.contains("9P frame")
         || message.contains("9P reader stopped")
         || message.contains("9P transport closed")
@@ -336,6 +338,19 @@ mod tests {
         ));
         assert_eq!(error.errno, libc::ECONNREFUSED);
         assert!(error.message().contains("Connection refused"));
+    }
+
+    #[test]
+    fn p9any_io_failure_keeps_its_transport_errno() {
+        let error = client_error(P9Error::from(
+            "read p9any protocol offer: Connection reset by peer (os error 104)",
+        ));
+
+        assert_eq!(error.errno, libc::ECONNRESET);
+        assert!(error.is_transient_connection_failure());
+
+        let rejection = client_error(P9Error::from("p9any server rejected protocol selection"));
+        assert!(!rejection.is_transient_connection_failure());
     }
 
     #[test]

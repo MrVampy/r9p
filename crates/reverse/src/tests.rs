@@ -95,6 +95,7 @@ fn session_proxy_terminates_client_auth_behind_a_local_endpoint(
         bind: ProxyEndpoint::tcp(address(Ipv4Addr::LOCALHOST, 0)),
         upstream: upstream_endpoint,
         auth: certified_client(&root, "/srv/example/runtime/m7", &runtime_key)?,
+        expected_responder: "r9p-session-proxy-test".to_string(),
         principal: "/srv/example/runtime/m7".to_string(),
         max_sessions: 2,
         connect_timeout: Duration::from_secs(2),
@@ -135,6 +136,7 @@ fn reverse_export_serves_a_writable_file_tree() -> Result<(), Box<dyn std::error
     let export = FilesystemExport::start(FilesystemExportConfig {
         broker_endpoint: broker.reverse_endpoint(),
         auth: certified_client(&root, "laptop", &client)?,
+        expected_responder: "r9p-reverse-test".to_string(),
         principal: "laptop".to_string(),
         root: root.path.clone(),
         writable: true,
@@ -203,6 +205,7 @@ fn reverse_export_serves_an_application_owned_tree() -> Result<(), Box<dyn std::
         ReverseExportConfig {
             broker_endpoint: broker.reverse_endpoint(),
             auth: certified_client(&root, "participant", &client)?,
+            expected_responder: "r9p-reverse-tree-test".to_string(),
             principal: "participant".to_string(),
             connection_pool: 2,
             connect_timeout: Duration::from_secs(2),
@@ -254,6 +257,7 @@ fn reverse_export_holds_idle_pool_and_authenticates_the_end_service_peer(
         ReverseExportConfig {
             broker_endpoint: broker.reverse_endpoint(),
             auth: certified_client(&root, "example-exporter", &exporter_key)?,
+            expected_responder: "r9p-reverse-placement-test".to_string(),
             principal: "example-exporter".to_string(),
             connection_pool: 2,
             connect_timeout: Duration::from_secs(2),
@@ -324,6 +328,7 @@ fn reverse_broker_exposes_a_unix_proxy_endpoint() -> Result<(), Box<dyn std::err
         ReverseExportConfig {
             broker_endpoint: broker.reverse_endpoint(),
             auth: certified_client(&root, "participant", &client)?,
+            expected_responder: "r9p-reverse-unix-test".to_string(),
             principal: "participant".to_string(),
             connection_pool: 2,
             connect_timeout: Duration::from_secs(2),
@@ -409,6 +414,7 @@ fn export_config(
     FilesystemExportConfig {
         broker_endpoint,
         auth,
+        expected_responder: "r9p-reverse-stale-test".to_string(),
         principal: "laptop".to_string(),
         root,
         writable: true,

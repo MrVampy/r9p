@@ -305,6 +305,10 @@ fn resolve_path(config_path: &Path, value: String) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cert::{generate_root_key_pair, CertificateBody};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static CONFIG_TEST_SERIAL: AtomicU64 = AtomicU64::new(0);
 
     fn test_root(label: &str) -> Result<PathBuf> {
         let serial = CONFIG_TEST_SERIAL.fetch_add(1, Ordering::Relaxed);

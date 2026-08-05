@@ -429,6 +429,12 @@ fn noise_error(context: &'static str) -> impl FnOnce(snow::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cert::{generate_root_key_pair, CertificateBody, RootKeyPair};
+    use crate::{generate_key_pair, KeyPair};
+    use std::{net::TcpListener, thread};
+
+    const VALID_FROM: crate::UnixSeconds = 1_000;
+    const VALID_UNTIL: crate::UnixSeconds = 4_000_000_000;
     use crate::generate_key_pair;
     use std::{net::TcpListener, thread};
 

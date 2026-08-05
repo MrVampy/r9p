@@ -239,11 +239,22 @@ fn validate_config(config: &BrokerConfig) -> Result<()> {
 #[cfg(test)]
 mod validation_tests {
     use super::*;
-    use r9p_auth::generate_key_pair;
+    use r9p_auth::{generate_key_pair, generate_root_key_pair, Certificate, CertificateBody};
 
     fn config(proxy_bind: ProxyEndpoint, proxy_exposure: ProxyExposure) -> Result<BrokerConfig> {
+        let root = generate_root_key_pair()?;
         let broker = generate_key_pair()?;
-        let exporter = generate_key_pair()?;
+        let certificate = Certificate::sign(
+            &root.private,
+            CertificateBody::new(
+                "reverse-proxy-exposure-test",
+                broker.public,
+                Vec::<String>::new(),
+                1,
+                4_000_000_000,
+                root.public,
+            )?,
+        )?;
         Ok(BrokerConfig {
             reverse_bind: SocketAddr::from(([0, 0, 0, 0], 9640)),
             proxy_bind,
@@ -251,8 +262,9 @@ mod validation_tests {
             auth: ServerConfig::new(
                 "reverse-proxy-exposure-test",
                 broker.private,
-                [(exporter.public, "exporter".to_string())],
-            )?,
+                [root.public],
+            )?
+            .with_certificate(certificate)?,
             peer_principal: "exporter".to_string(),
             max_waiting_streams: 2,
             authentication_timeout: Duration::from_secs(2),

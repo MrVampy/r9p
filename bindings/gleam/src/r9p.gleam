@@ -24,12 +24,8 @@ pub type Target {
     aname: String,
     msize: Int,
     auth_config: Option(String),
-    authorities: List(AuthorityBinding),
+    expected_responder: Option(String),
   )
-}
-
-pub type AuthorityBinding {
-  AuthorityBinding(boundary: String, config_path: String)
 }
 
 pub type VersionInfo {
@@ -59,7 +55,7 @@ pub fn target(bind: String, uname: String, aname: String) -> Target {
     aname:,
     msize: default_msize,
     auth_config: None,
-    authorities: [],
+    expected_responder: None,
   )
 }
 
@@ -69,22 +65,15 @@ pub fn target_with_msize(
   aname: String,
   msize: Int,
 ) -> Target {
-  Target(bind:, uname:, aname:, msize:, auth_config: None, authorities: [])
+  Target(bind:, uname:, aname:, msize:, auth_config: None, expected_responder: None)
 }
 
 pub fn with_auth_config(target: Target, path: String) -> Target {
   Target(..target, auth_config: Some(path))
 }
 
-pub fn bind_authority(
-  target: Target,
-  boundary: String,
-  config_path: String,
-) -> Target {
-  Target(..target, authorities: [
-    AuthorityBinding(boundary:, config_path:),
-    ..target.authorities
-  ])
+pub fn expecting_responder(target: Target, responder: String) -> Target {
+  Target(..target, expected_responder: Some(responder))
 }
 
 pub fn version(adapter: Adapter, target: Target) -> Result(VersionInfo, String) {
@@ -319,20 +308,14 @@ fn run(
 }
 
 fn target_fields(target: Target) -> List(String) {
-  let authority_fields =
-    target.authorities
-    |> list.reverse
-    |> list.flat_map(fn(binding) {
-      [text(binding.boundary), text(binding.config_path)]
-    })
-  list.append([
+  [
     text(target.bind),
     text(target.uname),
     text(target.aname),
     int.to_string(target.msize),
     optional_text(target.auth_config),
-    int.to_string(list.length(target.authorities)),
-  ], authority_fields)
+    optional_text(target.expected_responder),
+  ]
 }
 
 fn optional_text(value: Option(String)) -> String {

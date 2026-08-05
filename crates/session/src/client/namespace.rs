@@ -604,6 +604,14 @@ impl Client {
             ));
         }
         let authority = text_field("authority_boundary", &route.referral.authority_boundary)?;
+        // The referral names the service; under XX the responder must prove that
+        // name with its certificate. That is what makes a referral safe to take
+        // from an addressing service: coordinator can point a session somewhere,
+        // it cannot change who answers.
+        let boundary = r9p::export_descriptor::AuthBoundary::parse(&authority).ok();
+        let expected_responder = boundary
+            .as_ref()
+            .and_then(r9p::export_descriptor::AuthBoundary::p9any_domain);
         let config = ConnectionConfig {
             address: text_field("endpoint", &route.referral.endpoint)?,
             uname: text_field("uname", &route.referral.uname)?,
@@ -613,10 +621,11 @@ impl Client {
             authorities: AuthorityBindings::new(),
         };
         let connect_timeout = route_connect_timeout(timeout, self.state.connect_timeout);
-        let connected = DirectClient::connect_with_tracker_timeout(
+        let connected = DirectClient::connect_expecting(
             &config,
             self.state.tracker.clone(),
             connect_timeout,
+            expected_responder,
         )?;
         self.state
             .connected_routes

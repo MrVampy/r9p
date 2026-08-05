@@ -461,6 +461,7 @@ mod tests {
 
     fn global() -> Config {
         Config {
+            auth_domain: None,
             address: None,
             auth_config: None,
             authorities: session::AuthorityBindings::new(),

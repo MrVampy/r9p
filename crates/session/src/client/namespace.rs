@@ -604,22 +604,12 @@ impl Client {
             ));
         }
         let authority = text_field("authority_boundary", &route.referral.authority_boundary)?;
-        // The referral names the service; under XX the responder must prove that
-        // name with its certificate. That is what makes a referral safe to take
-        // from an addressing service: coordinator can point a session somewhere,
-        // it cannot change who answers.
-        let boundary = r9p::export_descriptor::AuthBoundary::parse(&authority).ok();
-        let auth_domain = boundary
-            .as_ref()
-            .and_then(r9p::export_descriptor::AuthBoundary::p9any_domain)
-            .map(str::to_string);
         let config = ConnectionConfig {
             address: text_field("endpoint", &route.referral.endpoint)?,
             uname: text_field("uname", &route.referral.uname)?,
             aname: text_field("aname", &route.referral.aname)?,
             msize: self.state.service_msize,
             auth_config: self.state.authorities.session_auth_config(&authority)?,
-            auth_domain,
             authorities: AuthorityBindings::new(),
         };
         let connect_timeout = route_connect_timeout(timeout, self.state.connect_timeout);

@@ -184,7 +184,6 @@ impl PeerClientServer {
 fn connect_client(key: &TargetKey) -> SessionResult<NamespaceClient> {
     NamespaceClient::connect_with_timeout(
         &ConnectionConfig {
-            auth_domain: None,
             address: key.bind.clone(),
             uname: key.uname.clone(),
             aname: key.aname.clone(),

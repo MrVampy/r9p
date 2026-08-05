@@ -28,7 +28,6 @@ pub(crate) fn connect_path(target: &Target) -> CliResult<(NamespaceClient, Strin
     };
     let client = NamespaceClient::connect_with_timeout(
         &ConnectionConfig {
-            auth_domain: target.config.auth_domain.clone(),
             address,
             uname: target.config.uname.clone(),
             aname: target.config.aname.clone(),

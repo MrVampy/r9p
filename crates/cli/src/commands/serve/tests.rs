@@ -11,6 +11,7 @@ static NEXT_AUTH_CONFIG: AtomicU64 = AtomicU64::new(1);
 
 fn global() -> Config {
     Config {
+        auth_domain: None,
         address: None,
         auth_config: None,
         authorities: session::AuthorityBindings::new(),

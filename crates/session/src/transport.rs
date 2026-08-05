@@ -85,6 +85,18 @@ pub(crate) fn connect_stream(
     config: &ConnectionConfig,
     connect_timeout: Duration,
 ) -> Result<ClientStream> {
+    connect_stream_expecting(config, connect_timeout, None)
+}
+
+/// `expected_responder` is the service name a referral said would answer. It is
+/// a private seam on purpose: out-of-tree consumers construct `ConnectionConfig`
+/// directly, so a new required field there breaks every one of them. Root
+/// connects pass `None` and fall back to the name in the auth config.
+pub(crate) fn connect_stream_expecting(
+    config: &ConnectionConfig,
+    connect_timeout: Duration,
+    expected_responder: Option<&str>,
+) -> Result<ClientStream> {
     match parse_connection_target(&config.address)? {
         ConnectTarget::Tcp(socket) => {
             let stream = blocking::connect_tcp_stream(&socket).map_err(client_error)?;
@@ -99,7 +111,14 @@ pub(crate) fn connect_stream(
                     } else {
                         connect_timeout
                     };
-                    match (&config.auth_domain, auth.domain()) {
+                    // The domain comes from the client config. A certified
+                    // config that names no service is dialled through
+                    // authenticate_client_to by the caller that knows which
+                    // service it wants; it is deliberately not a field on the
+                    // public ConnectionConfig, because out-of-tree consumers
+                    // construct that struct and a new required field breaks
+                    // every one of them.
+                    match (expected_responder, auth.domain()) {
                         (Some(domain), _) => authenticate_client_to(
                             stream,
                             &auth,
@@ -111,7 +130,7 @@ pub(crate) fn connect_stream(
                             authenticate_client(stream, &auth, &config.uname, handshake_timeout)
                         }
                         (None, None) => Err(r9p::error::Error::from(
-                            "this auth config names no service; supply an auth domain",
+                            "this auth config names no service and no referral supplied one",
                         )),
                     }
                     .map(ClientStream::Secure)

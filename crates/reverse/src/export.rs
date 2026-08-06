@@ -1,5 +1,6 @@
 use std::{
-    net::{SocketAddr, TcpStream},
+    io,
+    net::{TcpStream, ToSocketAddrs},
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -12,6 +13,7 @@ use std::{
 use fs::{LocalTree, LocalTreeConfig};
 use r9p::{
     codec::Variant,
+    endpoint::TcpEndpoint,
     error::{Error, Result},
     server::{
         serve_connection, serve_file_tree_connection, ConnectionHandler, FileTree, ServerConfig,
@@ -26,7 +28,7 @@ use crate::{configure_transport_socket, receive_session_claim};
 
 #[derive(Clone)]
 pub struct ReverseExportConfig {
-    pub broker_endpoint: SocketAddr,
+    pub broker_endpoint: TcpEndpoint,
     pub auth: ClientConfig,
     pub expected_responder: String,
     pub principal: String,
@@ -40,7 +42,7 @@ pub struct ReverseExportConfig {
 
 #[derive(Clone)]
 pub struct FilesystemExportConfig {
-    pub broker_endpoint: SocketAddr,
+    pub broker_endpoint: TcpEndpoint,
     pub auth: ClientConfig,
     pub expected_responder: String,
     pub principal: String,
@@ -262,7 +264,9 @@ impl Drop for ReverseExport {
 }
 
 fn validate_config(config: &ReverseExportConfig) -> Result<()> {
-    if config.principal.is_empty()
+    if config.broker_endpoint.port() == 0
+        || config.broker_endpoint.is_unspecified_ip()
+        || config.principal.is_empty()
         || config.principal.len() > 255
         || config.principal.bytes().any(|byte| byte.is_ascii_control())
         || config.connection_pool == 0
@@ -293,20 +297,20 @@ fn export_loop<F>(
 {
     let mut failed_attempts = 0_u32;
     while !state.shutdown.load(Ordering::Acquire) {
-        let stream =
-            match TcpStream::connect_timeout(&config.broker_endpoint, config.connect_timeout)
-                .and_then(|stream| {
-                    configure_transport_socket(&stream)?;
-                    Ok(stream)
-                }) {
-                Ok(stream) => stream,
-                Err(_) => {
-                    state.connection_failures.fetch_add(1, Ordering::AcqRel);
-                    state.wait_before_retry(retry_delay(&config, worker_index, failed_attempts));
-                    failed_attempts = failed_attempts.saturating_add(1);
-                    continue;
-                }
-            };
+        let stream = match connect_broker(&config.broker_endpoint, config.connect_timeout).and_then(
+            |stream| {
+                configure_transport_socket(&stream)?;
+                Ok(stream)
+            },
+        ) {
+            Ok(stream) => stream,
+            Err(_) => {
+                state.connection_failures.fetch_add(1, Ordering::AcqRel);
+                state.wait_before_retry(retry_delay(&config, worker_index, failed_attempts));
+                failed_attempts = failed_attempts.saturating_add(1);
+                continue;
+            }
+        };
         let mut stream = match authenticate_client_to(
             stream,
             &config.auth,
@@ -349,6 +353,27 @@ fn export_loop<F>(
         }
         state.stream_disconnected();
         state.completed_sessions.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+fn connect_broker(endpoint: &TcpEndpoint, timeout: Duration) -> io::Result<TcpStream> {
+    let addresses = (endpoint.host(), endpoint.port()).to_socket_addrs()?;
+    let mut last_error = None;
+    for address in addresses {
+        match TcpStream::connect_timeout(&address, timeout) {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = Some((address, error)),
+        }
+    }
+    match last_error {
+        Some((address, error)) => Err(io::Error::new(
+            error.kind(),
+            format!("connect {endpoint} via {address}: {error}"),
+        )),
+        None => Err(io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            format!("{endpoint} resolved no addresses"),
+        )),
     }
 }
 

@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, net::SocketAddr};
 
-use crate::{Error, Result};
+use crate::{endpoint::TcpEndpoint, Error, Result};
 
 pub const EXPORT_FORMAT_V1: &str = "r9p-export.v1";
 /// Mutual-certificate variant. The responder transmits its static key during
@@ -519,6 +519,9 @@ fn validate_transport_auth(
     auth: &AuthBoundary,
 ) -> Result<()> {
     auth.validate()?;
+    if transport_class == TransportClass::Tcp {
+        TcpEndpoint::parse(endpoint_bind)?;
+    }
     match (transport_class, auth.class) {
         (TransportClass::Tcp, AuthClass::None) if !tcp_endpoint_is_loopback(endpoint_bind) => Err(
             Error::from("descriptor auth=none is only admitted for loopback TCP"),

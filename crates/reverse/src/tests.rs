@@ -11,6 +11,7 @@ use std::{
 use r9p::{
     blocking::Client,
     codec::Variant,
+    endpoint::TcpEndpoint,
     error::EPERM,
     qid::Qid,
     server::{
@@ -134,7 +135,10 @@ fn reverse_export_serves_a_writable_file_tree() -> Result<(), Box<dyn std::error
     let root = TestRoot::new()?;
     fs::write(root.path.join("specimen.txt"), b"from laptop\n")?;
     let export = FilesystemExport::start(FilesystemExportConfig {
-        broker_endpoint: broker.reverse_endpoint(),
+        broker_endpoint: TcpEndpoint::parse(&format!(
+            "localhost:{}",
+            broker.reverse_endpoint().port()
+        ))?,
         auth: certified_client(&signing_root, "laptop", &client)?,
         expected_responder: "r9p-reverse-test".to_string(),
         principal: "laptop".to_string(),
@@ -203,7 +207,7 @@ fn reverse_export_serves_an_application_owned_tree() -> Result<(), Box<dyn std::
     })?;
     let export = ReverseExport::start_handler(
         ReverseExportConfig {
-            broker_endpoint: broker.reverse_endpoint(),
+            broker_endpoint: broker.reverse_endpoint().into(),
             auth: certified_client(&signing_root, "participant", &client)?,
             expected_responder: "r9p-reverse-tree-test".to_string(),
             principal: "participant".to_string(),
@@ -255,7 +259,7 @@ fn reverse_export_holds_idle_pool_and_authenticates_the_end_service_peer(
     })?;
     let export = ReverseExport::start_authenticated_handler(
         ReverseExportConfig {
-            broker_endpoint: broker.reverse_endpoint(),
+            broker_endpoint: broker.reverse_endpoint().into(),
             auth: certified_client(&signing_root, "example-exporter", &exporter_key)?,
             expected_responder: "r9p-reverse-placement-test".to_string(),
             principal: "example-exporter".to_string(),
@@ -326,7 +330,7 @@ fn reverse_broker_exposes_a_unix_proxy_endpoint() -> Result<(), Box<dyn std::err
     })?;
     let export = ReverseExport::start_handler(
         ReverseExportConfig {
-            broker_endpoint: broker.reverse_endpoint(),
+            broker_endpoint: broker.reverse_endpoint().into(),
             auth: certified_client(&signing_root, "participant", &client)?,
             expected_responder: "r9p-reverse-unix-test".to_string(),
             principal: "participant".to_string(),
@@ -412,7 +416,7 @@ fn export_config(
     connection_pool: usize,
 ) -> FilesystemExportConfig {
     FilesystemExportConfig {
-        broker_endpoint,
+        broker_endpoint: broker_endpoint.into(),
         auth,
         expected_responder: "r9p-reverse-stale-test".to_string(),
         principal: "laptop".to_string(),

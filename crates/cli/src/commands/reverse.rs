@@ -5,6 +5,7 @@ use std::{
     time::Duration,
 };
 
+use r9p::endpoint::TcpEndpoint;
 use r9p_auth::{ClientConfig, ServerConfig};
 use r9p_reverse::{
     BrokerConfig, FilesystemExport, FilesystemExportConfig, ProxyEndpoint, ProxyExposure,
@@ -95,7 +96,7 @@ struct ReverseBrokerCliConfig {
 
 #[derive(Debug, Eq, PartialEq)]
 struct ReverseExportCliConfig {
-    broker_endpoint: SocketAddr,
+    broker_endpoint: TcpEndpoint,
     auth_config: PathBuf,
     expected_responder: String,
     principal: String,
@@ -204,7 +205,10 @@ fn parse_export_config(global: Config, args: Vec<String>) -> CliResult<ReverseEx
     while index < args.len() {
         match args[index].as_str() {
             "--connect" => {
-                broker_endpoint = Some(parse_socket(value(&args, &mut index, "broker")?)?);
+                broker_endpoint = Some(
+                    TcpEndpoint::parse(value(&args, &mut index, "broker")?)
+                        .map_err(|error| cli_error(error.to_string()))?,
+                );
             }
             "--auth-config" => {
                 set_auth_config(&mut auth_config, value(&args, &mut index, "auth config")?)?;
@@ -541,7 +545,7 @@ mod tests {
             global(),
             [
                 "--connect",
-                "192.168.0.30:9640",
+                "m7.mesh:9640",
                 "--principal",
                 "laptop-workspace",
                 "--auth-config",
@@ -555,7 +559,7 @@ mod tests {
         .expect("export config");
         assert_eq!(
             parsed.broker_endpoint,
-            SocketAddr::from(([192, 168, 0, 30], 9640))
+            TcpEndpoint::parse("m7.mesh:9640").expect("DNS endpoint")
         );
         assert!(parsed.writable);
         assert_eq!(parsed.root, PathBuf::from("/home/test/workspace"));

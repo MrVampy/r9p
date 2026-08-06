@@ -114,6 +114,9 @@ This map defines the local sources agents should inspect before making source-sp
   - Source and live evidence that `qid.version` is modification state, not
     inode identity, and that remappers and FUSE generations must retain a
     stable identity across version changes.
+- `notes/source-reading/2026-08-06-native-dns-endpoints.md`
+  - Source-backed boundary between concrete listener binds and DNS-preserving
+    dial or referral endpoints.
 - `crates/fs/src/`
   - Local filesystem-backed 9P server adapter used by `r9p serve` and
     `r9p export`; read-only by default with an explicit writable mode.

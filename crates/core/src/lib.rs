@@ -2,6 +2,7 @@ pub mod blocking;
 pub mod client;
 mod client_support;
 pub mod codec;
+pub mod endpoint;
 pub mod error;
 pub mod export_descriptor;
 pub mod fid;

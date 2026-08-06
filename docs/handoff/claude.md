@@ -178,15 +178,48 @@ Still open, both predicted here and now confirmed live:
   is the strongest case yet for group authorization: 19 names for one key is
   exactly authorization enumerating principals.
 
-Peer lines are still in place everywhere and are the fallback. Removing them is
-the last step, and `groups()` is still unused — `operators = [ ... ]` remain
-name lists.
+Peer lines have since been removed from the fleet's declared session-auth
+configs: `peer <hex> <name>` matches zero times across the host flake, and every
+server config carries `root` and a certificate. The last step of the rollout
+above is done, and the fallback is gone with it.
+
+That measurement covers Nix-declared configs only. The coordinator door named in
+the first bullet keeps its entry in live runtime state, which no grep over the
+flake can see.
+
+`groups()` is still unused. `operators = [ ... ]` remain name lists, and the
+services enforce against them directly — see
+`coordinator/docs/handoff/claude.md`, "Namespace admission shapes discovery",
+for where each service reads the principal and what it compares it to.
+
+### Two observations from the issued set (2026-08-06)
+
+Both from reading `r9p/certs/` in the host flake with `r9p cert print`, while
+preparing a certificate for a fifth principal.
+
+**One name, two keys.** `codex.interface.crt` and `codex.interface-m7.crt` both
+carry `name codex.interface`. The filename disambiguates; the certificate does
+not. This is the inverse of the 19-names-per-key problem recorded above, and it
+costs the same property from the other direction: audit and any name-based
+policy cannot tell the laptop from m7. Certificates made identity singular per
+key, not per name.
+
+**Lifetimes were not chosen.** As issued: `codex.interface` about a year,
+`mesh-wsl` about two, `coordinator` and `codex.interface-m7` to 2056. Thirty
+years is not a staggering strategy; `nebula/topology.nix` staggers node expiry
+deliberately and says why in comments, and the r9p set did not get that
+treatment. Given that revocation is open below, the thirty-year credentials are
+exactly where that gap is widest — a leaked key stays valid for the working life
+of the fleet.
 
 ## What it does not close
 
 - **Capability policy.** Groups do not express "wsl may open terminal sessions
   but not agent runtimes". Minting a group per capability recreates the scatter
-  somewhere else.
+  somewhere else. Coordinator's namespace admission does not close this either:
+  a referral carries addressing and a validity window but no bearer material, so
+  it bounds what a caller can find rather than what a service will accept. See
+  `coordinator/docs/handoff/claude.md`, "Namespace admission shapes discovery".
 - **Revocation.** CAs are weak at it; short lifetimes are the practical answer
   and those need an online issuer. Until then, revoking early means re-signing
   downstream.

@@ -178,9 +178,19 @@ Still open, both predicted here and now confirmed live:
   is the strongest case yet for group authorization: 19 names for one key is
   exactly authorization enumerating principals.
 
-Peer lines are still in place everywhere and are the fallback. Removing them is
-the last step, and `groups()` is still unused — `operators = [ ... ]` remain
-name lists.
+Peer lines have since been removed from the fleet's declared session-auth
+configs: `peer <hex> <name>` matches zero times across the host flake, and every
+server config carries `root` and a certificate. The last step of the rollout
+above is done, and the fallback is gone with it.
+
+That measurement covers Nix-declared configs only. The coordinator door named in
+the first bullet keeps its entry in live runtime state, which no grep over the
+flake can see.
+
+`groups()` is still unused. `operators = [ ... ]` remain name lists, and the
+services enforce against them directly — see
+`coordinator/docs/handoff/claude.md`, "Namespace admission shapes discovery",
+for where each service reads the principal and what it compares it to.
 
 ### Two observations from the issued set (2026-08-06)
 

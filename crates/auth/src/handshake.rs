@@ -90,6 +90,12 @@ impl PeerIdentity {
     pub const fn certified(&self) -> bool {
         self.certified
     }
+
+    #[cfg(test)]
+    pub(crate) fn into_certified(mut self) -> Self {
+        self.certified = true;
+        self
+    }
 }
 
 /// Authenticates to `domain`, which is also the responder name the certificate

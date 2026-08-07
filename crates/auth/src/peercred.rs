@@ -3,6 +3,13 @@ use r9p::error::{Error, Result, EPERM};
 use std::{os::unix::net::UnixStream, sync::Arc};
 
 pub const NOISE_SUBJECT_PREFIX: &str = "noise-static-key:";
+/// A certificate binds the name to the key in signed material, so a relying
+/// party can admit the name it learned at the handshake instead of keeping a
+/// key list of its own. That list is the thing certificates exist to remove:
+/// it makes every rotation a policy edit, and it lets two hosts disagree about
+/// who a key is. Emitted alongside the key subject so policy can move one
+/// entry at a time.
+pub const CERT_SUBJECT_PREFIX: &str = "r9p-cert:";
 pub const UNIX_PEER_SUBJECT_PREFIX: &str = "unix-peer:uid:";
 pub const UNIX_SAME_USER_SUBJECT: &str = "unix-peer:same-user";
 
@@ -12,6 +19,7 @@ pub enum TransportIdentity {
     Authenticated {
         principal: Arc<str>,
         public_key: PublicKey,
+        certified: bool,
     },
     UnixPeer {
         uid: u32,
@@ -28,6 +36,7 @@ impl TransportIdentity {
         Self::Authenticated {
             principal: Arc::<str>::from(peer.principal()),
             public_key: peer.public_key(),
+            certified: peer.certified(),
         }
     }
 
@@ -68,6 +77,14 @@ impl TransportIdentity {
             Self::UnixPeer {
                 same_user: true, ..
             } => vec![self.subject_id(), UNIX_SAME_USER_SUBJECT.to_string()],
+            Self::Authenticated {
+                principal,
+                certified: true,
+                ..
+            } => vec![
+                self.subject_id(),
+                CERT_SUBJECT_PREFIX.to_string() + principal,
+            ],
             Self::Local | Self::Authenticated { .. } | Self::UnixPeer { .. } => {
                 vec![self.subject_id()]
             }
@@ -126,6 +143,21 @@ mod tests {
         );
         assert_eq!(identity.authenticated_uname(), Some("codex.interface"));
         assert!(!identity.transport_authorizes_uname("codex.interface"));
+        // An uncertified peer's name is only a claim, so it must not become a
+        // subject a policy could admit by name.
+        assert_eq!(
+            identity.subject_ids(),
+            vec![format!("{NOISE_SUBJECT_PREFIX}{}", key.public)]
+        );
+
+        let certified = TransportIdentity::authenticated(&peer.clone().into_certified());
+        assert_eq!(
+            certified.subject_ids(),
+            vec![
+                format!("{NOISE_SUBJECT_PREFIX}{}", key.public),
+                format!("{CERT_SUBJECT_PREFIX}codex.interface"),
+            ]
+        );
         Ok(())
     }
 

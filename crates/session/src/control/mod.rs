@@ -11,8 +11,8 @@ mod tree;
 
 use crate::feed::{start_feed_worker, FeedEventBus, FeedState, FeedWorkerConfig, FeedWorkerHandle};
 use crate::{
-    Client, ClientSession, ConnectionConfig, Error, NamespaceCache, Result, SessionAuthentication,
-    SessionEpoch, ORDWR, OREAD,
+    Client, ClientSession, ConnectionAuthentication, ConnectionConfig, Error, NamespaceCache,
+    Result, SessionEpoch, ORDWR, OREAD,
 };
 pub use request::{parse_request, ControlRequest};
 use std::{fs, path::Path, thread, time::Duration};
@@ -26,7 +26,7 @@ pub struct ControlConfig {
     pub uname: String,
     pub aname: String,
     pub msize: u32,
-    pub authentication: Option<SessionAuthentication>,
+    pub authentication: ConnectionAuthentication,
     pub connect_timeout: Duration,
     pub request_timeout: Duration,
     pub change_feed_path: Option<String>,
@@ -256,7 +256,7 @@ pub fn request_control_socket(
             uname: "session".to_string(),
             aname: String::new(),
             msize: 65_536,
-            authentication: None,
+            authentication: ConnectionAuthentication::Unauthenticated,
         },
         timeout,
     )?;

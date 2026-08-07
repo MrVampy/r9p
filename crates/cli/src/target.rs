@@ -25,12 +25,12 @@ pub(crate) struct Target {
 
 pub(crate) fn client_authentication(
     config: &Config,
-) -> CliResult<Option<session::SessionAuthentication>> {
+) -> CliResult<session::ConnectionAuthentication> {
     let Some(path) = config.auth_config.clone() else {
         if config.auth_domain.is_some() {
             return Err(cli_error("--auth-domain requires --auth-config"));
         }
-        return Ok(None);
+        return Ok(session::ConnectionAuthentication::Unauthenticated);
     };
     let credential =
         session::ClientCredential::new(path).map_err(|error| cli_error(error.to_string()))?;
@@ -41,7 +41,7 @@ pub(crate) fn client_authentication(
         ),
         None => session::SessionAuthentication::contained_root(credential),
     };
-    Ok(Some(authentication))
+    Ok(session::ConnectionAuthentication::Session(authentication))
 }
 
 pub(crate) fn connection_target(config: Config, args: Vec<String>) -> CliResult<Target> {

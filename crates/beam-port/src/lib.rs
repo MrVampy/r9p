@@ -11,8 +11,8 @@ use r9p::{
     stat::Stat,
 };
 use session::{
-    Client as NamespaceClient, ClientCredential, ConnectionConfig, Error as SessionError,
-    ResponderName, Result as SessionResult, SessionAuthentication,
+    Client as NamespaceClient, ClientCredential, ConnectionAuthentication, ConnectionConfig,
+    Error as SessionError, ResponderName, Result as SessionResult, SessionAuthentication,
 };
 use std::{collections::HashMap, time::Duration};
 
@@ -25,7 +25,7 @@ struct TargetKey {
     uname: String,
     aname: String,
     msize: u32,
-    authentication: Option<SessionAuthentication>,
+    authentication: ConnectionAuthentication,
 }
 
 const AUTH_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -202,7 +202,7 @@ fn connect_stream(key: &TargetKey) -> R9pResult<Box<dyn ReadWrite>> {
     {
         if key
             .authentication
-            .as_ref()
+            .session()
             .is_some_and(|authentication| authentication.responder().is_some())
         {
             return Err(R9pError::from(
@@ -215,7 +215,7 @@ fn connect_stream(key: &TargetKey) -> R9pResult<Box<dyn ReadWrite>> {
     }
 
     let stream = blocking::connect_tcp_stream(&key.bind)?;
-    match key.authentication.as_ref().and_then(|authentication| {
+    match key.authentication.session().and_then(|authentication| {
         authentication
             .responder()
             .map(|responder| (authentication.credential(), responder))
@@ -385,10 +385,10 @@ fn target_key(
         if !expected_responder.is_empty() {
             return Err("r9p_beam_port_responder_without_credential".to_string());
         }
-        None
+        ConnectionAuthentication::Unauthenticated
     } else {
         let credential = ClientCredential::new(auth_config).map_err(|error| error.to_string())?;
-        Some(if expected_responder.is_empty() {
+        ConnectionAuthentication::Session(if expected_responder.is_empty() {
             SessionAuthentication::contained_root(credential)
         } else {
             SessionAuthentication::authenticated_root(
@@ -520,7 +520,7 @@ mod tests {
                 uname: "codex".to_string(),
                 aname: "/".to_string(),
                 msize: 65_536,
-                authentication: None,
+                authentication: ConnectionAuthentication::Unauthenticated,
             }),
         );
     }
@@ -542,10 +542,12 @@ mod tests {
                 uname: "codex".to_string(),
                 aname: "/".to_string(),
                 msize: 65_536,
-                authentication: Some(SessionAuthentication::authenticated_root(
-                    ClientCredential::new("/etc/r9p/client.conf").expect("credential"),
-                    ResponderName::new("coordinator").expect("responder"),
-                )),
+                authentication: ConnectionAuthentication::Session(
+                    SessionAuthentication::authenticated_root(
+                        ClientCredential::new("/etc/r9p/client.conf").expect("credential"),
+                        ResponderName::new("coordinator").expect("responder"),
+                    )
+                ),
             }),
         );
     }
@@ -575,10 +577,12 @@ mod tests {
             uname: "codex".to_string(),
             aname: "/".to_string(),
             msize: 65_536,
-            authentication: Some(SessionAuthentication::authenticated_root(
-                ClientCredential::new("/etc/r9p/client.conf").expect("credential"),
-                ResponderName::new("coordinator").expect("responder"),
-            )),
+            authentication: ConnectionAuthentication::Session(
+                SessionAuthentication::authenticated_root(
+                    ClientCredential::new("/etc/r9p/client.conf").expect("credential"),
+                    ResponderName::new("coordinator").expect("responder"),
+                ),
+            ),
         };
 
         let error = match connect_stream(&key) {
@@ -602,7 +606,7 @@ mod tests {
             "",
         )
         .expect("contained root with a credential is legal");
-        let authentication = key.authentication.expect("credential retained");
+        let authentication = key.authentication.session().expect("credential retained");
         assert!(authentication.responder().is_none());
         assert_eq!(
             authentication.credential().config(),
@@ -656,7 +660,7 @@ mod tests {
             uname: "codex".to_string(),
             aname: "/".to_string(),
             msize: 65_536,
-            authentication: None,
+            authentication: ConnectionAuthentication::Unauthenticated,
         };
         let stream = connect_stream(&key);
         assert!(stream.is_ok());

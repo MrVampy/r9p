@@ -1,7 +1,7 @@
 use super::direct::DirectClient;
 use crate::{
-    authority::contained_authority, ConnectionConfig, Error, RequestTracker, ResponderName, Result,
-    SessionAuthentication, WriteThenReadError,
+    authority::contained_authority, ConnectionAuthentication, ConnectionConfig, Error,
+    RequestTracker, ResponderName, Result, SessionAuthentication, WriteThenReadError,
 };
 use r9p::{
     fid::Fid,
@@ -176,7 +176,7 @@ impl Client {
             state: Arc::new(State {
                 root,
                 tracker,
-                session_auth: config.authentication.clone(),
+                session_auth: config.authentication.session().cloned(),
                 service_msize: config.msize,
                 connect_timeout: timeout,
                 routes: Mutex::new(routes),
@@ -606,7 +606,7 @@ impl Client {
         }
         let authority = text_field("authority_boundary", &route.referral.authority_boundary)?;
         let authentication = if contained_authority(&authority) {
-            None
+            ConnectionAuthentication::Unauthenticated
         } else {
             let boundary = r9p::export_descriptor::AuthBoundary::parse(&authority).ok();
             let responder = boundary
@@ -624,7 +624,9 @@ impl Client {
                     format!("this session has no credential for authority boundary {authority}"),
                 )
             })?;
-            Some(session_auth.for_responder(ResponderName::new(responder)?))
+            ConnectionAuthentication::Session(
+                session_auth.for_responder(ResponderName::new(responder)?),
+            )
         };
         let config = ConnectionConfig {
             address: text_field("endpoint", &route.referral.endpoint)?,

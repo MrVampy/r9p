@@ -91,7 +91,7 @@ pub(crate) fn connect_stream(
             stream
                 .set_write_timeout(Some(TCP_WRITE_TIMEOUT))
                 .map_err(|error| Error::io("set TCP write timeout", error))?;
-            match config.authentication.as_ref() {
+            match config.authentication.session() {
                 Some(authentication) => {
                     let responder = authentication.responder().ok_or_else(|| {
                         Error::new(
@@ -130,7 +130,7 @@ pub(crate) fn connect_stream(
 }
 
 fn root_authentication(config: &ConnectionConfig) -> Option<(&ClientCredential, &ResponderName)> {
-    let authentication = config.authentication.as_ref()?;
+    let authentication = config.authentication.session()?;
     Some((authentication.credential(), authentication.responder()?))
 }
 
@@ -296,12 +296,17 @@ mod referral_binding_tests {
             uname: "op".to_string(),
             aname: "/".to_string(),
             msize: 65_536,
-            authentication: expected.map(|responder| {
-                crate::SessionAuthentication::authenticated_root(
-                    ClientCredential::new(conf.clone()).expect("credential"),
-                    ResponderName::new(responder).expect("responder"),
-                )
-            }),
+            authentication: expected.map_or(
+                crate::ConnectionAuthentication::Unauthenticated,
+                |responder| {
+                    crate::ConnectionAuthentication::Session(
+                        crate::SessionAuthentication::authenticated_root(
+                            ClientCredential::new(conf.clone()).expect("credential"),
+                            ResponderName::new(responder).expect("responder"),
+                        ),
+                    )
+                },
+            ),
         };
         connect_stream(&config, Duration::from_secs(2))
     }

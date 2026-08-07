@@ -77,13 +77,36 @@ impl SessionAuthentication {
     }
 }
 
+/// Not `Option<SessionAuthentication>`: declining authentication must be
+/// spelled, so it cannot be reached by leaving a field blank.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum ConnectionAuthentication {
+    Unauthenticated,
+    Session(SessionAuthentication),
+}
+
+impl ConnectionAuthentication {
+    pub const fn session(&self) -> Option<&SessionAuthentication> {
+        match self {
+            Self::Unauthenticated => None,
+            Self::Session(session) => Some(session),
+        }
+    }
+}
+
+impl From<SessionAuthentication> for ConnectionAuthentication {
+    fn from(session: SessionAuthentication) -> Self {
+        Self::Session(session)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectionConfig {
     pub address: String,
     pub uname: String,
     pub aname: String,
     pub msize: u32,
-    pub authentication: Option<SessionAuthentication>,
+    pub authentication: ConnectionAuthentication,
 }
 
 #[cfg(test)]

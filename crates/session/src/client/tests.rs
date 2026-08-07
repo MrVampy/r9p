@@ -1,5 +1,5 @@
 use super::Client;
-use crate::ConnectionConfig;
+use crate::{ConnectionAuthentication, ConnectionConfig};
 use r9p::{
     codec::{self, Variant},
     error::{Error as P9Error, Result as P9Result},
@@ -33,7 +33,7 @@ fn connection(address: String) -> ConnectionConfig {
         uname: "codex".to_string(),
         aname: "/".to_string(),
         msize: 8192,
-        authentication: None,
+        authentication: ConnectionAuthentication::Unauthenticated,
     }
 }
 

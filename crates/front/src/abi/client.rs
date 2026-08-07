@@ -368,7 +368,11 @@ fn connect_client(
         .client_authentication
         .lock()
         .map_err(|_| session::Error::new(libc::EIO, "front client authentication lock poisoned"))?
-        .clone();
+        .clone()
+        .map_or(
+            session::ConnectionAuthentication::Unauthenticated,
+            session::ConnectionAuthentication::Session,
+        );
     Client::connect_with_timeout(
         &ConnectionConfig {
             address: endpoint_bind.to_string(),

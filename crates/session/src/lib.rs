@@ -19,7 +19,8 @@ pub use cache::{
 pub use client::Client;
 pub use client_session::ClientSession;
 pub use connection_config::{
-    ClientCredential, ConnectionConfig, ResponderName, SessionAuthentication,
+    ClientCredential, ConnectionAuthentication, ConnectionConfig, ResponderName,
+    SessionAuthentication,
 };
 pub use epoch::SessionEpoch;
 pub use error::{errno_for_9p_error, p9_error, Error, Result, WriteThenReadError};

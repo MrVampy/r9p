@@ -297,3 +297,44 @@ factotum-shaped agent holding one principal's own keys, relaying handshake bytes
 rather than proxying traffic, exposed as files. Not an issuer, not networked,
 not a keystore, not coordinator. The test is what it deletes — `--auth-domain`,
 `--auth-config`, and key handling from all eight sites.
+
+### The agent would not have caught the bug that motivates it
+
+Worth separating, because the two problems have different prices.
+
+The *duplication* is closed: `SessionAuthentication`
+(`crates/session/src/connection_config.rs`) is one credential plus one
+responder, with validated newtypes, and `for_responder` derives the referral
+case instead of re-plumbing it. Its two constructors — `contained_root` and
+`authenticated_root` — also make its own `Option<ResponderName>` safe, because
+the choice has a name and cannot be reached by leaving a field blank.
+
+The *silent-disable* is not. `ConnectionConfig.authentication` is still
+`Option<SessionAuthentication>` on a public field of a struct built with
+literals, so a new call site can still write `authentication: None` to satisfy
+the compiler and get an unauthenticated session. An agent does not fix this: a
+call site must still name the identity and responder it expects, so a site that
+omits them fails the same way. The root cause is that declining authentication
+is an omission rather than a statement.
+
+The fix is to make the decision un-defaultable — named constructors over a
+private field, or an explicit `Unauthenticated` variant. Both legitimate
+unauthenticated cases, unix-socket local trust and tests, stay expressible;
+they just have to say so.
+
+It is a breaking change, and every consumer is now a **path** dependency rather
+than a pinned rev, so it is one coordinated cutover in which a stale consumer
+fails to build rather than skewing silently:
+
+| repo | `ConnectionConfig` references |
+|---|---|
+| r9p | 14 construction sites, 6 of them `authentication: None` |
+| agent | 11 |
+| r9wm | 6 |
+| terminal | 2 |
+
+Credentials and coordinator do not touch the type. Not applied here because it
+could not be compiled on the laptop; it wants the M7 lane.
+
+This is the cheap half of the note's complaint. The half only the agent buys is
+the private key never entering a program's address space.

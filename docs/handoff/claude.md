@@ -211,13 +211,6 @@ now `interface.tuxedo` and `interface.wsl`, host-scoped and each carrying
 than deleted because the shape recurs: certificates make identity singular per
 key, not per name, so nothing stops two keys claiming one name except noticing.
 
-The count is not bloat, incidentally. A service holds two identities: a flat
-`domain` name as server, and a `/srv/...` path name as the client that registers
-with coordinator. m7's terminal has no `/srv/terminal/m7` certificate because it
-registers over `unix!/run/coordinator-namespace/9p` and is authenticated by Unix
-credentials rather than a session. So the total tracks services and roles, not
-hosts.
-
 **Lifetimes were not chosen.** As issued: `codex.interface` about a year,
 `mesh-wsl` about two, `coordinator` and `codex.interface-m7` to 2056. Thirty
 years is not a staggering strategy; `nebula/topology.nix` staggers node expiry
@@ -225,6 +218,32 @@ deliberately and says why in comments, and the r9p set did not get that
 treatment. Given that revocation is open below, the thirty-year credentials are
 exactly where that gap is widest — a leaked key stays valid for the working life
 of the fleet.
+
+## A service holds two identities
+
+Worth stating plainly, because the certificate count invites the wrong
+conclusion. Forty-three certificates for four hosts looks like sprawl and is
+not: the total tracks services and the roles they play, and grows with services.
+
+A service that answers sessions has a flat `domain` name — `terminal-nucbox`,
+`agent-runtime-m7` — and that is what its `role server` config presents. The
+same service registering with coordinator is a *client*, and there it is its
+namespace path: `uname = "/srv/terminal/nucbox"`. Both certificates exist and
+both are used; `hosts/m7/session-auth.nix` presents `srv-agent-runtime-m7.crt`
+from the client config and `agent-runtime-m7.crt` from the server config, a few
+lines apart.
+
+The path form is also how everyone else refers to a service. `admitted_callers`
+and credentials' `materialService` both name `/srv/agent/runtime/m7`, never the
+flat form, because they are naming a namespace participant rather than a
+listener.
+
+The apparent gap confirms the rule. m7's terminal has no `/srv/terminal/m7`
+certificate while nucbox and tuxedo have theirs, because m7 registers over
+`unix!/run/coordinator-namespace/9p` — a local socket guarded by the
+`coordinator-namespace` group, authenticated by Unix credentials through
+`peercred`. It never dials over the network, so it never presents a client
+certificate. A missing certificate here means co-located, not forgotten.
 
 ## What it does not close
 

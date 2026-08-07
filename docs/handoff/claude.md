@@ -192,17 +192,31 @@ services enforce against them directly — see
 `coordinator/docs/handoff/claude.md`, "Namespace admission shapes discovery",
 for where each service reads the principal and what it compares it to.
 
+The cost of adopting groups is now measurable: of 43 issued certificates, 37
+carry no group at all. Only the four `mesh-*` carry `service` and the two
+`interface.*` carry `operator`. Since a credential that declares no group
+reports none, any rule written against groups denies all 37 — correct, and the
+reason the switch cannot be one step. It belongs on the renewal path.
+
 ### Two observations from the issued set (2026-08-06)
 
 Both from reading `r9p/certs/` in the host flake with `r9p cert print`, while
 preparing a certificate for a fifth principal.
 
-**One name, two keys.** `codex.interface.crt` and `codex.interface-m7.crt` both
-carry `name codex.interface`. The filename disambiguates; the certificate does
-not. This is the inverse of the 19-names-per-key problem recorded above, and it
-costs the same property from the other direction: audit and any name-based
-policy cannot tell the laptop from m7. Certificates made identity singular per
-key, not per name.
+**One name, two keys — since resolved.** `codex.interface.crt` and
+`codex.interface-m7.crt` both carried `name codex.interface`, so audit and any
+name-based policy could not tell the laptop from m7. The operator identities are
+now `interface.tuxedo` and `interface.wsl`, host-scoped and each carrying
+`group operator`, and `codex.interface` is gone from the issued set. Kept rather
+than deleted because the shape recurs: certificates make identity singular per
+key, not per name, so nothing stops two keys claiming one name except noticing.
+
+The count is not bloat, incidentally. A service holds two identities: a flat
+`domain` name as server, and a `/srv/...` path name as the client that registers
+with coordinator. m7's terminal has no `/srv/terminal/m7` certificate because it
+registers over `unix!/run/coordinator-namespace/9p` and is authenticated by Unix
+credentials rather than a session. So the total tracks services and roles, not
+hosts.
 
 **Lifetimes were not chosen.** As issued: `codex.interface` about a year,
 `mesh-wsl` about two, `coordinator` and `codex.interface-m7` to 2056. Thirty

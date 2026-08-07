@@ -85,8 +85,15 @@ fn front_auth_fixture() -> (PathBuf, PathBuf, ClientConfig) {
 fn certify(root: &RootKeyPair, key: PublicKey, name: &str) -> Certificate {
     Certificate::sign(
         &root.private,
-        CertificateBody::new(name, key, Vec::<String>::new(), 1, 4_000_000_000, root.public)
-            .expect("certificate body"),
+        CertificateBody::new(
+            name,
+            key,
+            Vec::<String>::new(),
+            1,
+            4_000_000_000,
+            root.public,
+        )
+        .expect("certificate body"),
     )
     .expect("sign certificate")
 }
@@ -130,7 +137,7 @@ fn abi_authenticated_serve_binds_transport_principal_to_attach_uname() {
         "codex",
         Duration::from_secs(2),
     )
-        .expect("authenticate front client");
+    .expect("authenticate front client");
     let mut client =
         Client::connect(stream, "codex", "/", 65_536).expect("attach authenticated front");
     let fid = client.walk_path("/status").expect("walk status");

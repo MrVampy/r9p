@@ -15,12 +15,7 @@ use crate::{
     SessionEpoch, ORDWR, OREAD,
 };
 pub use request::{parse_request, ControlRequest};
-use std::{
-    fs,
-    path::Path,
-    thread,
-    time::Duration,
-};
+use std::{fs, path::Path, thread, time::Duration};
 
 #[cfg(unix)]
 use std::os::unix::net::UnixListener;

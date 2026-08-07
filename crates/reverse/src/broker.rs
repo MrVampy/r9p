@@ -259,12 +259,8 @@ mod validation_tests {
             reverse_bind: SocketAddr::from(([0, 0, 0, 0], 9640)),
             proxy_bind,
             proxy_exposure,
-            auth: ServerConfig::new(
-                "reverse-proxy-exposure-test",
-                broker.private,
-                [root.public],
-            )?
-            .with_certificate(certificate)?,
+            auth: ServerConfig::new("reverse-proxy-exposure-test", broker.private, [root.public])?
+                .with_certificate(certificate)?,
             peer_principal: "exporter".to_string(),
             max_waiting_streams: 2,
             authentication_timeout: Duration::from_secs(2),

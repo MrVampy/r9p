@@ -2,9 +2,7 @@ use crate::{
     error::client_error, ClientCredential, ConnectionConfig, Error, ResponderName, Result,
 };
 use r9p::{blocking, multiplex::MultiplexTransport};
-use r9p_auth::{
-    authenticate_client_to, ClientConfig as AuthConfig, SecureStream,
-};
+use r9p_auth::{authenticate_client_to, ClientConfig as AuthConfig, SecureStream};
 use std::{
     env,
     io::{self, Read, Write},
@@ -261,8 +259,8 @@ mod referral_binding_tests {
 
         let server = ServerConfig::new(served_name, server_key.private, [root.public])
             .expect("server config")
-        .with_certificate(cert(&root, server_key.public, served_name))
-        .expect("server certificate");
+            .with_certificate(cert(&root, server_key.public, served_name))
+            .expect("server certificate");
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("listen");
         let address = listener.local_addr().expect("addr").to_string();

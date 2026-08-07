@@ -1,8 +1,6 @@
 use crate::{
-    error::client_error,
-    request::RequestTracker,
-    transport::connect_stream,
-    ConnectionConfig, Error, Result, WriteThenReadError,
+    error::client_error, request::RequestTracker, transport::connect_stream, ConnectionConfig,
+    Error, Result, WriteThenReadError,
 };
 use r9p::{
     codec::Variant,

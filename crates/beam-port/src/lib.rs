@@ -215,14 +215,11 @@ fn connect_stream(key: &TargetKey) -> R9pResult<Box<dyn ReadWrite>> {
     }
 
     let stream = blocking::connect_tcp_stream(&key.bind)?;
-    match key
-        .authentication
-        .as_ref()
-        .and_then(|authentication| {
-            authentication
-                .responder()
-                .map(|responder| (authentication.credential(), responder))
-        }) {
+    match key.authentication.as_ref().and_then(|authentication| {
+        authentication
+            .responder()
+            .map(|responder| (authentication.credential(), responder))
+    }) {
         Some((credential, responder)) => {
             let auth = r9p_auth::ClientConfig::read(credential.config())?;
             r9p_auth::authenticate_client_to(
@@ -802,8 +799,7 @@ mod tests {
                 .handle_line(&serve)
                 .expect("authenticated front serve"),
         );
-        let target =
-            target_fields_with_auth(&addr, &client_config.to_string_lossy(), "front-test");
+        let target = target_fields_with_auth(&addr, &client_config.to_string_lossy(), "front-test");
         let read = server
             .handle_line(&format!("read\t{target}\t{}", hex_text("status")))
             .expect("authenticated read");

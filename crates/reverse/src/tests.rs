@@ -565,11 +565,8 @@ fn certified_server(
     domain: &str,
     key: &r9p_auth::KeyPair,
 ) -> Result<ServerConfig, r9p::error::Error> {
-    ServerConfig::new(domain, key.private.clone(), [root.public])?.with_certificate(issue(
-        root,
-        key.public,
-        domain,
-    )?)
+    ServerConfig::new(domain, key.private.clone(), [root.public])?
+        .with_certificate(issue(root, key.public, domain)?)
 }
 
 fn certified_client(
@@ -591,6 +588,13 @@ fn issue(
 ) -> Result<Certificate, r9p::error::Error> {
     Certificate::sign(
         &root.private,
-        CertificateBody::new(name, key, Vec::<String>::new(), 1, 4_000_000_000, root.public)?,
+        CertificateBody::new(
+            name,
+            key,
+            Vec::<String>::new(),
+            1,
+            4_000_000_000,
+            root.public,
+        )?,
     )
 }

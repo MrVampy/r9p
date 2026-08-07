@@ -202,7 +202,6 @@ impl ServerConfig {
     pub fn private_key(&self) -> &PrivateKey {
         &self.private_key
     }
-
 }
 
 pub(crate) fn validate_principal(principal: &str) -> Result<()> {

@@ -1,8 +1,7 @@
 use crate::{
     cert::{now_unix, Certificate},
     config::validate_principal,
-    p9any,
-    ClientConfig, PublicKey, SecureStream, ServerConfig, CONFIG_FORMAT,
+    p9any, ClientConfig, PublicKey, SecureStream, ServerConfig, CONFIG_FORMAT,
 };
 use r9p::{
     error::{Error, Result},
@@ -455,7 +454,6 @@ mod tests {
         Certificate::sign(&root.private, body)
     }
 
-
     fn xx_pair(
         server_name: &str,
         client_name: &str,
@@ -464,14 +462,14 @@ mod tests {
         let server_key = generate_key_pair()?;
         let client_key = generate_key_pair()?;
         let server = ServerConfig::new(server_name, server_key.private, [root.public])?
-        .with_certificate(issue(
-            &root,
-            server_key.public,
-            server_name,
-            &[],
-            VALID_FROM,
-            VALID_UNTIL,
-        )?)?;
+            .with_certificate(issue(
+                &root,
+                server_key.public,
+                server_name,
+                &[],
+                VALID_FROM,
+                VALID_UNTIL,
+            )?)?;
         let client = ClientConfig::certified(
             client_key.private,
             issue(

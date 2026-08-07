@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use r9p::Fid;
 
-use crate::{Client, ClientSession, ConnectionAuthentication, Result};
+use crate::{Client, ClientSession, Result};
 
 /// One reopened 9P file whose offsets are application-level replay cursors.
 ///
@@ -215,7 +215,7 @@ mod tests {
                 uname: "test".to_string(),
                 aname: "/".to_string(),
                 msize: 8192,
-                authentication: ConnectionAuthentication::Unauthenticated,
+                authentication: crate::ConnectionAuthentication::Unauthenticated,
             },
             Duration::from_secs(1),
         )

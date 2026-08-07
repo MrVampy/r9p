@@ -338,9 +338,11 @@ Two things the cutover taught:
   compiled on the laptop", which was wrong — the first failure had simply
   been accepted.
 - **Terminal's suite needs `TERMINAL_TEST_SHELL`.** Seven store and
-  resurrection tests fail with `terminal_test_shell_not_declared` without it,
-  and its devshell does not set it the way agent's sets `AGENT_TEST_SHELL`.
-  Worth fixing in that flake, or the suite reads as broken.
+  resurrection tests failed with `terminal_test_shell_not_declared` in that
+  repository's devshell while passing in its checked build, which already
+  declared the variable in `nix/package.nix`. Fixed in terminal `a023c18`;
+  the tests are hermetic (`worker_systemctl` is `/bin/false`), so the
+  omission was an inconsistency rather than a deliberate gate.
 
 This was the cheap half of the note's complaint. The half only the agent buys
 is the private key never entering a program's address space.

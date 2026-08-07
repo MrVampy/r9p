@@ -111,7 +111,9 @@ impl FileTree for LocalTree {
                     inner.remember(&child.stat);
                     current = child;
                 }
-                Err(error) if error.message() == ENOENT.as_bytes() => break,
+                // A short walk carries no reason. 9P2000 admits one only after
+                // the first element; the first must answer Rerror.
+                Err(error) if error.message() == ENOENT.as_bytes() && !qids.is_empty() => break,
                 Err(error) => return Err(error),
             }
         }

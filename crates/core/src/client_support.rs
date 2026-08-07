@@ -31,6 +31,27 @@ pub(crate) fn unexpected(expected: &str, got: impl std::fmt::Debug) -> Error {
     Error::from(format!("expected {expected}, got {got:?}"))
 }
 
+/// A short Rwalk carries no reason, so "partial walk" alone cannot say whether
+/// the element is absent or withheld. 9P2000 does require Rerror when the
+/// *first* element fails, so walking the stopping element on its own from the
+/// last good one asks the same question in a form that must be answered.
+pub(crate) fn partial_walk(names: &[Vec<u8>], walked: usize, reason: Option<Error>) -> Error {
+    let stopped = names
+        .get(walked)
+        .map(|name| String::from_utf8_lossy(name).into_owned())
+        .unwrap_or_else(|| "?".to_string());
+    let position = walked.saturating_add(1);
+    let total = names.len();
+    match reason {
+        Some(reason) => Error::from(format!(
+            "partial walk: stopped at {stopped:?} ({position} of {total}): {reason}"
+        )),
+        None => Error::from(format!(
+            "partial walk: stopped at {stopped:?} ({position} of {total}), and walking it alone did not say why"
+        )),
+    }
+}
+
 pub(crate) fn checked_read_data(data: Vec<u8>, requested: u32) -> Result<Vec<u8>> {
     let actual = u32::try_from(data.len()).map_err(|_| Error::from("read count overflow"))?;
     if actual > requested {

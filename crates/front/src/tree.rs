@@ -156,6 +156,9 @@ impl FileTree for FrontTree {
                     qids.push(state.qid_for(id)?);
                     current = id;
                 }
+                // A short walk carries no reason. 9P2000 admits one only after
+                // the first element; the first must answer Rerror.
+                None if qids.is_empty() => return Err(Error::from_static(ENOENT)),
                 None => break,
             }
         }

@@ -2,7 +2,7 @@ use crate::{
     client::{Client as ProtocolClient, ClientResponse, Completion, Op},
     client_support::{
         checked_advance_offset, checked_read_data, checked_write_count, io_error, op_fid,
-        protocol_error, unexpected, write_in_chunks,
+        partial_walk, protocol_error, unexpected, write_in_chunks,
     },
     codec,
     error::ENOTDIR,
@@ -212,22 +212,53 @@ impl<S: Read + Write> Client<S> {
     }
 
     pub fn walk(&mut self, fid: Fid, names: &[Vec<u8>]) -> Result<Fid> {
+        match self.walk_short(fid, names)? {
+            Ok(newfid) => Ok(newfid),
+            Err(walked) => Err(partial_walk(
+                names,
+                walked,
+                self.walk_refusal(fid, names, walked),
+            )),
+        }
+    }
+
+    /// `Err(walked)` reports how many elements the server did accept.
+    fn walk_short(
+        &mut self,
+        fid: Fid,
+        names: &[Vec<u8>],
+    ) -> Result<std::result::Result<Fid, usize>> {
         let op = self
             .protocol
             .walk(fid, names.to_vec())
             .map_err(protocol_error)?;
         let newfid = op_fid(&op)?;
         match self.call_op(op)? {
-            Completion::Walk { qids } if qids.len() == names.len() => Ok(newfid),
-            Completion::Walk { .. } => {
+            Completion::Walk { qids } if qids.len() == names.len() => Ok(Ok(newfid)),
+            Completion::Walk { qids } => {
                 let _ = self.clunk(newfid);
-                Err(Error::from("partial walk"))
+                Ok(Err(qids.len()))
             }
             other => {
                 let _ = self.clunk(newfid);
                 Err(unexpected("Rwalk", other))
             }
         }
+    }
+
+    fn walk_refusal(&mut self, fid: Fid, names: &[Vec<u8>], walked: usize) -> Option<Error> {
+        let stopped = names.get(walked)?.clone();
+        let prefix = self.walk_short(fid, &names[..walked]).ok()?.ok()?;
+        let refusal = match self.walk_short(prefix, &[stopped]) {
+            Ok(Ok(reached)) => {
+                let _ = self.clunk(reached);
+                None
+            }
+            Ok(Err(_)) => None,
+            Err(error) => Some(error),
+        };
+        let _ = self.clunk(prefix);
+        refusal
     }
 
     pub fn open(&mut self, fid: Fid, mode: u8) -> Result<Qid> {

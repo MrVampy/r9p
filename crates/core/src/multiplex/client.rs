@@ -3,7 +3,7 @@ use crate::{
     client::{Client as ProtocolClient, ClientResponse, Completion, Op},
     client_support::{
         checked_advance_offset, checked_read_data, checked_write_count, io_error, op_fid,
-        protocol_error, read_delimited_with, unexpected, write_in_chunks,
+        partial_walk, protocol_error, read_delimited_with, unexpected, write_in_chunks,
     },
     codec,
     error::{Error, Result},
@@ -393,39 +393,84 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
     }
 
     pub fn walk(&self, fid: Fid, names: &[Vec<u8>]) -> Result<Fid> {
+        match self.walk_short(fid, names, None)? {
+            Ok(newfid) => Ok(newfid),
+            Err(walked) => Err(partial_walk(
+                names,
+                walked,
+                self.walk_refusal(fid, names, walked, None),
+            )),
+        }
+    }
+
+    pub fn walk_timeout(&self, fid: Fid, names: &[Vec<u8>], timeout: Duration) -> Result<Fid> {
+        match self.walk_short(fid, names, Some(timeout))? {
+            Ok(newfid) => Ok(newfid),
+            Err(walked) => Err(partial_walk(
+                names,
+                walked,
+                self.walk_refusal(fid, names, walked, Some(timeout)),
+            )),
+        }
+    }
+
+    /// `Err(walked)` reports how many elements the server did accept.
+    fn walk_short(
+        &self,
+        fid: Fid,
+        names: &[Vec<u8>],
+        timeout: Option<Duration>,
+    ) -> Result<std::result::Result<Fid, usize>> {
         let op = {
             let mut protocol = lock(&self.inner.protocol, "lock 9P protocol client")?;
             protocol.walk(fid, names.to_vec()).map_err(protocol_error)?
         };
         let newfid = op_fid(&op)?;
-        match self.call_op(op)? {
-            Completion::Walk { qids } if qids.len() == names.len() => Ok(newfid),
-            Completion::Walk { .. } => {
-                let _ = self.clunk(newfid);
-                Err(Error::from("partial walk"))
+        let completion = match timeout {
+            Some(timeout) => self.call_op_timeout(op, timeout)?,
+            None => self.call_op(op)?,
+        };
+        match completion {
+            Completion::Walk { qids } if qids.len() == names.len() => Ok(Ok(newfid)),
+            Completion::Walk { qids } => {
+                self.release(newfid, timeout);
+                Ok(Err(qids.len()))
             }
             other => {
-                let _ = self.clunk(newfid);
+                self.release(newfid, timeout);
                 Err(unexpected("Rwalk", other))
             }
         }
     }
 
-    pub fn walk_timeout(&self, fid: Fid, names: &[Vec<u8>], timeout: Duration) -> Result<Fid> {
-        let op = {
-            let mut protocol = lock(&self.inner.protocol, "lock 9P protocol client")?;
-            protocol.walk(fid, names.to_vec()).map_err(protocol_error)?
-        };
-        let newfid = op_fid(&op)?;
-        match self.call_op_timeout(op, timeout)? {
-            Completion::Walk { qids } if qids.len() == names.len() => Ok(newfid),
-            Completion::Walk { .. } => {
-                let _ = self.clunk_timeout(newfid, timeout);
-                Err(Error::from("partial walk"))
+    fn walk_refusal(
+        &self,
+        fid: Fid,
+        names: &[Vec<u8>],
+        walked: usize,
+        timeout: Option<Duration>,
+    ) -> Option<Error> {
+        let stopped = names.get(walked)?.clone();
+        let prefix = self.walk_short(fid, &names[..walked], timeout).ok()?.ok()?;
+        let refusal = match self.walk_short(prefix, &[stopped], timeout) {
+            Ok(Ok(reached)) => {
+                self.release(reached, timeout);
+                None
             }
-            other => {
-                let _ = self.clunk_timeout(newfid, timeout);
-                Err(unexpected("Rwalk", other))
+            Ok(Err(_)) => None,
+            Err(error) => Some(error),
+        };
+        self.release(prefix, timeout);
+        refusal
+    }
+
+    fn release(&self, fid: Fid, timeout: Option<Duration>) {
+        match timeout {
+            Some(timeout) => {
+                let _ = self.clunk_timeout(fid, timeout);
+            }
+            None => {
+                let _ = self.clunk(fid);
             }
         }
     }

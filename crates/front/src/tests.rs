@@ -219,8 +219,10 @@ fn remove_subtree_releases_pushed_qids_and_children() -> Result<()> {
     let root_qid = scoped.attach(1, b"alice", b"door-token")?;
     assert_eq!(root_qid.path, 8001);
     assert_eq!(root_qid.version, 2);
-    let stale_from_root = walk_to(&mut scoped, 1, 2, &["services"]);
-    assert_eq!(stale_from_root.len(), 0);
+    let stale_from_root = scoped
+        .walk(1, 2, root_qid, &[b"services".to_vec()])
+        .expect_err("a stale first element must be refused, not walked short");
+    assert_eq!(stale_from_root.message(), ENOENT.as_bytes());
     Ok(())
 }
 

@@ -309,32 +309,38 @@ case instead of re-plumbing it. Its two constructors — `contained_root` and
 `authenticated_root` — also make its own `Option<ResponderName>` safe, because
 the choice has a name and cannot be reached by leaving a field blank.
 
-The *silent-disable* is not. `ConnectionConfig.authentication` is still
-`Option<SessionAuthentication>` on a public field of a struct built with
-literals, so a new call site can still write `authentication: None` to satisfy
-the compiler and get an unauthenticated session. An agent does not fix this: a
-call site must still name the identity and responder it expects, so a site that
-omits them fails the same way. The root cause is that declining authentication
-is an omission rather than a statement.
+The *silent-disable* was the open half, and is now closed.
+`ConnectionConfig.authentication` was `Option<SessionAuthentication>` on a
+public field of a struct built with literals, so a new call site could write
+`authentication: None` to satisfy the compiler and get an unauthenticated
+session. An agent would not have fixed that: a call site must still name the
+identity and responder it expects, so a site that omits them fails the same
+way. The root cause was that declining authentication was an omission rather
+than a statement.
 
-The fix is to make the decision un-defaultable — named constructors over a
-private field, or an explicit `Unauthenticated` variant. Both legitimate
-unauthenticated cases, unix-socket local trust and tests, stay expressible;
-they just have to say so.
+`ConnectionAuthentication` now names both cases. Both legitimate
+unauthenticated uses — unix-socket local trust and tests — stay expressible
+and simply have to say so, and `Unauthenticated` enumerates every such
+connection in one grep, which `None` never could. `ControlConfig`, the FUSE
+config, the beam-port target key and the CLI credential builder carry the
+same type, so the shape does not survive one layer up.
 
-It is a breaking change, and every consumer is now a **path** dependency rather
-than a pinned rev, so it is one coordinated cutover in which a stale consumer
-fails to build rather than skewing silently:
+Landed as one coordinated cutover across the four path-linked repositories,
+each compiled and tested: r9p `184a9f4`, r9wm `0a21990`, agent `2a445c3`,
+terminal `3af84f2`. Credentials and coordinator do not touch the type.
 
-| repo | `ConnectionConfig` references |
-|---|---|
-| r9p | 14 construction sites, 6 of them `authentication: None` |
-| agent | 11 |
-| r9wm | 6 |
-| terminal | 2 |
+Two things the cutover taught:
 
-Credentials and coordinator do not touch the type. Not applied here because it
-could not be compiled on the laptop; it wants the M7 lane.
+- **`nix develop` is the build environment, not the bare shell.** A plain
+  `cargo check` fails here with `No such file or directory` from every build
+  script, because no `cc` is on `PATH`; the repository devshell supplies the
+  toolchain. This was first reported in this handoff as "could not be
+  compiled on the laptop", which was wrong — the first failure had simply
+  been accepted.
+- **Terminal's suite needs `TERMINAL_TEST_SHELL`.** Seven store and
+  resurrection tests fail with `terminal_test_shell_not_declared` without it,
+  and its devshell does not set it the way agent's sets `AGENT_TEST_SHELL`.
+  Worth fixing in that flake, or the suite reads as broken.
 
-This is the cheap half of the note's complaint. The half only the agent buys is
-the private key never entering a program's address space.
+This was the cheap half of the note's complaint. The half only the agent buys
+is the private key never entering a program's address space.

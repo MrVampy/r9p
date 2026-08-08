@@ -346,3 +346,29 @@ Two things the cutover taught:
 
 This was the cheap half of the note's complaint. The half only the agent buys
 is the private key never entering a program's address space.
+
+## Follow-up closure (2026-08-08)
+
+The certified-name admission cutover is complete and forward-only. The live
+Coordinator policy was replaced atomically; it contains certified service
+names and no raw `noise-static-key:` subjects. No mixed-fleet compatibility
+path was retained.
+
+- r9p `9f8365b` removed raw-key transport-subject emission and fallback.
+- r9p `82eb5d0` preserves the recovered refusal class, so an authorization
+  denial remains `EACCES` instead of becoming a generic missing walk.
+- Coordinator `5a28844` preserves backend relay only after a genuine first
+  walk miss; it does not turn a refusal into fallback.
+- The default r9p package, its `front-tests`, and Coordinator's listener and
+  listener-handoff checks passed through the M7 build router.
+- Live namespace proofs found ten certified subjects, zero raw-key subjects,
+  working service referrals, and the original terminal mutation denial text.
+
+Historical Credentials journal entries that mention earlier principal names
+are recorded history, not active transport admission. They do not require a
+compatibility reader or a fleet migration for this cutover. Any future
+credential-data change must be justified by the current Credentials contract
+and performed through its namespace surface.
+
+No implementation item from this handoff remains open for the certified-name
+admission cutover.

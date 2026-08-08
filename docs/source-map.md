@@ -44,6 +44,12 @@ This map defines the local sources agents should inspect before making source-sp
     an explicitly local trust transport may preauthorize a 9P username; it
     carries no remote-key bootstrap allowlist, backend admission, or namespace
     policy.
+- `docs/design/auth-agent.md`
+  - Deferred local long-term-key custody boundary, its concrete activation
+    triggers, and the unresolved Snow external-static-DH or raw-split seam.
+- `docs/design/certificate-lifecycle.md`
+  - Boundary between the completed mutual-certificate transport and future
+    issuance, renewal, rotation, revocation, and offline-root lifecycle.
 - `crates/reverse/src/`
   - Generic authenticated reverse-connect runtime adapter.
   - An application-owned tree or filesystem owner connects outward and serves
@@ -119,6 +125,9 @@ This map defines the local sources agents should inspect before making source-sp
 - `notes/source-reading/2026-08-06-native-dns-endpoints.md`
   - Source-backed boundary between concrete listener binds and DNS-preserving
     dial or referral endpoints.
+- `notes/source-reading/2026-08-08-auth-agent-and-certificate-lifecycle.md`
+  - Source-backed reason to defer a full auth agent, the actual Snow transport
+    handoff constraint, and the lifecycle responsibilities that precede it.
 - `crates/fs/src/`
   - Local filesystem-backed 9P server adapter used by `r9p serve` and
     `r9p export`; read-only by default with an explicit writable mode.

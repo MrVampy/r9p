@@ -275,6 +275,11 @@ creates its own ephemeral handshake state; there is no per-session operator
 setup. The provider follows p9any's extensible negotiation shape but does not
 claim dp9ik or unmodified factotum interoperability.
 
+The completed transport is separate from certificate lifecycle. See
+[`docs/design/certificate-lifecycle.md`](docs/design/certificate-lifecycle.md)
+for the current offline-signing phase and the gates for future renewal,
+revocation, and a local key-custody agent.
+
 `authenticate_server` proves the Noise static key and the certified name bound
 to it. It does not admit the caller: mapping a subject to a namespace principal
 remains application policy. `TransportIdentity` exposes the signed name as

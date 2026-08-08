@@ -166,11 +166,8 @@ const PLAN9_ERRNO_PATTERNS: &[(&str, i32)] = &[
     ("no such file", libc::ENOENT),
     ("no such entry", libc::ENOENT),
     ("no such", libc::ENOENT),
-    ("bad walk", libc::ENOENT),
-    ("walk_partial", libc::ENOENT),
-    ("walk failed", libc::ENOENT),
-    ("walk", libc::ENOENT),
-    ("range", libc::ENOENT),
+    // A recovered short-walk reason contains both "walk" and its refusal.
+    // Preserve the refusal class before applying the structural walk fallback.
     ("operation not permitted", libc::EPERM),
     ("not permitted", libc::EPERM),
     ("forbidden", libc::EACCES),
@@ -184,6 +181,11 @@ const PLAN9_ERRNO_PATTERNS: &[(&str, i32)] = &[
     ("write not allowed", libc::EACCES),
     ("not readable", libc::EACCES),
     ("not_readable", libc::EACCES),
+    ("bad walk", libc::ENOENT),
+    ("walk_partial", libc::ENOENT),
+    ("walk failed", libc::ENOENT),
+    ("walk", libc::ENOENT),
+    ("range", libc::ENOENT),
     ("already exists", libc::EEXIST),
     ("file exists", libc::EEXIST),
     (" exists", libc::EEXIST),
@@ -376,6 +378,23 @@ mod tests {
 
         let rejection = client_error(P9Error::from("p9any server rejected protocol selection"));
         assert!(!rejection.is_transient_connection_failure());
+    }
+
+    #[test]
+    fn partial_walk_uses_the_recovered_refusal_class() {
+        assert_eq!(
+            errno_for_9p_error(
+                "partial walk: stopped at \"abandon\" (3 of 3): permission denied: terminal_mutation_denied",
+            ),
+            libc::EACCES,
+        );
+        assert_eq!(
+            errno_for_9p_error(
+                "partial walk: stopped at \"missing\" (3 of 3): file does not exist",
+            ),
+            libc::ENOENT,
+        );
+        assert_eq!(errno_for_9p_error("partial walk"), libc::ENOENT);
     }
 
     #[test]

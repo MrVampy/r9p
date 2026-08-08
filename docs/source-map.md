@@ -40,9 +40,10 @@ This map defines the local sources agents should inspect before making source-sp
   - `SecureStream` is itself an authentication transport, allowing an
     end-service session to be layered over an authenticated reverse-placement
     stream without teaching the broker application identity.
-  - It exposes a verified transport subject and may preauthorize a 9P username
-    from a server bootstrap allowlist, but carries no backend admission or
-    namespace policy.
+  - It exposes a verified certified-name or Unix-peer transport subject. Only
+    an explicitly local trust transport may preauthorize a 9P username; it
+    carries no remote-key bootstrap allowlist, backend admission, or namespace
+    policy.
 - `crates/reverse/src/`
   - Generic authenticated reverse-connect runtime adapter.
   - An application-owned tree or filesystem owner connects outward and serves

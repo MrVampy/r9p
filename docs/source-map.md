@@ -33,7 +33,8 @@ This map defines the local sources agents should inspect before making source-sp
   - Referrals carry admitted dial facts and a portable authority boundary
     without becoming files in the composed namespace.
 - `crates/auth/src/`
-  - P9any provider negotiation, Noise IK authentication, authenticated record
+  - P9any provider negotiation, Noise XX mutual-certificate authentication,
+    authenticated record
     framing, Unix peer attestation, key material, and typed client/server
     session configuration.
   - `SecureStream` is itself an authentication transport, allowing an

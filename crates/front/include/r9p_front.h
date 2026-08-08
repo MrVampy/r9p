@@ -111,8 +111,9 @@
  *   timeout (default 30s).
  * - r9p_front_serve_tcp_authenticated reads an r9p session-auth server
  *   configuration before binding. Every accepted TCP stream completes p9any
- *   and Noise IK authentication before 9P negotiation, and the authenticated
- *   principal is bound to the 9P attach uname. Use this for any network front;
+ *   and Noise XX mutual-certificate authentication before 9P negotiation. The
+ *   authenticated principal is bound to the 9P attach uname. Use this for any
+ *   network front;
  *   plain r9p_front_serve_tcp remains the explicit contained-host boundary.
  * - r9p_front_client_rpc is the v13 outbound 9P RPC helper. It connects to
  *   endpoint_bind, attaches as uname/aname, opens path O_RDWR, writes the

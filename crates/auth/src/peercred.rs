@@ -1,14 +1,7 @@
-use crate::{PeerIdentity, PublicKey};
+use crate::PeerIdentity;
 use r9p::error::{Error, Result, EPERM};
 use std::{os::unix::net::UnixStream, sync::Arc};
 
-pub const NOISE_SUBJECT_PREFIX: &str = "noise-static-key:";
-/// A certificate binds the name to the key in signed material, so a relying
-/// party can admit the name it learned at the handshake instead of keeping a
-/// key list of its own. That list is the thing certificates exist to remove:
-/// it makes every rotation a policy edit, and it lets two hosts disagree about
-/// who a key is. Emitted alongside the key subject so policy can move one
-/// entry at a time.
 pub const CERT_SUBJECT_PREFIX: &str = "r9p-cert:";
 pub const UNIX_PEER_SUBJECT_PREFIX: &str = "unix-peer:uid:";
 pub const UNIX_SAME_USER_SUBJECT: &str = "unix-peer:same-user";
@@ -16,15 +9,8 @@ pub const UNIX_SAME_USER_SUBJECT: &str = "unix-peer:same-user";
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TransportIdentity {
     Local,
-    Authenticated {
-        principal: Arc<str>,
-        public_key: PublicKey,
-        certified: bool,
-    },
-    UnixPeer {
-        uid: u32,
-        same_user: bool,
-    },
+    Certified { principal: Arc<str> },
+    UnixPeer { uid: u32, same_user: bool },
 }
 
 impl TransportIdentity {
@@ -32,11 +18,9 @@ impl TransportIdentity {
         Self::Local
     }
 
-    pub fn authenticated(peer: &PeerIdentity) -> Self {
-        Self::Authenticated {
+    pub fn certified(peer: &PeerIdentity) -> Self {
+        Self::Certified {
             principal: Arc::<str>::from(peer.principal()),
-            public_key: peer.public_key(),
-            certified: peer.certified(),
         }
     }
 
@@ -65,9 +49,7 @@ impl TransportIdentity {
     pub fn subject_id(&self) -> String {
         match self {
             Self::Local => "local-trust".to_string(),
-            Self::Authenticated { public_key, .. } => {
-                NOISE_SUBJECT_PREFIX.to_string() + &public_key.to_hex()
-            }
+            Self::Certified { principal } => CERT_SUBJECT_PREFIX.to_string() + principal,
             Self::UnixPeer { uid, .. } => UNIX_PEER_SUBJECT_PREFIX.to_string() + &uid.to_string(),
         }
     }
@@ -77,23 +59,15 @@ impl TransportIdentity {
             Self::UnixPeer {
                 same_user: true, ..
             } => vec![self.subject_id(), UNIX_SAME_USER_SUBJECT.to_string()],
-            Self::Authenticated {
-                principal,
-                certified: true,
-                ..
-            } => vec![
-                self.subject_id(),
-                CERT_SUBJECT_PREFIX.to_string() + principal,
-            ],
-            Self::Local | Self::Authenticated { .. } | Self::UnixPeer { .. } => {
+            Self::Local | Self::Certified { .. } | Self::UnixPeer { .. } => {
                 vec![self.subject_id()]
             }
         }
     }
 
-    pub fn authenticated_uname(&self) -> Option<&str> {
+    pub fn certified_principal(&self) -> Option<&str> {
         match self {
-            Self::Authenticated { principal, .. } => Some(principal),
+            Self::Certified { principal } => Some(principal),
             Self::Local | Self::UnixPeer { .. } => None,
         }
     }
@@ -125,39 +99,25 @@ mod tests {
         assert!(identity
             .subject_ids()
             .contains(&UNIX_SAME_USER_SUBJECT.to_string()));
-        assert_eq!(identity.authenticated_uname(), None);
+        assert_eq!(identity.certified_principal(), None);
         assert!(!identity.transport_authorizes_uname("/srv/infra/agents"));
         drop(client);
         Ok(())
     }
 
     #[test]
-    fn a_certificate_names_a_caller_without_admitting_it() -> Result<()> {
+    fn a_certificate_is_the_only_remote_admission_subject() -> Result<()> {
         let key = generate_key_pair()?;
         let peer = PeerIdentity::new("codex.interface", key.public)?;
-        let identity = TransportIdentity::authenticated(&peer);
+        let identity = TransportIdentity::certified(&peer);
 
         assert_eq!(
             identity.subject_id(),
-            format!("{NOISE_SUBJECT_PREFIX}{}", key.public)
+            format!("{CERT_SUBJECT_PREFIX}codex.interface")
         );
-        assert_eq!(identity.authenticated_uname(), Some("codex.interface"));
+        assert_eq!(identity.subject_ids(), vec![identity.subject_id()]);
+        assert_eq!(identity.certified_principal(), Some("codex.interface"));
         assert!(!identity.transport_authorizes_uname("codex.interface"));
-        // An uncertified peer's name is only a claim, so it must not become a
-        // subject a policy could admit by name.
-        assert_eq!(
-            identity.subject_ids(),
-            vec![format!("{NOISE_SUBJECT_PREFIX}{}", key.public)]
-        );
-
-        let certified = TransportIdentity::authenticated(&peer.clone().into_certified());
-        assert_eq!(
-            certified.subject_ids(),
-            vec![
-                format!("{NOISE_SUBJECT_PREFIX}{}", key.public),
-                format!("{CERT_SUBJECT_PREFIX}codex.interface"),
-            ]
-        );
         Ok(())
     }
 

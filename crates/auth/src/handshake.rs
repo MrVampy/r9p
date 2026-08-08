@@ -46,7 +46,6 @@ pub struct PeerIdentity {
     principal: String,
     public_key: PublicKey,
     groups: BTreeSet<String>,
-    certified: bool,
 }
 
 pub struct AuthenticatedSession<S = TcpStream> {
@@ -55,6 +54,8 @@ pub struct AuthenticatedSession<S = TcpStream> {
 }
 
 impl PeerIdentity {
+    /// Builds the result of a trusted adapter that has already verified the
+    /// root-signed certificate binding this name to this key.
     pub fn new(principal: impl Into<String>, public_key: PublicKey) -> Result<Self> {
         let principal = principal.into();
         validate_principal(&principal)?;
@@ -62,7 +63,6 @@ impl PeerIdentity {
             principal,
             public_key,
             groups: BTreeSet::new(),
-            certified: false,
         })
     }
 
@@ -74,27 +74,13 @@ impl PeerIdentity {
         self.public_key
     }
 
-    /// Groups carried by the certificate that named this peer. Always empty for
-    /// a peer-line identity, so authorization written against groups denies a
-    /// legacy session rather than silently widening it.
+    /// Groups carried by the certificate that named this peer.
     pub fn groups(&self) -> impl Iterator<Item = &str> {
         self.groups.iter().map(String::as_str)
     }
 
     pub fn in_group(&self, group: &str) -> bool {
         self.groups.contains(group)
-    }
-
-    /// Whether the name was read from signed material rather than asserted by
-    /// this server's own configuration.
-    pub const fn certified(&self) -> bool {
-        self.certified
-    }
-
-    #[cfg(test)]
-    pub(crate) fn into_certified(mut self) -> Self {
-        self.certified = true;
-        self
     }
 }
 
@@ -314,7 +300,6 @@ fn certified_identity(
                     principal: certificate.body().name().to_string(),
                     public_key,
                     groups: certificate.body().groups().map(str::to_string).collect(),
-                    certified: true,
                 });
             }
             Err(error) => refusal = Some(error),
@@ -528,7 +513,6 @@ mod tests {
         let (_, server, client) = xx_pair("terminal-m7", "tuxedo.operator")?;
         let peer = xx_once(server, &client, "terminal-m7", "tuxedo.operator")?;
         assert_eq!(peer.principal(), "tuxedo.operator");
-        assert!(peer.certified());
         assert!(peer.in_group("operator"));
         Ok(())
     }

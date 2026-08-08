@@ -175,13 +175,10 @@ a public-only or mismatched pair fails without overwriting either file.
 
 ### Certificates
 
-A `peer <key> <name>` line proves the key and asserts the name. The name is
-per-server configuration, so two relying parties can disagree about what one
-key is called, and renaming a principal is an edit everywhere it appears.
-
-`r9p cert` moves the name into signed material. An offline Ed25519 root signs
+`r9p cert` puts a principal name and its stable role groups in signed material.
+An offline Ed25519 root signs
 over a session key's *public* half, so the private half never leaves the host
-that generated it — `auth-keygen` still creates it, and the certificate is
+that generated it - `auth-keygen` still creates it, and the certificate is
 issued afterwards:
 
 ```bash
@@ -208,7 +205,7 @@ refuses to overwrite an existing one.
 A client presents its certificate by naming it in the client config; a server
 accepts certificates by naming the roots it trusts:
 
-```
+```text
 # client
 certificate /var/lib/r9p/cert/tuxedo.crt
 
@@ -216,21 +213,12 @@ certificate /var/lib/r9p/cert/tuxedo.crt
 root 217a98d48bc5c82dbbab66272009ff7ced583321a4b9e6bae6f5db04ae1ce183
 ```
 
-A server may carry `peer` lines, `root` lines, or both. Both is the migration
-state. The presented certificate must have been issued for the key that
-completed the handshake, so a certificate — which is public — cannot be
-replayed by anyone else holding a copy. A session named this way reports
-`certified()`, and the groups it carries are visible to authorization;
-a `peer`-line session carries none, so authorization written against groups
-denies it rather than silently widening.
-
-**Migrate servers before clients.** A server predating this reads the first
-handshake payload into a 255-byte buffer, which a certificate overflows; it
-refuses the session rather than reading a prefix of signed material as a
-principal. So a new client cannot talk to an old server, while an old client
-keeps working against a new one. Deploy roots everywhere first, verify legacy
-sessions still authenticate, then cut clients over and remove `peer` lines
-last.
+The presented certificate must have been issued for the key that completed the
+handshake, so a certificate - which is public - cannot be replayed by anyone
+else holding a copy. The certified principal becomes the remote transport
+subject `r9p-cert:<name>`, and the certificate groups are available to coarse
+role authorization. Admission policy names the certified principal rather
+than its current public key, so key rotation does not rewrite policy.
 
 The flake exports `nixosModules.session-auth` for boot-time provisioning and
 verification without host-specific scripts. After importing the module, declare
@@ -245,7 +233,7 @@ services.r9p-session-auth.keys.namespace = {
 };
 ```
 
-A server config maps public keys to the exact 9P usernames they may claim:
+A server config presents its own certificate and names the roots it trusts:
 
 ```text
 format r9p-session-auth.v1
@@ -289,8 +277,8 @@ claim dp9ik or unmodified factotum interoperability.
 
 `authenticate_server` proves the Noise static key and the certified name bound
 to it. It does not admit the caller: mapping a subject to a namespace principal
-remains application policy. `TransportIdentity` exposes that key as
-`noise-static-key:<hex>`. On Unix sockets it derives
+remains application policy. `TransportIdentity` exposes the signed name as
+`r9p-cert:<name>`. On Unix sockets it derives
 `unix-peer:uid:<uid>` from `SO_PEERCRED`, plus `unix-peer:same-user` when the
 peer runs under the listener's effective UID. Mapping those subjects to
 namespace principals remains application policy.

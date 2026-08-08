@@ -1,13 +1,9 @@
 //! Certificates that bind a name to a session key.
 //!
-//! `r9p-session-auth.v1` authenticates a key and then takes the name from a
-//! `peer <key> <name>` line the *relying party* stores. The key is proven; the
-//! name is asserted locally, so two servers may disagree about what one key is
-//! called, and renaming a principal is a fleet-wide edit.
-//!
-//! A certificate moves the name into signed material. The relying party learns
-//! it during the handshake instead of asserting it, which is what removes the
-//! per-server peer list and makes a rename one re-signing.
+//! A certificate binds a principal name and stable role groups to the session
+//! key in material signed by an offline root. The relying party learns that
+//! identity during the handshake and admits the signed name rather than
+//! maintaining a key-to-name table.
 //!
 //! Two key types are in play and they are not interchangeable. Session keys are
 //! X25519 Noise statics — Diffie-Hellman keys, which cannot sign. So the

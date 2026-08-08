@@ -19,7 +19,7 @@ pub use key::{
     generate_key_pair, provision_key_pair, write_key_pair, KeyPair, PrivateKey, PublicKey,
 };
 pub use peercred::{
-    TransportIdentity, NOISE_SUBJECT_PREFIX, UNIX_PEER_SUBJECT_PREFIX, UNIX_SAME_USER_SUBJECT,
+    TransportIdentity, CERT_SUBJECT_PREFIX, UNIX_PEER_SUBJECT_PREFIX, UNIX_SAME_USER_SUBJECT,
 };
 pub use stream::SecureStream;
 

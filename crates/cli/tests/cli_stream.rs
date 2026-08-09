@@ -161,7 +161,7 @@ impl EchoStream {
 #[test]
 fn stream_is_full_duplex_and_byte_transparent() -> TestResult<()> {
     let (address, server) = start_server()?;
-    let mut input = vec![0x00, b'\r', 0x12, 0xff, b'\n'];
+    let mut input = vec![0x12, 0x00, b'\r', 0xff, b'\n'];
     input.extend((0_u32..12_000).map(|value| value.wrapping_mul(31) as u8));
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_r9p"))

@@ -61,9 +61,11 @@ This map defines the local sources agents should inspect before making source-sp
   - `ReverseExport` owns the generic outbound lifecycle and accepts a fresh
     `FileTree` or asynchronous `ConnectionHandler` factory per session.
     Its authenticated variants establish an independent final service-client
-    boundary through the placement stream. Connection availability is an
-    event-driven wait, and reverse or proxy listeners block until work or an
-    explicit shutdown wake arrives.
+    boundary through the placement stream. The peer-aware handler factory also
+    receives the verified principal, public key, and certificate groups for
+    application-owned authorization. Connection availability is an event-driven
+    wait, and reverse or proxy listeners block until work or an explicit
+    shutdown wake arrives.
     `FilesystemExport` is the local-tree specialization used by the CLI.
 - `crates/core/src/multiplex/`
   - Layered blocking transport facade for concurrent tagged client calls.

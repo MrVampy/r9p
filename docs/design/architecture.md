@@ -57,6 +57,11 @@ second session proves the final service client and supplies the server's fixed
 attach identity. This closes the loopback proxy boundary without making the
 broker an application admission or protocol relay.
 
+When an application authorizes certificate groups,
+`start_authenticated_handler_with_peer` supplies the verified `PeerIdentity`
+to the handler factory before the first 9P request. The transport proves and
+delivers identity; the application handler decides authorization.
+
 The broker proxy is local by default. `ProxyExposure::AuthenticatedNetwork`
 admits a concrete non-loopback TCP listener only for a deployment that uses
 the authenticated reverse-export variants above. This is an explicit claim

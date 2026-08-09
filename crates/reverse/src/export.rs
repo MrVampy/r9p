@@ -20,7 +20,7 @@ use r9p::{
     },
 };
 use r9p_auth::{
-    authenticate_client_to, authenticate_server, ClientConfig, SecureStream,
+    authenticate_client_to, authenticate_server, ClientConfig, PeerIdentity, SecureStream,
     ServerConfig as SessionAuthConfig,
 };
 
@@ -193,6 +193,24 @@ impl ReverseExport {
             let session = authenticate_server(stream, &session_auth, authentication_timeout)?;
             server.session_uname = Some(session.peer.principal().as_bytes().to_vec());
             let handler = Arc::new(handler_factory()?);
+            serve_connection(session.stream, server, handler)
+        })
+    }
+
+    pub fn start_authenticated_handler_with_peer<H, F>(
+        config: ReverseExportConfig,
+        session_auth: SessionAuthConfig,
+        authentication_timeout: Duration,
+        handler_factory: F,
+    ) -> Result<Self>
+    where
+        H: ConnectionHandler,
+        F: Fn(PeerIdentity) -> Result<H> + Send + Sync + 'static,
+    {
+        Self::start_server(config, move |stream, mut server| {
+            let session = authenticate_server(stream, &session_auth, authentication_timeout)?;
+            server.session_uname = Some(session.peer.principal().as_bytes().to_vec());
+            let handler = Arc::new(handler_factory(session.peer)?);
             serve_connection(session.stream, server, handler)
         })
     }

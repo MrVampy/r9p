@@ -333,6 +333,9 @@ link use `ReverseExport::start_authenticated` or
 authentication then proves the placement peer, while a second p9any/Noise
 session carried transparently through that stream proves the final service
 client. The broker still does not parse 9P or learn application policy.
+Applications whose per-connection handler owns group-based authorization use
+`ReverseExport::start_authenticated_handler_with_peer`; its factory receives
+the already verified principal, public key, and certificate groups.
 
 Reverse transport sockets use bounded TCP keepalive in addition to disabling
 Nagle. This makes an application-idle pool detect a hard peer outage and enter

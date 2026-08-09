@@ -3,7 +3,10 @@ use std::{
     io::{Read, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
-    sync::atomic::AtomicBool,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -257,7 +260,9 @@ fn reverse_export_holds_idle_pool_and_authenticates_the_end_service_peer(
         authentication_timeout: Duration::from_secs(2),
         proxy_wait_timeout: Duration::from_secs(2),
     })?;
-    let export = ReverseExport::start_authenticated_handler(
+    let peer_observed = Arc::new(AtomicBool::new(false));
+    let peer_observed_by_export = Arc::clone(&peer_observed);
+    let export = ReverseExport::start_authenticated_handler_with_peer(
         ReverseExportConfig {
             broker_endpoint: broker.reverse_endpoint().into(),
             auth: certified_client(&signing_root, "example-exporter", &exporter_key)?,
@@ -278,7 +283,15 @@ fn reverse_export_holds_idle_pool_and_authenticates_the_end_service_peer(
         },
         certified_server(&signing_root, "agents-profile-service", &service_key)?,
         Duration::from_secs(1),
-        || Ok(IdentityHandler),
+        move |peer| {
+            if peer.principal() != "/srv/example/runtime/m7" || !peer.in_group("service") {
+                return Err(r9p::error::Error::from_static(
+                    "authenticated peer identity was not preserved",
+                ));
+            }
+            peer_observed_by_export.store(true, Ordering::Release);
+            Ok(IdentityHandler)
+        },
     )?;
     wait_generic_ready(&broker, &export)?;
     thread::sleep(Duration::from_millis(2_500));
@@ -299,7 +312,12 @@ fn reverse_export_holds_idle_pool_and_authenticates_the_end_service_peer(
 
     let stream = authenticate_client_to(
         std::net::TcpStream::connect(tcp_proxy_endpoint(&broker)?)?,
-        &certified_client(&signing_root, "/srv/example/runtime/m7", &runtime_key)?,
+        &certified_client_with_groups(
+            &signing_root,
+            "/srv/example/runtime/m7",
+            &runtime_key,
+            &["service"],
+        )?,
         "agents-profile-service",
         "/srv/example/runtime/m7",
         Duration::from_secs(2),
@@ -307,6 +325,7 @@ fn reverse_export_holds_idle_pool_and_authenticates_the_end_service_peer(
     let mut reader =
         Client::connect_with_variant(stream, "/srv/example/runtime/m7", "/", 65_536, Variant::R)?;
     assert_eq!(reader.read_path("/identity")?, b"application-tree\n");
+    assert!(peer_observed.load(Ordering::Acquire));
     Ok(())
 }
 
@@ -581,17 +600,39 @@ fn certified_client(
     )
 }
 
+fn certified_client_with_groups(
+    root: &RootKeyPair,
+    principal: &str,
+    key: &r9p_auth::KeyPair,
+    groups: &[&str],
+) -> Result<ClientConfig, r9p::error::Error> {
+    ClientConfig::certified(
+        key.private.clone(),
+        issue_with_groups(root, key.public, principal, groups)?,
+        [root.public],
+    )
+}
+
 fn issue(
     root: &RootKeyPair,
     key: r9p_auth::PublicKey,
     name: &str,
+) -> Result<Certificate, r9p::error::Error> {
+    issue_with_groups(root, key, name, &[])
+}
+
+fn issue_with_groups(
+    root: &RootKeyPair,
+    key: r9p_auth::PublicKey,
+    name: &str,
+    groups: &[&str],
 ) -> Result<Certificate, r9p::error::Error> {
     Certificate::sign(
         &root.private,
         CertificateBody::new(
             name,
             key,
-            Vec::<String>::new(),
+            groups.iter().map(|group| (*group).to_string()),
             1,
             4_000_000_000,
             root.public,

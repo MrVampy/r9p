@@ -222,7 +222,9 @@ pub(crate) fn usage() -> ! {
         "usage: r9p [-n] [--machine] [-a|--bind address] [-A aname] [-u uname] [-m msize] [--auth-config path] [--auth-domain name] [--request-timeout seconds] [--control-timeout seconds] cmd args..."
     );
     eprintln!("possible cmds:");
-    eprintln!("  auth-keygen --private path --public path");
+    eprintln!(
+        "  auth-keygen --private path --public path [--private-access owner-only|owner-group-read]"
+    );
     eprintln!("  cert root|sign|print|verify ...");
     eprintln!("  version [service]");
     eprintln!("  attach [service]");

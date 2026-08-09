@@ -12,6 +12,7 @@ pub(crate) fn auth_keygen_cmd(config: Config, args: Vec<String>) -> CliResult<()
     }
     let mut private_path = None;
     let mut public_path = None;
+    let mut private_access = None;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
@@ -35,6 +36,16 @@ pub(crate) fn auth_keygen_cmd(config: Config, args: Vec<String>) -> CliResult<()
                     return Err(cli_error("public key path already specified"));
                 }
             }
+            "--private-access" => {
+                index += 1;
+                let access = r9p_auth::PrivateKeyAccess::parse(
+                    args.get(index)
+                        .ok_or_else(|| cli_error("missing private key access"))?,
+                )?;
+                if private_access.replace(access).is_some() {
+                    return Err(cli_error("private key access already specified"));
+                }
+            }
             "-h" | "--help" => usage(0),
             other => return Err(cli_error(format!("unknown auth-keygen option {other}"))),
         }
@@ -42,12 +53,16 @@ pub(crate) fn auth_keygen_cmd(config: Config, args: Vec<String>) -> CliResult<()
     }
     let private_path = private_path.ok_or_else(|| cli_error("missing --private path"))?;
     let public_path = public_path.ok_or_else(|| cli_error("missing --public path"))?;
-    let pair = r9p_auth::provision_key_pair(&private_path, &public_path)?;
+    let private_access = private_access.unwrap_or_default();
+    let pair =
+        r9p_auth::provision_key_pair_with_access(&private_path, &public_path, private_access)?;
     println!("public_key\t{}", pair.public);
     Ok(())
 }
 
 fn usage(code: i32) -> ! {
-    eprintln!("usage: r9p auth-keygen --private path --public path");
+    eprintln!(
+        "usage: r9p auth-keygen --private path --public path [--private-access owner-only|owner-group-read]"
+    );
     std::process::exit(code);
 }

@@ -37,7 +37,7 @@
                   user = "r9p-proof";
                   group = "r9p-shared";
                   directoryMode = "0750";
-                  privateKeyMode = "0640";
+                  privateKeyAccess = "owner-group-read";
                 };
                 system.stateVersion = "25.11";
               }
@@ -203,7 +203,6 @@
                   packageName = sessionAuthModuleEval.config.services.r9p-session-auth.package.pname;
                   serviceGroup = service.serviceConfig.Group;
                   serviceUser = service.serviceConfig.User;
-                  sharedExecutablePost = sharedService.serviceConfig.ExecStartPost;
                   sharedServiceGroup = sharedService.serviceConfig.Group;
                   sharedServiceUser = sharedService.serviceConfig.User;
                 } ''
@@ -218,12 +217,12 @@
                 test "$sharedPrivateKeyRulePresent" = "1"
                 test "$sharedServiceUser" = "r9p-proof"
                 test "$sharedServiceGroup" = "r9p-shared"
-                case "$sharedExecutablePost" in
-                  */bin/chmod\ 0640\ /var/lib/r9p-session-auth-shared/proof.key) ;;
+                case "${sharedService.serviceConfig.ExecStart}" in
+                  */bin/r9p\ auth-keygen\ --private\ /var/lib/r9p-session-auth-shared/proof.key\ --public\ /var/lib/r9p-session-auth-shared/proof.key.pub\ --private-access\ owner-group-read) ;;
                   *) exit 1 ;;
                 esac
                 case "$executable" in
-                  */bin/r9p\ auth-keygen\ --private\ /var/lib/r9p-session-auth/proof.key\ --public\ /var/lib/r9p-session-auth/proof.key.pub) ;;
+                  */bin/r9p\ auth-keygen\ --private\ /var/lib/r9p-session-auth/proof.key\ --public\ /var/lib/r9p-session-auth/proof.key.pub\ --private-access\ owner-only) ;;
                   *) exit 1 ;;
                 esac
                 touch "$out"

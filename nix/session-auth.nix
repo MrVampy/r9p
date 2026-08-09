@@ -1,7 +1,6 @@
 { config
 , defaultPackage
 , lib
-, pkgs
 , ...
 }:
 
@@ -37,10 +36,10 @@ let
         description = "Mode for the private key-pair directory.";
       };
 
-      privateKeyMode = lib.mkOption {
-        type = lib.types.strMatching "0[46]00|0[46]40";
-        default = "0600";
-        description = "Mode for the private Noise static key.";
+      privateKeyAccess = lib.mkOption {
+        type = lib.types.enum [ "owner-only" "owner-group-read" ];
+        default = "owner-only";
+        description = "Local access policy for the private Noise static key.";
       };
     };
   });
@@ -58,6 +57,8 @@ let
     cfg.keys;
 
   directoryGroups = lib.groupBy (entry: entry.directory) keyEntries;
+  privateKeyMode = access:
+    if access == "owner-group-read" then "0640" else "0600";
 
   keyAssertions = (lib.concatMap
     (name:
@@ -120,7 +121,7 @@ let
     directoryGroups);
   keyFiles = lib.concatMap
     (entry: [
-      "z ${entry.key.privateKeyFile} ${entry.key.privateKeyMode} ${entry.key.user} ${entry.key.group} -"
+      "z ${entry.key.privateKeyFile} ${privateKeyMode entry.key.privateKeyAccess} ${entry.key.user} ${entry.key.group} -"
       "z ${entry.key.publicKeyFile} 0644 ${entry.key.user} ${entry.key.group} -"
     ])
     keyEntries;
@@ -142,11 +143,8 @@ let
             key.privateKeyFile
             "--public"
             key.publicKeyFile
-          ];
-          ExecStartPost = lib.escapeShellArgs [
-            "${pkgs.coreutils}/bin/chmod"
-            key.privateKeyMode
-            key.privateKeyFile
+            "--private-access"
+            key.privateKeyAccess
           ];
           RemainAfterExit = true;
         };

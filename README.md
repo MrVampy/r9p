@@ -127,7 +127,7 @@ r9p export [--bind address] [--max-fids count] [--writable] [--descriptor machin
 r9p reverse-broker --reverse-bind address [--proxy-bind address] [--proxy-exposure local|authenticated-network] --principal name --auth-config path [--pool count]
 r9p reverse-export --connect address --principal name --auth-config path [--pool count] [--reconnect-min-delay seconds] [--reconnect-max-delay seconds] [--writable] root
 r9p session-proxy --bind loopback-address|unix!/path --connect address --principal name --auth-config path [--max-sessions count]
-r9p auth-keygen --private path --public path
+r9p auth-keygen --private path --public path [--private-access owner-only|owner-group-read]
 r9p cert root --private path --public path
 r9p cert sign --root-private path --name name (--key hex | --key-file path) [--group name]... (--days n | --not-after seconds) [--not-before seconds] [--out path]
 r9p cert print --path path [--at seconds]
@@ -236,8 +236,14 @@ services.r9p-session-auth.keys.namespace = {
 The default `0700` directory and `0600` private key keep one identity private
 to one Unix user. When two cooperating services deliberately share one
 certified identity, set a dedicated group, `directoryMode = "0750"`, and
-`privateKeyMode = "0640"`. This grants only that group access and does not
-require either service to retain discretionary-access override capabilities.
+`privateKeyAccess = "owner-group-read"`. Add the matching local access policy
+to each session-auth config that consumes the key. This grants only that group
+access and does not require either service to retain discretionary-access
+override capabilities:
+
+```text
+private-key-access owner-group-read
+```
 
 A server config presents its own certificate and names the roots it trusts:
 

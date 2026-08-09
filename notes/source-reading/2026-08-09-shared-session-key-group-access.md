@@ -23,9 +23,11 @@ capabilities or copying the private key?
 - The module already models a key owner, group, and directory mode, but it
   hard-coded every private key to mode `0600`.
 - `auth-keygen` correctly creates a new private key as `0600`, independent of
-  its process umask. A tmpfiles adjustment alone therefore does not establish
-  a configured `0640` mode on first provisioning; the module must converge the
-  declared mode after the generator succeeds.
+  its process umask by default.
+- `PrivateKey::read` deliberately rejects every group or other permission, so
+  changing only tmpfiles to `0640` makes both key verification and session
+  authentication fail. Group custody therefore has to be an explicit input at
+  every local key-reading boundary rather than an implicit relaxation.
 - The Tuxedo Agent runtime runs as the operator user, while its host supervisor
   runs as root with `CAP_DAC_OVERRIDE` removed. A `0600` operator-owned key is
   therefore correctly unreadable by the supervisor even though both services
@@ -39,10 +41,13 @@ capabilities or copying the private key?
 
 ## Effect
 
-The session-auth module now exposes `privateKeyMode`, restricted to owner-only
-or owner-and-group read/write combinations. Its default remains `0600`. The
-provisioning unit applies that declared mode after secure key creation, and the
-module fixture proves both the default and the deliberate group-readable shape.
+The session-auth module now exposes `privateKeyAccess` with `owner-only` as the
+default and `owner-group-read` as the sole broader choice. The key generator
+creates the corresponding `0600` or `0640` file and the provisioning unit
+converges that mode. Session-auth configs must independently declare
+`private-key-access owner-group-read`; otherwise the existing owner-only read
+continues to reject the file. Unit and module fixtures prove both the default
+and the deliberate group-readable shape.
 
 ## Open questions
 

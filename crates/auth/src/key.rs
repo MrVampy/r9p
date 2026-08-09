@@ -25,6 +25,13 @@ struct PrivateKeyBytes {
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 pub struct PublicKey([u8; KEY_BYTES]);
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PrivateKeyAccess {
+    #[default]
+    OwnerOnly,
+    OwnerGroupRead,
+}
+
 #[derive(Clone)]
 pub struct KeyPair {
     pub private: PrivateKey,
@@ -37,6 +44,10 @@ impl PrivateKey {
     }
 
     pub fn read(path: &Path) -> Result<Self> {
+        Self::read_with_access(path, PrivateKeyAccess::OwnerOnly)
+    }
+
+    pub fn read_with_access(path: &Path, access: PrivateKeyAccess) -> Result<Self> {
         let metadata = fs::metadata(path).map_err(|error| {
             Error::from(format!("inspect private key {}: {error}", path.display()))
         })?;
@@ -46,11 +57,21 @@ impl PrivateKey {
                 path.display()
             )));
         }
-        if metadata.mode() & 0o077 != 0 {
-            return Err(Error::from(format!(
-                "private key {} must not be accessible by group or other users",
-                path.display()
-            )));
+        let mode = metadata.mode() & 0o777;
+        match access {
+            PrivateKeyAccess::OwnerOnly if mode & 0o077 != 0 => {
+                return Err(Error::from(format!(
+                    "private key {} must not be accessible by group or other users",
+                    path.display()
+                )));
+            }
+            PrivateKeyAccess::OwnerGroupRead if mode & 0o040 == 0 || mode & 0o037 != 0 => {
+                return Err(Error::from(format!(
+                    "private key {} must grant group read without group write, group execute, or other access",
+                    path.display()
+                )));
+            }
+            _ => {}
         }
         let value = fs::read_to_string(path).map_err(|error| {
             Error::from(format!("read private key {}: {error}", path.display()))
@@ -64,6 +85,25 @@ impl PrivateKey {
 
     fn render(&self) -> String {
         encode_key(self.as_bytes())
+    }
+}
+
+impl PrivateKeyAccess {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "owner-only" => Ok(Self::OwnerOnly),
+            "owner-group-read" => Ok(Self::OwnerGroupRead),
+            _ => Err(Error::from(format!(
+                "private key access must be owner-only or owner-group-read, got {value}"
+            ))),
+        }
+    }
+
+    pub const fn file_mode(self) -> u32 {
+        match self {
+            Self::OwnerOnly => 0o600,
+            Self::OwnerGroupRead => 0o640,
+        }
     }
 }
 
@@ -136,6 +176,14 @@ pub fn generate_key_pair() -> Result<KeyPair> {
 }
 
 pub fn provision_key_pair(private_path: &Path, public_path: &Path) -> Result<KeyPair> {
+    provision_key_pair_with_access(private_path, public_path, PrivateKeyAccess::OwnerOnly)
+}
+
+pub fn provision_key_pair_with_access(
+    private_path: &Path,
+    public_path: &Path,
+    access: PrivateKeyAccess,
+) -> Result<KeyPair> {
     if private_path == public_path {
         return Err(Error::from("private and public key paths must differ"));
     }
@@ -144,17 +192,17 @@ pub fn provision_key_pair(private_path: &Path, public_path: &Path) -> Result<Key
     match (private_exists, public_exists) {
         (false, false) => {
             let pair = generate_key_pair()?;
-            write_key_pair(private_path, public_path, &pair)?;
+            write_key_pair_with_access(private_path, public_path, &pair, access)?;
             Ok(pair)
         }
         (true, false) => {
-            let private = PrivateKey::read(private_path)?;
+            let private = PrivateKey::read_with_access(private_path, access)?;
             let public = derive_public_key(&private)?;
             write_new_file(public_path, public.to_hex().as_bytes(), 0o644, "public key")?;
             Ok(KeyPair { private, public })
         }
         (true, true) => {
-            let private = PrivateKey::read(private_path)?;
+            let private = PrivateKey::read_with_access(private_path, access)?;
             let public = PublicKey::read(public_path)?;
             if derive_public_key(&private)? != public {
                 return Err(Error::from(format!(
@@ -174,13 +222,22 @@ pub fn provision_key_pair(private_path: &Path, public_path: &Path) -> Result<Key
 }
 
 pub fn write_key_pair(private_path: &Path, public_path: &Path, pair: &KeyPair) -> Result<()> {
+    write_key_pair_with_access(private_path, public_path, pair, PrivateKeyAccess::OwnerOnly)
+}
+
+fn write_key_pair_with_access(
+    private_path: &Path,
+    public_path: &Path,
+    pair: &KeyPair,
+    access: PrivateKeyAccess,
+) -> Result<()> {
     if private_path == public_path {
         return Err(Error::from("private and public key paths must differ"));
     }
     write_new_file(
         private_path,
         pair.private.render().as_bytes(),
-        0o600,
+        access.file_mode(),
         "private key",
     )?;
     match write_new_file(
@@ -331,6 +388,24 @@ mod tests {
     }
 
     #[test]
+    fn private_key_accepts_only_explicit_group_read_access() -> Result<()> {
+        let root = test_root("group-read")?;
+        let path = root.join("private");
+        fs::write(&path, "00".repeat(KEY_BYTES)).map_err(|error| Error::from(error.to_string()))?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640))
+            .map_err(|error| Error::from(error.to_string()))?;
+
+        PrivateKey::read_with_access(&path, PrivateKeyAccess::OwnerGroupRead)?;
+        assert!(PrivateKey::read(&path).is_err());
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o660))
+            .map_err(|error| Error::from(error.to_string()))?;
+        assert!(PrivateKey::read_with_access(&path, PrivateKeyAccess::OwnerGroupRead).is_err());
+
+        fs::remove_dir_all(root).map_err(|error| Error::from(error.to_string()))
+    }
+
+    #[test]
     fn key_generation_refuses_to_replace_existing_paths() -> Result<()> {
         let root = test_root("no-replace")?;
         let private_path = root.join("private");
@@ -360,6 +435,34 @@ mod tests {
             provisioned.private.as_bytes()
         );
         assert_eq!(PublicKey::read(&public_path)?, provisioned.public);
+
+        fs::remove_dir_all(root).map_err(|error| Error::from(error.to_string()))
+    }
+
+    #[test]
+    fn group_shared_provisioning_creates_and_reopens_a_group_readable_key() -> Result<()> {
+        let root = test_root("provision-group-read")?;
+        let private_path = root.join("private");
+        let public_path = root.join("public");
+
+        let provisioned = provision_key_pair_with_access(
+            &private_path,
+            &public_path,
+            PrivateKeyAccess::OwnerGroupRead,
+        )?;
+        let reopened = provision_key_pair_with_access(
+            &private_path,
+            &public_path,
+            PrivateKeyAccess::OwnerGroupRead,
+        )?;
+        assert_eq!(provisioned.private.as_bytes(), reopened.private.as_bytes());
+        assert_eq!(
+            fs::metadata(&private_path)
+                .map_err(|error| Error::from(error.to_string()))?
+                .mode()
+                & 0o777,
+            0o640
+        );
 
         fs::remove_dir_all(root).map_err(|error| Error::from(error.to_string()))
     }

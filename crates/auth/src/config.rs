@@ -1,7 +1,7 @@
 use crate::{
     cert::{Certificate, RootPublicKey},
     key::derive_public_key,
-    PrivateKey, CONFIG_FORMAT,
+    PrivateKey, PrivateKeyAccess, CONFIG_FORMAT,
 };
 use r9p::error::{Error, Result};
 use r9p::export_descriptor::validate_p9any_domain;
@@ -89,13 +89,14 @@ impl ClientConfig {
             return Err(Error::from("session auth config role must be client"));
         }
         let private_path = resolve_path(path, required(parsed.private_key, "private-key")?);
+        let private_key_access = parse_private_key_access(parsed.private_key_access)?;
         let mut roots = Vec::with_capacity(parsed.roots.len());
         for root in parsed.roots {
             roots.push(RootPublicKey::from_hex(&root)?);
         }
         let certificate = resolve_path(path, required(parsed.certificate, "certificate")?);
         Self {
-            private_key: PrivateKey::read(&private_path)?,
+            private_key: PrivateKey::read_with_access(&private_path, private_key_access)?,
             certificate: None,
             roots: dedupe_roots(roots),
         }
@@ -149,13 +150,14 @@ impl ServerConfig {
             return Err(Error::from("session auth config role must be server"));
         }
         let private_path = resolve_path(path, required(parsed.private_key, "private-key")?);
+        let private_key_access = parse_private_key_access(parsed.private_key_access)?;
         let mut roots = Vec::with_capacity(parsed.roots.len());
         for root in parsed.roots {
             roots.push(RootPublicKey::from_hex(&root)?);
         }
         let config = Self::new(
             required(parsed.domain, "domain")?,
-            PrivateKey::read(&private_path)?,
+            PrivateKey::read_with_access(&private_path, private_key_access)?,
             roots,
         )?;
         let certificate = resolve_path(path, required(parsed.certificate, "certificate")?);
@@ -224,6 +226,7 @@ struct ParsedConfig {
     role: Option<String>,
     domain: Option<String>,
     private_key: Option<String>,
+    private_key_access: Option<String>,
     certificate: Option<String>,
     roots: Vec<String>,
 }
@@ -253,6 +256,9 @@ impl ParsedConfig {
                 ("private-key", [value]) => {
                     set_once(&mut parsed.private_key, value, "private-key")?
                 }
+                ("private-key-access", [value]) => {
+                    set_once(&mut parsed.private_key_access, value, "private-key-access")?
+                }
                 ("certificate", [value]) => {
                     set_once(&mut parsed.certificate, value, "certificate")?
                 }
@@ -272,6 +278,13 @@ impl ParsedConfig {
             )));
         }
         Ok(parsed)
+    }
+}
+
+fn parse_private_key_access(value: Option<String>) -> Result<PrivateKeyAccess> {
+    match value {
+        Some(value) => PrivateKeyAccess::parse(&value),
+        None => Ok(PrivateKeyAccess::OwnerOnly),
     }
 }
 
@@ -305,7 +318,10 @@ fn resolve_path(config_path: &Path, value: String) -> PathBuf {
 mod tests {
     use super::*;
     use crate::cert::{generate_root_key_pair, CertificateBody};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::{
+        os::unix::fs::PermissionsExt,
+        sync::atomic::{AtomicU64, Ordering},
+    };
 
     static CONFIG_TEST_SERIAL: AtomicU64 = AtomicU64::new(0);
 
@@ -406,6 +422,52 @@ mod tests {
             .ok_or_else(|| Error::from("certificate was not loaded"))?;
         assert_eq!(loaded.body().name(), "tuxedo");
         assert_eq!(loaded.body().key(), client.public);
+        Ok(())
+    }
+
+    #[test]
+    fn a_client_config_must_explicitly_admit_group_key_custody() -> Result<()> {
+        let dir = test_root("client-group-key")?;
+        let root = generate_root_key_pair()?;
+        let client = crate::generate_key_pair()?;
+        let key_path = dir.join("private");
+        crate::write_key_pair(&key_path, &dir.join("public"), &client)?;
+        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o640))
+            .map_err(|error| Error::from(error.to_string()))?;
+        let cert_path = dir.join("client.crt");
+        Certificate::sign(
+            &root.private,
+            CertificateBody::new(
+                "shared-client",
+                client.public,
+                Vec::<String>::new(),
+                1_000,
+                4_000_000_000,
+                root.public,
+            )?,
+        )?
+        .write(&cert_path)?;
+        let config_path = dir.join("client.conf");
+        write(
+            &config_path,
+            &format!(
+                "format {CONFIG_FORMAT}\nrole client\nprivate-key {}\ncertificate {}\nroot {}\n",
+                key_path.display(),
+                cert_path.display(),
+                root.public
+            ),
+        )?;
+        assert!(ClientConfig::read(&config_path).is_err());
+        write(
+            &config_path,
+            &format!(
+                "format {CONFIG_FORMAT}\nrole client\nprivate-key {}\nprivate-key-access owner-group-read\ncertificate {}\nroot {}\n",
+                key_path.display(),
+                cert_path.display(),
+                root.public
+            ),
+        )?;
+        ClientConfig::read(&config_path)?;
         Ok(())
     }
 

@@ -16,7 +16,8 @@ pub use handshake::{
     AuthenticationTransport, PeerIdentity,
 };
 pub use key::{
-    generate_key_pair, provision_key_pair, write_key_pair, KeyPair, PrivateKey, PublicKey,
+    generate_key_pair, provision_key_pair, provision_key_pair_with_access, write_key_pair, KeyPair,
+    PrivateKey, PrivateKeyAccess, PublicKey,
 };
 pub use peercred::{
     TransportIdentity, CERT_SUBJECT_PREFIX, UNIX_PEER_SUBJECT_PREFIX, UNIX_SAME_USER_SUBJECT,

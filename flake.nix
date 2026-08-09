@@ -31,6 +31,14 @@
                   user = "r9p-proof";
                   group = "r9p-proof";
                 };
+                services.r9p-session-auth.keys.shared-proof = {
+                  privateKeyFile = "/var/lib/r9p-session-auth-shared/proof.key";
+                  publicKeyFile = "/var/lib/r9p-session-auth-shared/proof.key.pub";
+                  user = "r9p-proof";
+                  group = "r9p-shared";
+                  directoryMode = "0750";
+                  privateKeyMode = "0640";
+                };
                 system.stateVersion = "25.11";
               }
             ];
@@ -151,6 +159,7 @@
             session-auth-module =
               let
                 service = sessionAuthModuleEval.config.systemd.services.r9p-session-key-proof;
+                sharedService = sessionAuthModuleEval.config.systemd.services.r9p-session-key-shared-proof;
               in
               pkgs.runCommandLocal "r9p-session-auth-module-check"
                 {
@@ -178,10 +187,25 @@
                       sessionAuthModuleEval.config.systemd.tmpfiles.rules
                     then "1"
                     else "0";
+                  sharedDirectoryRulePresent =
+                    if builtins.elem
+                      "d /var/lib/r9p-session-auth-shared 0750 r9p-proof r9p-shared -"
+                      sessionAuthModuleEval.config.systemd.tmpfiles.rules
+                    then "1"
+                    else "0";
+                  sharedPrivateKeyRulePresent =
+                    if builtins.elem
+                      "z /var/lib/r9p-session-auth-shared/proof.key 0640 r9p-proof r9p-shared -"
+                      sessionAuthModuleEval.config.systemd.tmpfiles.rules
+                    then "1"
+                    else "0";
                   executable = service.serviceConfig.ExecStart;
                   packageName = sessionAuthModuleEval.config.services.r9p-session-auth.package.pname;
                   serviceGroup = service.serviceConfig.Group;
                   serviceUser = service.serviceConfig.User;
+                  sharedExecutablePost = sharedService.serviceConfig.ExecStartPost;
+                  sharedServiceGroup = sharedService.serviceConfig.Group;
+                  sharedServiceUser = sharedService.serviceConfig.User;
                 } ''
                 test "$packageName" = "r9p"
                 test "$serviceUser" = "r9p-proof"
@@ -190,6 +214,14 @@
                 test "$privateKeyRulePresent" = "1"
                 test "$recursiveOwnerRulePresent" = "1"
                 test "$publicKeyRulePresent" = "1"
+                test "$sharedDirectoryRulePresent" = "1"
+                test "$sharedPrivateKeyRulePresent" = "1"
+                test "$sharedServiceUser" = "r9p-proof"
+                test "$sharedServiceGroup" = "r9p-shared"
+                case "$sharedExecutablePost" in
+                  */bin/chmod\ 0640\ /var/lib/r9p-session-auth-shared/proof.key) ;;
+                  *) exit 1 ;;
+                esac
                 case "$executable" in
                   */bin/r9p\ auth-keygen\ --private\ /var/lib/r9p-session-auth/proof.key\ --public\ /var/lib/r9p-session-auth/proof.key.pub) ;;
                   *) exit 1 ;;

@@ -1,6 +1,7 @@
 { config
 , defaultPackage
 , lib
+, pkgs
 , ...
 }:
 
@@ -34,6 +35,12 @@ let
         type = lib.types.strMatching "[0-7]{4}";
         default = "0700";
         description = "Mode for the private key-pair directory.";
+      };
+
+      privateKeyMode = lib.mkOption {
+        type = lib.types.strMatching "0[46]00|0[46]40";
+        default = "0600";
+        description = "Mode for the private Noise static key.";
       };
     };
   });
@@ -113,7 +120,7 @@ let
     directoryGroups);
   keyFiles = lib.concatMap
     (entry: [
-      "z ${entry.key.privateKeyFile} 0600 ${entry.key.user} ${entry.key.group} -"
+      "z ${entry.key.privateKeyFile} ${entry.key.privateKeyMode} ${entry.key.user} ${entry.key.group} -"
       "z ${entry.key.publicKeyFile} 0644 ${entry.key.user} ${entry.key.group} -"
     ])
     keyEntries;
@@ -135,6 +142,11 @@ let
             key.privateKeyFile
             "--public"
             key.publicKeyFile
+          ];
+          ExecStartPost = lib.escapeShellArgs [
+            "${pkgs.coreutils}/bin/chmod"
+            key.privateKeyMode
+            key.privateKeyFile
           ];
           RemainAfterExit = true;
         };

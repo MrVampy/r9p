@@ -233,6 +233,12 @@ services.r9p-session-auth.keys.namespace = {
 };
 ```
 
+The default `0700` directory and `0600` private key keep one identity private
+to one Unix user. When two cooperating services deliberately share one
+certified identity, set a dedicated group, `directoryMode = "0750"`, and
+`privateKeyMode = "0640"`. This grants only that group access and does not
+require either service to retain discretionary-access override capabilities.
+
 A server config presents its own certificate and names the roots it trusts:
 
 ```text

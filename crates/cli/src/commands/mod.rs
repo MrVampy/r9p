@@ -1,6 +1,7 @@
 pub(crate) mod auth_keygen;
 pub(crate) mod cert;
 pub(crate) mod con;
+pub(crate) mod duplex;
 pub(crate) mod ls;
 pub(crate) mod machine;
 pub(crate) mod mount;
@@ -12,4 +13,5 @@ pub(crate) mod serve;
 pub(crate) mod session;
 pub(crate) mod session_mount;
 pub(crate) mod stat_rdwr;
+pub(crate) mod stream;
 pub(crate) mod version_attach;

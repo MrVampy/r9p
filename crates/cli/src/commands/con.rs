@@ -1,15 +1,16 @@
 use std::{
     io::{self, Read, Write},
     thread,
-    time::Duration,
 };
 
-use session::{Client, ClientSession, ConnectionConfig, ResumableFid, ORDWR};
+use session::{Client, ClientSession, ResumableFid, ORDWR};
 
 use crate::errors::{cli_error, CliResult};
-use crate::target::{split_namespace_path, target_path, Config, Target};
+use crate::target::{Config, Target};
 use crate::usage;
 use crate::{CTRL_R, READ_CHUNK};
+
+use super::duplex::{open_stream, stream_target};
 
 pub(crate) fn con_cmd(config: Config, mut args: Vec<String>) -> CliResult<()> {
     let mut strip_cr = true;
@@ -96,43 +97,6 @@ fn resumable_con(target: &Target, strip_cr: bool) -> CliResult<()> {
     reader.close()?;
     session.shutdown()?;
     Ok(())
-}
-
-fn open_stream(target: &Target) -> CliResult<(Client, r9p::fid::Fid, r9p::fid::Fid)> {
-    let (config, path, timeout) = stream_target(target)?;
-    let client = Client::connect_with_timeout(&config, timeout)?;
-    let reader_fid = client.walk_path(&path)?;
-    client.open(reader_fid, ORDWR)?;
-    let writer_fid = client.walk_path(&path)?;
-    client.open(writer_fid, ORDWR)?;
-    Ok((client, reader_fid, writer_fid))
-}
-
-fn stream_target(target: &Target) -> CliResult<(ConnectionConfig, String, Duration)> {
-    let (address, path) = match &target.config.address {
-        Some(address) => (address.clone(), target_path(target)?),
-        None => {
-            if target.config.auth_config.is_some() {
-                return Err(cli_error(
-                    "--auth-config requires an endpoint supplied with -a or --bind",
-                ));
-            }
-            let (service, path) = split_namespace_path(&target.path)?;
-            (format!("namespace!{service}"), path)
-        }
-    };
-    let timeout = target.config.request_timeout.unwrap_or(Duration::ZERO);
-    Ok((
-        ConnectionConfig {
-            address,
-            uname: target.config.uname.clone(),
-            aname: target.config.aname.clone(),
-            msize: target.config.msize,
-            authentication: crate::target::client_authentication(&target.config)?,
-        },
-        path,
-        timeout,
-    ))
 }
 
 pub(crate) fn con_writer(client: Client, fid: r9p::fid::Fid) -> CliResult<()> {

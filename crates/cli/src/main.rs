@@ -24,6 +24,7 @@ use commands::{
     serve::{export_cmd, serve_cmd},
     session::session_cmd,
     stat_rdwr::{rdwr_cmd, stat_cmd},
+    stream::stream_cmd,
     version_attach::{attach_cmd, version_cmd},
 };
 use errors::{cli_error, CliResult};
@@ -86,6 +87,7 @@ fn run() -> CliResult<()> {
         "create" => create_cmd(config, args),
         "mkdir" => mkdir_cmd(config, args),
         "con" => con_cmd(config, args),
+        "stream" => stream_cmd(config, args),
         _ => {
             usage();
         }
@@ -278,6 +280,7 @@ pub(crate) fn usage() -> ! {
     eprintln!("  create name...");
     eprintln!("  mkdir name...");
     eprintln!("  con [--resume] [-r] name");
+    eprintln!("  stream name              byte-transparent full-duplex stdio");
     eprintln!("without -a/--bind, name elem/path means /path on server unix!$NAMESPACE/elem");
     std::process::exit(2);
 }

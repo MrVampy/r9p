@@ -120,6 +120,7 @@ r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] rm path...
 r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] create path...
 r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] mkdir path...
 r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] con [--resume] [-r] path
+r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] stream path
 r9p mount [--source namespace-path] [--uname uname] [--aname aname] [--attr-timeout seconds] [--entry-timeout seconds] [--request-timeout seconds] [--lookup-timeout seconds] [--read-timeout seconds] [--write-timeout seconds] [--mutation-timeout seconds] [--control-timeout seconds] [--interrupt-timeout seconds] [--max-workers count] [--max-background count] [--congestion-threshold count] [--diagnostics-file path] [--diagnostics-capacity count] endpoint mountpoint
 r9p mount ensure|status|stop --mountpoint path [--unit name --unit-scope user|system] [--status-file path] [--expect-endpoint endpoint] [--expect-change-feed path] [--expect-status-file path] [--attempts count] [-- mount args...]
 r9p serve [--bind address] [--max-fids count] [--writable] root
@@ -151,6 +152,16 @@ write offsets are durable application cursors. After a definitive transport
 failure, r9p reattaches, reopens the same path, and repeats the operation at the
 same offset. It must not be used with an ordinary mutable file whose repeated
 write would apply the effect twice.
+
+`stream` is the machine-facing full-duplex stdio adapter. It retains separate
+read and write fids on one multiplexed 9P connection, copies bytes without
+carriage-return filtering or an escape character, and flushes each received
+chunk to stdout. Stdin EOF clunks the write fid so the service can close its
+input side and finish any remaining output. The command deliberately provides
+no automatic replay: a protocol request may have caused a non-idempotent
+effect before transport failure made delivery uncertain. This makes `stream`
+suitable as an opaque carrier for protocols such as MCP without teaching r9p
+their message semantics.
 
 `--unit` and `--unit-scope` are a pair. `user` targets the per-user systemd
 manager and `system` targets the system manager. The selected scope applies

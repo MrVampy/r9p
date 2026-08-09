@@ -108,10 +108,15 @@ This map defines the local sources agents should inspect before making source-sp
     stdout remain one logical application session.
   - `r9p con --resume` uses the same two lanes across renewed attachments only
     for an explicitly replay-safe offset stream.
+  - `r9p stream` uses the same full-duplex transport as a byte-transparent,
+    non-replaying machine stdio adapter.
   - Ordinary path commands use the transparent namespace client;
     `--auth-domain` names the responder a root dial requires.
 - `crates/cli/tests/cli_machine.rs`
   - Machine-output and streaming command regression tests.
+- `crates/cli/tests/cli_stream.rs`
+  - End-to-end full-duplex byte transparency, including control, carriage
+    return, non-UTF-8, and multi-frame input.
 - `crates/fuse/src/`
   - Canonical Linux FUSE bridge over the `r9p` client primitives, exposed as
     `r9p mount`.

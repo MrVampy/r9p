@@ -919,7 +919,7 @@ mod tests {
         let serve = format!("front-serve-tcp\t{front_id}\t{}", hex_text("127.0.0.1:0"));
         let addr = parse_front_addr(&server.handle_line(&serve).expect("front serve"));
 
-        let client =
+        let mut client =
             blocking::Client::connect_tcp(&addr, "codex", "/", 65_536).expect("connect front");
         let stat = client.stat_path("trades/demo/events").expect("stat events");
         assert_eq!(stat.length, 45);

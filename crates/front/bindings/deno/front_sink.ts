@@ -7,6 +7,7 @@ export const FRONT_CAP_ATOMIC_CREATE_WRITE = 1n << 4n;
 export const FRONT_CAP_NAMESPACE_MUTATION_RELAYS = 1n << 5n;
 export const FRONT_CAP_AUTHENTICATED_SERVE = 1n << 6n;
 export const FRONT_CAP_CLIENT_SESSION_AUTHENTICATION = 1n << 7n;
+export const FRONT_CAP_RESTORED_LOG_OFFSET = 1n << 9n;
 export const REQUIRED_FRONT_CAPABILITIES =
   FRONT_CAP_PUSHED_NAMESPACE_METADATA |
   FRONT_CAP_REQUEST_CONTEXT_V2 |
@@ -15,7 +16,8 @@ export const REQUIRED_FRONT_CAPABILITIES =
   FRONT_CAP_ATOMIC_CREATE_WRITE |
   FRONT_CAP_NAMESPACE_MUTATION_RELAYS |
   FRONT_CAP_AUTHENTICATED_SERVE |
-  FRONT_CAP_CLIENT_SESSION_AUTHENTICATION;
+  FRONT_CAP_CLIENT_SESSION_AUTHENTICATION |
+  FRONT_CAP_RESTORED_LOG_OFFSET;
 
 export { renderExportDescriptor } from "./export_descriptor.ts";
 export type {
@@ -84,6 +86,10 @@ const SYMBOLS = {
   },
   r9p_front_register_log: {
     parameters: ["pointer", "buffer", "usize"],
+    result: "i32",
+  },
+  r9p_front_register_log_at: {
+    parameters: ["pointer", "buffer", "usize", "u64"],
     result: "i32",
   },
   r9p_front_next_request: {
@@ -801,6 +807,22 @@ export class FrontHost implements TransitionSink {
     if (status !== 0) {
       throw new Error(
         `front register_log(${path}) failed with status ${status}`,
+      );
+    }
+  }
+
+  registerLogAt(path: string, startOffset: bigint): void {
+    this.assertOpen();
+    const [pathBytes, pathLen] = bytes(path);
+    const status = this.library.symbols.r9p_front_register_log_at(
+      this.handle,
+      pathBytes,
+      pathLen,
+      startOffset,
+    );
+    if (status !== 0) {
+      throw new Error(
+        `front register_log_at(${path}, ${startOffset}) failed with status ${status}`,
       );
     }
   }

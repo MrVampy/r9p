@@ -118,6 +118,16 @@ impl FrontManager {
                     .map_err(|error| error.to_string())?;
                 Ok("front-register-log".to_string())
             }
+            ["front-register-log-at", raw_id, path, start_offset] => {
+                let state = self.front(raw_id)?;
+                let path = hex::decode_text(path)?;
+                let start_offset = parse_u64("start_offset", start_offset)?;
+                state
+                    .front
+                    .register_log_at(&path, start_offset)
+                    .map_err(|error| error.to_string())?;
+                Ok("front-register-log-at".to_string())
+            }
             ["front-append-event", raw_id, path, data] => {
                 let state = self.front(raw_id)?;
                 let path = hex::decode_text(path)?;

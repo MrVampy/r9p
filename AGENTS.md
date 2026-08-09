@@ -31,6 +31,9 @@
   condition variables, or explicit protocol notifications. Retry deadlines and
   bounded liveness timeouts are valid semantics; periodic sleeps used to
   discover work are not.
+- A reconstructed retained positional stream keeps its absolute application
+  offset lineage. Publisher restart must not silently reset durable client
+  cursors to zero.
 - Acme-specific behavior belongs in Racme's Acme adapter, not in `r9p`.
 - FUSE/POSIX translation belongs in `crates/fuse`, not in the reusable
   `crates/core` protocol crate.

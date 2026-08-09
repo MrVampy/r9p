@@ -101,6 +101,21 @@ pub fn register_log(front: Front, path: String) -> Result(Nil, String) {
   expect_line("front-register-log", line)
 }
 
+pub fn register_log_at(
+  front: Front,
+  path: String,
+  start_offset: Int,
+) -> Result(Nil, String) {
+  use line <- result.try(
+    run(front.adapter, "front-register-log-at", [
+      int.to_string(front.id),
+      text(path),
+      int.to_string(start_offset),
+    ]),
+  )
+  expect_line("front-register-log-at", line)
+}
+
 pub fn append_event(
   front: Front,
   path: String,

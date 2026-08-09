@@ -317,6 +317,30 @@ fn log_read_behind_window_fails_typed_with_earliest_offset() -> Result<()> {
 }
 
 #[test]
+fn restored_log_keeps_absolute_offsets_across_reconstruction() -> Result<()> {
+    let front = Front::new();
+    front.register_log_at("market/events", 41)?;
+    front.append_event("market/events", b"one\n")?;
+    front.append_event("market/events", b"two\n")?;
+    let mut tree = front.tree();
+    tree.attach(1, b"claude", b"/")?;
+    let qids = walk_to(&mut tree, 1, 2, &["market", "events"]);
+    assert_eq!(tree.stat(qids[1])?.length, 49);
+    assert_eq!(
+        tree.read(2, qids[1], 41, 4096)?,
+        ReadData::Bytes(b"one\ntwo\n".to_vec())
+    );
+    let error = tree
+        .read(2, qids[1], 40, 4096)
+        .expect_err("pre-window offset must fail");
+    assert_eq!(
+        error.message(),
+        b"log window passed: earliest retained offset 41"
+    );
+    Ok(())
+}
+
+#[test]
 fn log_keeps_a_single_oversized_entry() -> Result<()> {
     let front = Front::new();
     front.set_log_capacity(4)?;

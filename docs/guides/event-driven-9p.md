@@ -186,6 +186,14 @@ should report a precise resynchronization condition. It should not silently
 return a newer event because that would turn data loss into apparently valid
 progress.
 
+A durable publisher must also preserve the retained log's absolute offset
+lineage across process restart. Reconstructing the same retained records at
+offset zero invalidates every client cursor even though the path and records
+look unchanged. An r9p Front publisher restores this with
+`register_log_at(path, start_offset)`, then appends its retained records in
+order. `stat.length` remains the absolute stream end, and a read before the
+retained start keeps returning the typed window-passed error.
+
 A timeout can bound connection establishment, cleanup, or reconnect. It must
 not periodically cancel and recreate a healthy blocking read merely because no
 event exists.
@@ -246,13 +254,16 @@ Before exposing a live source through 9P, answer:
 1. What application cursor is committed before reconnect?
 1. Which operations are replay-safe?
 1. What catch-up source covers a retention gap?
+1. How is the absolute retained offset restored after publisher restart?
 1. Which measurements justify the chosen in-flight depth?
 
 ## Source Grounding
 
 The detailed source inspection is recorded in
 `notes/source-reading/2026-07-29-concurrent-retained-fid-reads.md` and
-`notes/source-reading/2026-07-30-finite-wait-response-eof.md`.
+`notes/source-reading/2026-07-30-finite-wait-response-eof.md`. Durable log
+reconstruction is recorded in
+`notes/source-reading/2026-08-09-restored-log-offsets.md`.
 
 The principal references are:
 

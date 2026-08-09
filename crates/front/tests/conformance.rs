@@ -2,8 +2,8 @@ use front::abi::{
     r9p_front_abi_version, r9p_front_append_event, r9p_front_capabilities, r9p_front_client_read,
     r9p_front_client_rpc, r9p_front_complete_remove, r9p_front_complete_request,
     r9p_front_complete_write, r9p_front_free, r9p_front_new, r9p_front_next_request,
-    r9p_front_register_intake, r9p_front_register_log, r9p_front_register_read_relay,
-    r9p_front_register_remove_relay, r9p_front_register_rpc,
+    r9p_front_register_intake, r9p_front_register_log, r9p_front_register_log_at,
+    r9p_front_register_read_relay, r9p_front_register_remove_relay, r9p_front_register_rpc,
     r9p_front_register_snapshot_read_relay, r9p_front_register_write_relay,
     r9p_front_request_context_copy, r9p_front_request_copy, r9p_front_request_prefix_copy,
     r9p_front_serve_tcp, r9p_front_serve_tcp_authenticated, r9p_front_set,
@@ -198,6 +198,11 @@ fn abi_roundtrip_over_tcp() {
     let (stream, stream_len) = cstr("stream");
     assert_eq!(
         unsafe { r9p_front_register_log(handle, stream, stream_len) },
+        0
+    );
+    let (restored_stream, restored_stream_len) = cstr("restored-stream");
+    assert_eq!(
+        unsafe { r9p_front_register_log_at(handle, restored_stream, restored_stream_len, 4096) },
         0
     );
     let (bind, bind_len) = cstr("127.0.0.1:0");

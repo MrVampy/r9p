@@ -238,6 +238,25 @@ impl Front {
         Ok(())
     }
 
+    /// Registers an empty retained log whose first appended byte has the
+    /// supplied absolute application offset.
+    ///
+    /// A durable publisher uses this when reconstructing a bounded retained
+    /// window after process restart. Subsequent appends keep the restored
+    /// offset lineage instead of silently restarting the stream at zero.
+    pub fn register_log_at(&self, path: &str, start_offset: u64) -> Result<()> {
+        let mut state = self.lock()?;
+        let trimmed = path.trim_matches('/');
+        if trimmed.is_empty() {
+            return Err(Error::from_static(EPERM));
+        }
+        if state.lookup_optional_path(trimmed)?.is_some() {
+            return Err(Error::from_static(EPERM));
+        }
+        state.place(trimmed, Body::Log(LogBody::empty_at(start_offset)))?;
+        Ok(())
+    }
+
     pub fn set_principal_root(&self, principal: &str, root_path: &str) -> Result<()> {
         self.set_principal_class_aname(principal, principal, "*", root_path)
     }

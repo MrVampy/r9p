@@ -897,6 +897,45 @@ mod tests {
     }
 
     #[test]
+    fn front_commands_restore_event_log_offset() {
+        let mut server = PeerClientServer::default();
+        let front_id = parse_front_id(&server.handle_line("front-new").expect("front-new"));
+        let register = format!(
+            "front-register-log-at\t{front_id}\t{}\t41",
+            hex_text("trades/demo/events")
+        );
+        assert_eq!(
+            server
+                .handle_line(&register)
+                .expect("front-register-log-at"),
+            "front-register-log-at".to_string()
+        );
+        let append = format!(
+            "front-append-event\t{front_id}\t{}\t{}",
+            hex_text("trades/demo/events"),
+            hex::encode(b"one\n")
+        );
+        server.handle_line(&append).expect("front-append-event");
+        let serve = format!("front-serve-tcp\t{front_id}\t{}", hex_text("127.0.0.1:0"));
+        let addr = parse_front_addr(&server.handle_line(&serve).expect("front serve"));
+
+        let client =
+            blocking::Client::connect_tcp(&addr, "codex", "/", 65_536).expect("connect front");
+        let stat = client.stat_path("trades/demo/events").expect("stat events");
+        assert_eq!(stat.length, 45);
+        let body = client
+            .read_path_range("trades/demo/events", 41, 4)
+            .expect("read restored events");
+        assert_eq!(body, b"one\n");
+
+        let stop = format!("front-stop\t{front_id}");
+        assert_eq!(
+            server.handle_line(&stop).expect("front-stop"),
+            "front-stop".to_string()
+        );
+    }
+
+    #[test]
     fn front_commands_roundtrip_rpc_request() {
         let mut server = PeerClientServer::default();
         let front_id = parse_front_id(&server.handle_line("front-new").expect("front-new"));

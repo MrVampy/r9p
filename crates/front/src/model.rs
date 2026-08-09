@@ -44,9 +44,13 @@ impl LogBody {
     }
 
     pub(crate) fn empty() -> Self {
+        Self::empty_at(0)
+    }
+
+    pub(crate) fn empty_at(start: u64) -> Self {
         Self {
             entries: VecDeque::new(),
-            start: 0,
+            start,
             retained: 0,
         }
     }

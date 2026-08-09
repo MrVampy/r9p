@@ -2,7 +2,7 @@
 #define R9P_FRONT_H
 
 /*
- * r9p front C ABI, generation 21.
+ * r9p front C ABI, generation 22.
  *
  * Contract rules:
  * - Call r9p_front_abi_version() first and require
@@ -152,6 +152,7 @@
 #define R9P_FRONT_CAP_AUTHENTICATED_SERVE (UINT64_C(1) << 6)
 #define R9P_FRONT_CAP_CLIENT_SESSION_AUTHENTICATION (UINT64_C(1) << 7)
 #define R9P_FRONT_CAP_SNAPSHOT_READ_RELAY (UINT64_C(1) << 8)
+#define R9P_FRONT_CAP_RESTORED_LOG_OFFSET (UINT64_C(1) << 9)
 
 typedef struct r9p_front r9p_front;
 
@@ -196,6 +197,8 @@ int32_t r9p_front_register_wstat_relay(r9p_front *front, const char *path,
                                        size_t path_len);
 int32_t r9p_front_register_log(r9p_front *front, const char *path,
                                size_t path_len);
+int32_t r9p_front_register_log_at(r9p_front *front, const char *path,
+                                  size_t path_len, uint64_t start_offset);
 int32_t r9p_front_set_principal_root(r9p_front *front,
                                      const char *principal,
                                      size_t principal_len,

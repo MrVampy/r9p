@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use session::{Client, ConnectionConfig, ORDWR};
+use session::{Client, ConnectionConfig, OREAD, OWRITE};
 
 use crate::errors::{cli_error, CliResult};
 use crate::target::{split_namespace_path, target_path, Target};
@@ -9,9 +9,9 @@ pub(super) fn open_stream(target: &Target) -> CliResult<(Client, r9p::fid::Fid, 
     let (config, path, timeout) = stream_target(target)?;
     let client = Client::connect_with_timeout(&config, timeout)?;
     let reader_fid = client.walk_path(&path)?;
-    client.open(reader_fid, ORDWR)?;
+    client.open(reader_fid, OREAD)?;
     let writer_fid = client.walk_path(&path)?;
-    client.open(writer_fid, ORDWR)?;
+    client.open(writer_fid, OWRITE)?;
     Ok((client, reader_fid, writer_fid))
 }
 

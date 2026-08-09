@@ -110,8 +110,9 @@ This map defines the local sources agents should inspect before making source-sp
     stdout remain one logical application session.
   - `r9p con --resume` uses the same two lanes across renewed attachments only
     for an explicitly replay-safe offset stream.
-  - `r9p stream` uses the same full-duplex transport as a byte-transparent,
-    non-replaying machine stdio adapter.
+  - `r9p stream` uses distinct read-only and write-only fids over the same
+    full-duplex transport as a byte-transparent, non-replaying machine stdio
+    adapter.
   - Ordinary path commands use the transparent namespace client;
     `--auth-domain` names the responder a root dial requires.
 - `crates/cli/tests/cli_machine.rs`

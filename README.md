@@ -153,15 +153,15 @@ failure, r9p reattaches, reopens the same path, and repeats the operation at the
 same offset. It must not be used with an ordinary mutable file whose repeated
 write would apply the effect twice.
 
-`stream` is the machine-facing full-duplex stdio adapter. It retains separate
-read and write fids on one multiplexed 9P connection, copies bytes without
-carriage-return filtering or an escape character, and flushes each received
-chunk to stdout. Stdin EOF clunks the write fid so the service can close its
-input side and finish any remaining output. The command deliberately provides
-no automatic replay: a protocol request may have caused a non-idempotent
-effect before transport failure made delivery uncertain. This makes `stream`
-suitable as an opaque carrier for protocols such as MCP without teaching r9p
-their message semantics.
+`stream` is the machine-facing full-duplex stdio adapter. It retains a
+read-only fid and a write-only fid on one multiplexed 9P connection, copies
+bytes without carriage-return filtering or an escape character, and flushes
+each received chunk to stdout. Stdin EOF clunks the write fid so the service
+can close its input side and finish any remaining output. The command
+deliberately provides no automatic replay: a protocol request may have caused
+a non-idempotent effect before transport failure made delivery uncertain. This
+makes `stream` suitable as an opaque carrier for protocols such as MCP without
+teaching r9p their message semantics.
 
 `--unit` and `--unit-scope` are a pair. `user` targets the per-user systemd
 manager and `system` targets the system manager. The selected scope applies

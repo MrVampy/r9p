@@ -13,6 +13,7 @@ use std::{
 
 use r9p::{
     fid::Fid,
+    mode::{OREAD, OWRITE},
     qid::Qid,
     server::{
         serve_connection, ConnectionHandler, OpenFile, ReadData, ServerCompletion, ServerConfig,
@@ -29,6 +30,7 @@ const STREAM: Qid = Qid::file(2);
 #[derive(Default)]
 struct StreamState {
     opened: BTreeSet<Fid>,
+    reader: Option<Fid>,
     writer: Option<Fid>,
     input: Vec<u8>,
     input_closed: bool,
@@ -53,13 +55,15 @@ impl ConnectionHandler for EchoStream {
             {
                 Ok(ServerCompletion::Walk { qids: vec![STREAM] })
             }
-            ServerRequestKind::Open { fid, qid, .. } if *qid == STREAM => {
+            ServerRequestKind::Open { fid, qid, mode, .. } if *qid == STREAM => {
                 let mut state = self.lock_state()?;
                 if !state.opened.insert(*fid) || state.opened.len() > 2 {
                     return Err(R9pError::from_static("unexpected stream open"));
                 }
-                if state.opened.len() == 2 {
-                    state.writer = Some(*fid);
+                match *mode {
+                    OREAD if state.reader.replace(*fid).is_none() => {}
+                    OWRITE if state.writer.replace(*fid).is_none() => {}
+                    _ => return Err(R9pError::from_static("unexpected stream open mode")),
                 }
                 Ok(ServerCompletion::Open(OpenFile {
                     qid: STREAM,
@@ -67,8 +71,16 @@ impl ConnectionHandler for EchoStream {
                 }))
             }
             ServerRequestKind::Read {
-                qid, offset, count, ..
-            } if *qid == STREAM => self.read(*offset, *count, cancel),
+                fid,
+                qid,
+                offset,
+                count,
+            } if *qid == STREAM => {
+                if self.lock_state()?.reader != Some(*fid) {
+                    return Err(R9pError::from_static("read used the writer fid"));
+                }
+                self.read(*offset, *count, cancel)
+            }
             ServerRequestKind::Write {
                 fid,
                 qid,

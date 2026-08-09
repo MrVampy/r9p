@@ -8,6 +8,8 @@ mod epoch;
 mod error;
 pub mod feed;
 mod opened_fid;
+#[cfg(unix)]
+mod projection;
 mod request;
 mod resumable_fid;
 mod transport;
@@ -25,6 +27,8 @@ pub use connection_config::{
 pub use epoch::SessionEpoch;
 pub use error::{errno_for_9p_error, p9_error, Error, Result, WriteThenReadError};
 pub use opened_fid::{ConcurrentReadFid, OpenedFid};
+#[cfg(unix)]
+pub use projection::{NamespaceProjection, NamespaceProjectionConfig, NamespaceProjectionStatus};
 pub use r9p::{ORDWR, OREAD, OTRUNC, OWRITE};
 pub use request::{with_fuse_unique, RequestTracker};
 pub use resumable_fid::ResumableFid;

@@ -73,6 +73,51 @@ fn connects_explicit_unix_socket() {
 }
 
 #[test]
+fn reconciles_a_missing_or_existing_file_without_a_stat_preflight() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("session listener");
+    let address = listener.local_addr().expect("session address");
+    let value = Arc::new(Mutex::new(None));
+    let server_value = Arc::clone(&value);
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("server should accept");
+        handle_configured_connection(
+            stream,
+            PublicationTree {
+                value: server_value,
+            },
+            ServerConfig::default(),
+        )
+        .expect("server connection should complete");
+    });
+    let client =
+        Client::connect_with_timeout(&connection(address.to_string()), Duration::from_secs(2))
+            .expect("client should connect");
+
+    assert_eq!(
+        client
+            .reconcile_file_at("/", "published", 0o666, b"first")
+            .expect("missing file should be created"),
+        5
+    );
+    assert_eq!(
+        client
+            .reconcile_file_at("/", "published", 0o666, b"second")
+            .expect("existing file should be replaced"),
+        6
+    );
+    assert_eq!(
+        client
+            .read_path("/published")
+            .expect("published value should remain readable"),
+        b"second"
+    );
+
+    client.shutdown().expect("session should shut down");
+    drop(client);
+    server.join().expect("server should not panic");
+}
+
+#[test]
 fn connect_waits_for_unix_socket_to_appear() {
     let socket_path = unique_socket_path("delayed");
     let server_path = socket_path.clone();
@@ -491,6 +536,107 @@ impl FileTree for RootOnly {
 
     fn stat(&mut self, _qid: Qid) -> P9Result<Stat> {
         Ok(root_stat())
+    }
+}
+
+const PUBLICATION_QID: Qid = Qid::file(2);
+
+struct PublicationTree {
+    value: Arc<Mutex<Option<Vec<u8>>>>,
+}
+
+impl FileTree for PublicationTree {
+    fn attach(&mut self, _fid: Fid, _uname: &[u8], _aname: &[u8]) -> P9Result<Qid> {
+        Ok(ROOT_QID)
+    }
+
+    fn walk(
+        &mut self,
+        _fid: Fid,
+        _newfid: Fid,
+        start: Qid,
+        names: &[Vec<u8>],
+    ) -> P9Result<Vec<Qid>> {
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+        let present = self.value.lock().expect("publication value lock").is_some();
+        if start == ROOT_QID && names.len() == 1 && names[0].as_slice() == b"published" && present {
+            Ok(vec![PUBLICATION_QID])
+        } else {
+            Err(P9Error::from_static(r9p::error::ENOENT))
+        }
+    }
+
+    fn open(&mut self, _fid: Fid, qid: Qid, mode: u8) -> P9Result<OpenFile> {
+        if qid == PUBLICATION_QID && mode & r9p::OTRUNC != 0 {
+            self.value
+                .lock()
+                .expect("publication value lock")
+                .as_mut()
+                .expect("opened publication should exist")
+                .clear();
+        }
+        Ok(OpenFile { qid, iounit: 0 })
+    }
+
+    fn create(
+        &mut self,
+        _fid: Fid,
+        qid: Qid,
+        name: &[u8],
+        _perm: u32,
+        _mode: u8,
+    ) -> P9Result<OpenFile> {
+        if qid != ROOT_QID || name != b"published" {
+            return Err(P9Error::from_static(r9p::error::ENOENT));
+        }
+        let mut value = self.value.lock().expect("publication value lock");
+        if value.is_some() {
+            return Err(P9Error::from_static(r9p::error::EEXIST));
+        }
+        *value = Some(Vec::new());
+        Ok(OpenFile {
+            qid: PUBLICATION_QID,
+            iounit: 0,
+        })
+    }
+
+    fn read(&mut self, _fid: Fid, qid: Qid, offset: u64, count: u32) -> P9Result<ReadData> {
+        if qid == ROOT_QID {
+            return Ok(ReadData::Directory(Vec::new()));
+        }
+        let value = self.value.lock().expect("publication value lock");
+        let bytes = value.as_ref().expect("read publication should exist");
+        let start = usize::try_from(offset)
+            .unwrap_or(usize::MAX)
+            .min(bytes.len());
+        let end = start.saturating_add(count as usize).min(bytes.len());
+        Ok(ReadData::Bytes(bytes[start..end].to_vec()))
+    }
+
+    fn write(&mut self, _fid: Fid, qid: Qid, offset: u64, data: &[u8]) -> P9Result<u32> {
+        if qid != PUBLICATION_QID || offset != 0 {
+            return Err(P9Error::from("invalid publication write"));
+        }
+        let mut value = self.value.lock().expect("publication value lock");
+        *value.as_mut().expect("write publication should exist") = data.to_vec();
+        Ok(u32::try_from(data.len()).expect("test data should fit"))
+    }
+
+    fn stat(&mut self, qid: Qid) -> P9Result<Stat> {
+        if qid == ROOT_QID {
+            return Ok(root_stat());
+        }
+        let mut stat = Stat::new("published", PUBLICATION_QID, 0o666);
+        stat.length = self
+            .value
+            .lock()
+            .expect("publication value lock")
+            .as_ref()
+            .expect("stat publication should exist")
+            .len() as u64;
+        Ok(stat)
     }
 }
 

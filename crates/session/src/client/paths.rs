@@ -119,6 +119,36 @@ impl Client {
         finish_fid(self, fid, result)
     }
 
+    /// Replaces one file or creates it when it is definitively absent.
+    ///
+    /// This is intended for desired-state publication whose full contents are
+    /// safe to submit after an `ENOENT` or `EEXIST` response. It never retries
+    /// an ambiguous write failure. A concurrent creator is resolved by one
+    /// final replacement attempt.
+    pub fn reconcile_file_at(
+        &self,
+        parent: &str,
+        name: &str,
+        perm: u32,
+        data: &[u8],
+    ) -> Result<u32> {
+        let (target_parent, leaf) = create_target(parent, name)?;
+        let target_path = child_path(&target_parent, leaf);
+        match self.write_file(&target_path, data) {
+            Ok(count) => Ok(count),
+            Err(error) if error.errno == libc::ENOENT => {
+                match self.create_write_at(&target_parent, leaf, perm, OWRITE, 0, data) {
+                    Ok(count) => Ok(count),
+                    Err(error) if error.errno == libc::EEXIST => {
+                        self.write_file(&target_path, data)
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn rpc_path(&self, path: &str, request: &[u8]) -> Result<Vec<u8>> {
         let fid = self.walk_path(path)?;
         let result = (|| {
@@ -249,6 +279,14 @@ fn create_target<'a>(parent: &str, name: &'a str) -> Result<(String, &'a str)> {
         format!("{parent}/{relative_parent}")
     };
     Ok((target_parent, leaf))
+}
+
+fn child_path(parent: &str, name: &str) -> String {
+    if parent == "/" {
+        format!("/{name}")
+    } else {
+        format!("{parent}/{name}")
+    }
 }
 
 fn validate_response_bound(max_response_bytes: u32) -> Result<()> {

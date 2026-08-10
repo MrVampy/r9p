@@ -139,6 +139,9 @@ This map defines the local sources agents should inspect before making source-sp
 - `notes/source-reading/2026-08-10-atomic-front-recovery.md`
   - Source-backed boundary for publish-before-prune Front reconciliation and
     Coordinator-owned lease recovery after a publisher restart.
+- `notes/source-reading/2026-08-10-desired-state-file-reconciliation.md`
+  - Source-backed boundary for higher-level replace-or-create publication
+    without replaying an ambiguous 9P write.
 - `crates/fs/src/`
   - Local filesystem-backed 9P server adapter used by `r9p serve` and
     `r9p export`; read-only by default with an explicit writable mode.

@@ -94,6 +94,11 @@ This map defines the local sources agents should inspect before making source-sp
   - The recent or cursor path is a one-shot catch-up source after connection
     loss, never a periodic polling source. The configured delay bounds
     reconnect attempts only.
+- `crates/session/src/projection/`
+  - Private local projection of one authenticated namespace subtree.
+  - Each local session gets its own upstream client; shutdown uses an internal
+    event-driven wake descriptor and never depends on reconnecting to the
+    published socket.
 - `docs/guides/event-driven-9p.md`
   - Generic retained-fid, blocking-read, tagged-concurrency, cancellation,
     backpressure, and reconnect pattern for event-driven 9P applications.
@@ -142,6 +147,9 @@ This map defines the local sources agents should inspect before making source-sp
 - `notes/source-reading/2026-08-10-desired-state-file-reconciliation.md`
   - Source-backed boundary for higher-level replace-or-create publication
     without replaying an ambiguous 9P write.
+- `notes/source-reading/2026-08-10-namespace-projection-shutdown.md`
+  - Source-backed boundary for projection lifecycle control independent of
+    published Unix socket ownership and permissions.
 - `crates/fs/src/`
   - Local filesystem-backed 9P server adapter used by `r9p serve` and
     `r9p export`; read-only by default with an explicit writable mode.

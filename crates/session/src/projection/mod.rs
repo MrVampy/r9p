@@ -11,6 +11,8 @@ use r9p::{
 use std::{
     collections::BTreeMap,
     fs, io,
+    net::Shutdown,
+    os::fd::AsRawFd,
     os::unix::{
         fs::{FileTypeExt, PermissionsExt},
         net::{UnixListener, UnixStream},
@@ -49,6 +51,7 @@ pub struct NamespaceProjection {
     counters: Arc<ProjectionCounters>,
     sessions: Arc<ActiveSessions>,
     shutdown: Arc<AtomicBool>,
+    acceptor_wake: UnixStream,
     acceptor: Option<JoinHandle<()>>,
 }
 
@@ -96,8 +99,11 @@ impl NamespaceProjection {
         let counters = Arc::new(ProjectionCounters::default());
         let sessions = Arc::new(ActiveSessions::default());
         let shutdown = Arc::new(AtomicBool::new(false));
+        let (acceptor_wake, acceptor_wait) = UnixStream::pair()
+            .map_err(|error| Error::io("create namespace projection shutdown wake", error))?;
         let acceptor = spawn_acceptor(
             listener,
+            acceptor_wait,
             config.clone(),
             Arc::clone(&counters),
             Arc::clone(&sessions),
@@ -108,6 +114,7 @@ impl NamespaceProjection {
             counters,
             sessions,
             shutdown,
+            acceptor_wake,
             acceptor: Some(acceptor),
         })
     }
@@ -131,7 +138,7 @@ impl Drop for NamespaceProjection {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
         self.sessions.shutdown_clients();
-        let _ = UnixStream::connect(&self.socket);
+        let _ = self.acceptor_wake.shutdown(Shutdown::Both);
         if let Some(acceptor) = self.acceptor.take() {
             let _ = acceptor.join();
         }
@@ -186,6 +193,7 @@ fn remove_socket(path: &Path) {
 
 fn spawn_acceptor(
     listener: UnixListener,
+    wake: UnixStream,
     config: NamespaceProjectionConfig,
     counters: Arc<ProjectionCounters>,
     sessions: Arc<ActiveSessions>,
@@ -195,8 +203,9 @@ fn spawn_acceptor(
         .name("r9p-namespace-projection".to_string())
         .spawn(move || {
             while !shutdown.load(Ordering::Acquire) {
-                let local = match listener.accept() {
-                    Ok((stream, _)) => stream,
+                let local = match accept_or_shutdown(&listener, &wake) {
+                    Ok(Some(stream)) => stream,
+                    Ok(None) => break,
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                     Err(_) => break,
                 };
@@ -229,6 +238,52 @@ fn spawn_acceptor(
             }
         })
         .map_err(|error| Error::new(libc::EIO, format!("spawn projection acceptor: {error}")))
+}
+
+fn accept_or_shutdown(
+    listener: &UnixListener,
+    wake: &UnixStream,
+) -> io::Result<Option<UnixStream>> {
+    loop {
+        let mut descriptors = [
+            libc::pollfd {
+                fd: listener.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: wake.as_raw_fd(),
+                events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
+                revents: 0,
+            },
+        ];
+        let ready = unsafe {
+            libc::poll(
+                descriptors.as_mut_ptr(),
+                descriptors.len() as libc::nfds_t,
+                -1,
+            )
+        };
+        if ready < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if descriptors[1].revents != 0 {
+            return Ok(None);
+        }
+        if descriptors[0].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "namespace projection listener stopped",
+            ));
+        }
+        if descriptors[0].revents & libc::POLLIN != 0 {
+            return listener.accept().map(|(stream, _)| Some(stream));
+        }
+    }
 }
 
 fn serve_session(

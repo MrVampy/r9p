@@ -13,7 +13,7 @@ use std::{
     net::TcpListener,
     path::PathBuf,
     process,
-    sync::{Arc, Mutex},
+    sync::{mpsc, Arc, Mutex},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -221,6 +221,34 @@ fn projects_only_the_selected_subtree_over_a_private_socket() {
     drop(client);
     drop(projection);
     server.join().expect("upstream server should stop");
+    assert!(!socket.exists());
+}
+
+#[test]
+fn shutdown_does_not_reconnect_to_the_projected_socket() {
+    let socket = unique_socket_path();
+    let projection = NamespaceProjection::start(NamespaceProjectionConfig {
+        socket: socket.clone(),
+        namespace: connection("127.0.0.1:9".to_string()),
+        source: "/mcp".to_string(),
+        max_sessions: 2,
+        max_async_requests: 8,
+        connect_timeout: Duration::from_secs(2),
+        operation_timeout: Duration::from_secs(2),
+    })
+    .expect("start projection");
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o000))
+        .expect("make projection socket unavailable to self-connect");
+
+    let (completed, observed) = mpsc::channel();
+    let shutdown = thread::spawn(move || {
+        drop(projection);
+        completed.send(()).expect("report projection shutdown");
+    });
+    observed
+        .recv_timeout(Duration::from_secs(2))
+        .expect("projection shutdown should use its private wake descriptor");
+    shutdown.join().expect("projection shutdown thread");
     assert!(!socket.exists());
 }
 

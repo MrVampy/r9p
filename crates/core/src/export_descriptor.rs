@@ -43,8 +43,8 @@ pub struct SessionEndpoint {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostOwnership {
-    pub service_unit: String,
-    pub firewall_admission: String,
+    service_unit: String,
+    firewall_admission: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,6 +283,26 @@ impl SessionEndpoint {
 }
 
 impl HostOwnership {
+    pub fn new(
+        service_unit: impl Into<String>,
+        firewall_admission: impl Into<String>,
+    ) -> Result<Self> {
+        let ownership = Self {
+            service_unit: service_unit.into(),
+            firewall_admission: firewall_admission.into(),
+        };
+        ownership.validate()?;
+        Ok(ownership)
+    }
+
+    pub fn service_unit(&self) -> &str {
+        &self.service_unit
+    }
+
+    pub fn firewall_admission(&self) -> &str {
+        &self.firewall_admission
+    }
+
     fn validate(&self) -> Result<()> {
         for (field, value) in [
             (SERVICE_UNIT_FIELD, self.service_unit.as_str()),
@@ -678,10 +698,8 @@ mod tests {
 
     #[test]
     fn descriptor_round_trips_host_ownership() {
-        let expected = HostOwnership {
-            service_unit: "terminal-m7.service".to_string(),
-            firewall_admission: "tcp:m7.mesh:9670".to_string(),
-        };
+        let expected = HostOwnership::new("terminal-m7.service", "tcp:m7.mesh:9670")
+            .expect("host ownership should be valid");
         let descriptor = descriptor()
             .with_host_ownership(expected.clone())
             .expect("host ownership should be valid");

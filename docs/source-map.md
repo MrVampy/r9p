@@ -136,6 +136,9 @@ This map defines the local sources agents should inspect before making source-sp
 - `notes/source-reading/2026-08-08-auth-agent-and-certificate-lifecycle.md`
   - Source-backed reason to defer a full auth agent, the actual Snow transport
     handoff constraint, and the lifecycle responsibilities that precede it.
+- `notes/source-reading/2026-08-10-atomic-front-recovery.md`
+  - Source-backed boundary for publish-before-prune Front reconciliation and
+    Coordinator-owned lease recovery after a publisher restart.
 - `crates/fs/src/`
   - Local filesystem-backed 9P server adapter used by `r9p serve` and
     `r9p export`; read-only by default with an explicit writable mode.

@@ -73,6 +73,29 @@ impl Front {
         Ok(())
     }
 
+    /// Removes every path below `root_path` except the supplied paths and
+    /// their ancestors.
+    ///
+    /// Validation and mutation happen while holding one Front state lock. If
+    /// the root or any retained path is invalid, missing, or outside the
+    /// subtree, the Front is left unchanged. The subtree root is retained
+    /// implicitly.
+    pub fn retain_subtree_paths<I, S>(&self, root_path: &str, paths: I) -> Result<()>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let paths = paths
+            .into_iter()
+            .map(|path| path.as_ref().to_string())
+            .collect::<Vec<_>>();
+        let changed = self.lock()?.retain_subtree_paths(root_path, &paths)?;
+        if changed {
+            self.shared.1.notify_all();
+        }
+        Ok(())
+    }
+
     pub fn append_event(&self, path: &str, bytes: &[u8]) -> Result<()> {
         self.lock()?
             .place(path, Body::Log(LogBody::new(bytes.to_vec())))?;

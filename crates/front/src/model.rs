@@ -703,6 +703,86 @@ impl State {
         Ok(())
     }
 
+    pub(crate) fn retain_subtree_paths(
+        &mut self,
+        root_path: &str,
+        paths: &[String],
+    ) -> Result<bool> {
+        let canonical_root = canonical_root_path(root_path)?;
+        let root_segments = canonical_path_segments(&canonical_root)?;
+        let root = self.lookup_path(&canonical_root)?;
+        if !matches!(self.node(root)?.body, Body::Dir(_)) {
+            return Err(Error::from_static(ENOTDIR));
+        }
+
+        let mut retained = BTreeSet::from([root]);
+        for path in paths {
+            let canonical_path = canonical_root_path(path)?;
+            let path_segments = canonical_path_segments(&canonical_path)?;
+            if !path_segments.starts_with(&root_segments) {
+                return Err(Error::from_static(EPERM));
+            }
+
+            let mut current = self.lookup_path(&canonical_path)?;
+            loop {
+                retained.insert(current);
+                if current == root {
+                    break;
+                }
+                let parent = self.node(current)?.parent;
+                if parent == current {
+                    return Err(Error::from_static(EPERM));
+                }
+                current = parent;
+            }
+        }
+
+        let mut stale = Vec::new();
+        self.collect_stale_subtrees(root, &retained, &mut stale)?;
+        for (parent, name, id) in &stale {
+            if let Some(Node {
+                body: Body::Dir(children),
+                ..
+            }) = self.nodes.get_mut(parent)
+            {
+                children.remove(name.as_slice());
+            }
+            self.remove_node_recursive(*id);
+        }
+
+        if !stale.is_empty() {
+            let nodes = &self.nodes;
+            self.principal_roots
+                .retain(|_uname, binding| nodes.contains_key(&binding.root));
+        }
+        Ok(!stale.is_empty())
+    }
+
+    fn collect_stale_subtrees(
+        &self,
+        parent: u64,
+        retained: &BTreeSet<u64>,
+        stale: &mut Vec<(u64, Vec<u8>, u64)>,
+    ) -> Result<()> {
+        let children = match &self.node(parent)?.body {
+            Body::Dir(children) => children
+                .iter()
+                .map(|(name, id)| (name.clone(), *id))
+                .collect::<Vec<_>>(),
+            _ => return Err(Error::from_static(ENOTDIR)),
+        };
+        for (name, child) in children {
+            if retained.contains(&child) {
+                if matches!(self.node(child)?.body, Body::Dir(_)) {
+                    self.collect_stale_subtrees(child, retained, stale)?;
+                }
+            } else {
+                stale.push((parent, name, child));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn remove_node_recursive(&mut self, id: u64) {
         let Some(node) = self.nodes.remove(&id) else {
             return;
@@ -843,6 +923,14 @@ pub(crate) fn canonical_root_path(path: &str) -> Result<String> {
     }
     let _ = split_path(trimmed)?;
     Ok(trimmed.to_string())
+}
+
+fn canonical_path_segments(path: &str) -> Result<Vec<Vec<u8>>> {
+    if path == "/" {
+        Ok(Vec::new())
+    } else {
+        split_path(path)
+    }
 }
 
 pub(crate) fn normalise_request_prefix(prefix: &str) -> Result<String> {

@@ -239,6 +239,78 @@ fn remove_subtree_missing_path_is_noop() -> Result<()> {
 }
 
 #[test]
+fn retain_subtree_paths_keeps_current_branches_and_removes_stale_siblings() -> Result<()> {
+    let front = Front::new();
+    front.set("views/runtime/status", b"ready")?;
+    front.set("views/runtime/services/current/status", b"current")?;
+    front.set("views/runtime/services/stale/status", b"stale")?;
+    front.set("views/operator/status", b"outside")?;
+
+    front.retain_subtree_paths(
+        "views/runtime",
+        [
+            "views/runtime/status",
+            "views/runtime/services/current/status",
+        ],
+    )?;
+
+    let mut tree = front.tree();
+    tree.attach(1, b"claude", b"/")?;
+    assert_eq!(
+        walk_to(&mut tree, 1, 2, &["views", "runtime", "status"]).len(),
+        3
+    );
+    assert_eq!(
+        walk_to(
+            &mut tree,
+            1,
+            3,
+            &["views", "runtime", "services", "current", "status"]
+        )
+        .len(),
+        5
+    );
+    assert_eq!(
+        walk_to(&mut tree, 1, 4, &["views", "operator", "status"]).len(),
+        3
+    );
+    let services = walk_to(&mut tree, 1, 5, &["views", "runtime", "services"]);
+    let stale = tree
+        .walk(
+            5,
+            6,
+            *services.last().expect("services qid"),
+            &[b"stale".to_vec()],
+        )
+        .expect_err("stale sibling must be removed");
+    assert_eq!(stale.message(), ENOENT.as_bytes());
+    Ok(())
+}
+
+#[test]
+fn retain_subtree_paths_rejects_invalid_set_without_mutation() -> Result<()> {
+    let front = Front::new();
+    front.set("views/runtime/current", b"current")?;
+    front.set("views/runtime/stale", b"stale")?;
+    front.set("views/operator/status", b"outside")?;
+
+    front
+        .retain_subtree_paths(
+            "views/runtime",
+            ["views/runtime/current", "views/operator/status"],
+        )
+        .expect_err("an out-of-subtree retained path must be rejected");
+
+    let mut tree = front.tree();
+    tree.attach(1, b"claude", b"/")?;
+    assert_eq!(
+        walk_to(&mut tree, 1, 2, &["views", "runtime", "stale"]).len(),
+        3
+    );
+    Ok(())
+}
+
+#[test]
 fn protocol_limits_control_open_iounit() -> Result<()> {
     let front = Front::new();
     front.set_protocol_limits(65_536, 4096)?;

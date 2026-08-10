@@ -39,6 +39,10 @@ and RPC retry behavior move into r9p as generic service-host machinery?
 - The existing `WriteThenReadError` classification is the correct primitive.
   Memory should consume it directly instead of inferring delivery state from a
   generic transport error.
+- A rejected exchange proves that no mutation was accepted. Memory may
+  reconnect and retry a transient walk or open failure even for a non-replayable
+  RPC; only `DeliveryUnknown` requires application-specific reconciliation or
+  an explicit idempotent replay decision.
 
 ## Effect
 

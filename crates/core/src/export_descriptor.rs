@@ -10,6 +10,8 @@ pub const P9ANY_NOISE_XX: &str = "noise-xx";
 pub const SESSION_ENDPOINT_BIND_FIELD: &str = "session_endpoint_bind";
 pub const SESSION_ANAME_FIELD: &str = "session_aname";
 pub const SESSION_AUTH_FIELD: &str = "session_auth";
+pub const SERVICE_UNIT_FIELD: &str = "service_unit";
+pub const HOST_FIREWALL_ADMISSION_FIELD: &str = "host_firewall_admission";
 
 const MAX_AUTH_DOMAIN_BYTES: usize = 255;
 
@@ -37,6 +39,12 @@ pub struct SessionEndpoint {
     pub aname: String,
     pub transport_class: TransportClass,
     pub auth: AuthBoundary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostOwnership {
+    pub service_unit: String,
+    pub firewall_admission: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,9 +117,44 @@ impl ExportDescriptor {
         }
     }
 
+    pub fn with_host_ownership(mut self, ownership: HostOwnership) -> Result<Self> {
+        ownership.validate()?;
+        for (field, value) in [
+            (SERVICE_UNIT_FIELD, ownership.service_unit),
+            (HOST_FIREWALL_ADMISSION_FIELD, ownership.firewall_admission),
+        ] {
+            if self.extra_fields.insert(field.to_string(), value).is_some() {
+                return Err(Error::from(format!(
+                    "descriptor already contains host ownership field {field}"
+                )));
+            }
+        }
+        Ok(self)
+    }
+
+    pub fn host_ownership(&self) -> Result<Option<HostOwnership>> {
+        let service_unit = self.extra_fields.get(SERVICE_UNIT_FIELD);
+        let firewall_admission = self.extra_fields.get(HOST_FIREWALL_ADMISSION_FIELD);
+        match (service_unit, firewall_admission) {
+            (None, None) => Ok(None),
+            (Some(service_unit), Some(firewall_admission)) => {
+                let ownership = HostOwnership {
+                    service_unit: service_unit.clone(),
+                    firewall_admission: firewall_admission.clone(),
+                };
+                ownership.validate()?;
+                Ok(Some(ownership))
+            }
+            _ => Err(Error::from(
+                "descriptor has incomplete host ownership evidence",
+            )),
+        }
+    }
+
     pub fn render(&self) -> Result<String> {
         self.validate_authority_boundary()?;
         self.session_endpoint()?;
+        self.host_ownership()?;
         let mut fields = vec![
             ("format", EXPORT_FORMAT_V1.to_string()),
             ("endpoint_bind", self.endpoint_bind.clone()),
@@ -216,6 +259,7 @@ impl ExportDescriptor {
         };
         descriptor.validate_authority_boundary()?;
         descriptor.session_endpoint()?;
+        descriptor.host_ownership()?;
         Ok(descriptor)
     }
 
@@ -235,6 +279,26 @@ impl SessionEndpoint {
             return Err(Error::from("session endpoint aname is empty"));
         }
         validate_transport_auth(self.transport_class, &self.endpoint_bind, &self.auth)
+    }
+}
+
+impl HostOwnership {
+    fn validate(&self) -> Result<()> {
+        for (field, value) in [
+            (SERVICE_UNIT_FIELD, self.service_unit.as_str()),
+            (
+                HOST_FIREWALL_ADMISSION_FIELD,
+                self.firewall_admission.as_str(),
+            ),
+        ] {
+            validate_token(field, value)?;
+            if value.is_empty() || value.trim() != value || value.contains('"') {
+                return Err(Error::from(format!(
+                    "descriptor host ownership field {field} is invalid"
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -608,6 +672,35 @@ mod tests {
         descriptor.extra_fields.insert(
             SESSION_ENDPOINT_BIND_FIELD.to_string(),
             "192.0.2.10:19640".to_string(),
+        );
+        assert!(descriptor.render().is_err());
+    }
+
+    #[test]
+    fn descriptor_round_trips_host_ownership() {
+        let expected = HostOwnership {
+            service_unit: "terminal-m7.service".to_string(),
+            firewall_admission: "tcp:m7.mesh:9670".to_string(),
+        };
+        let descriptor = descriptor()
+            .with_host_ownership(expected.clone())
+            .expect("host ownership should be valid");
+        let rendered = descriptor.render().expect("descriptor should render");
+        let parsed = ExportDescriptor::parse(&rendered).expect("descriptor should parse");
+        assert_eq!(
+            parsed
+                .host_ownership()
+                .expect("host ownership should parse"),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn descriptor_rejects_incomplete_host_ownership() {
+        let mut descriptor = descriptor();
+        descriptor.extra_fields.insert(
+            SERVICE_UNIT_FIELD.to_string(),
+            "terminal-m7.service".to_string(),
         );
         assert!(descriptor.render().is_err());
     }

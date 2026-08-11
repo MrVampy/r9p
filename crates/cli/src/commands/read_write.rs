@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 
 use r9p::fid::Fid;
 use r9p::{
@@ -119,13 +119,28 @@ fn machine_write_fd_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
     Ok(())
 }
 
+enum RequestSource {
+    Given(Vec<u8>),
+    Empty,
+    Stdin,
+}
+
+fn request_source(argument: Option<&String>, stdin_is_terminal: bool) -> RequestSource {
+    match argument {
+        Some(request) => RequestSource::Given(request.clone().into_bytes()),
+        None if stdin_is_terminal => RequestSource::Empty,
+        None => RequestSource::Stdin,
+    }
+}
+
 pub(crate) fn rpc_cmd(config: Config, args: Vec<String>) -> CliResult<()> {
     if args.is_empty() || args.len() > 2 {
         usage();
     }
-    let request = match args.get(1) {
-        Some(request) => request.clone().into_bytes(),
-        None => {
+    let request = match request_source(args.get(1), std::io::stdin().is_terminal()) {
+        RequestSource::Given(request) => request,
+        RequestSource::Empty => Vec::new(),
+        RequestSource::Stdin => {
             let mut buf = Vec::new();
             std::io::stdin().read_to_end(&mut buf)?;
             buf
@@ -276,7 +291,7 @@ pub(crate) fn create_write_from_cmd(config: Config, args: Vec<String>) -> CliRes
 
 #[cfg(test)]
 mod tests {
-    use super::rpc_open_hint;
+    use super::{request_source, rpc_open_hint, RequestSource};
     use r9p::{
         qid::{Qid, DMDIR},
         stat::Stat,
@@ -304,5 +319,26 @@ mod tests {
     fn rpc_hint_leaves_writeable_files_to_protocol_errors() {
         let stat = Stat::new("run", Qid::file(7), 0o600);
         assert_eq!(rpc_open_hint("/operations/srvcheck/run", &stat), None);
+    }
+
+    #[test]
+    fn an_omitted_request_at_a_terminal_is_empty_rather_than_a_read() {
+        assert!(matches!(request_source(None, true), RequestSource::Empty));
+    }
+
+    #[test]
+    fn an_omitted_request_off_a_terminal_still_comes_from_stdin() {
+        assert!(matches!(request_source(None, false), RequestSource::Stdin));
+    }
+
+    #[test]
+    fn a_given_request_is_used_whatever_stdin_is() {
+        let request = "{}".to_string();
+        for terminal in [true, false] {
+            match request_source(Some(&request), terminal) {
+                RequestSource::Given(bytes) => assert_eq!(bytes, b"{}"),
+                _ => panic!("a given request must be used"),
+            }
+        }
     }
 }

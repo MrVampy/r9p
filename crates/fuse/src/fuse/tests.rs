@@ -1,5 +1,5 @@
 use super::config::DEFAULT_CHANGE_FEED_RECONNECT_DELAY;
-use super::dispatch::supported_init_flags;
+use super::dispatch::{supported_init_flags, wait_for_managed_input, ManagedInput};
 use super::mount_state::negative_entry_out;
 use super::ops::encode_dirents;
 use super::util::{
@@ -15,7 +15,56 @@ use crate::error::Error;
 use crate::node::DirEntry;
 use r9p::{qid::Qid, stat::Stat};
 use session::{ORDWR, OREAD, OTRUNC, OWRITE};
-use std::time::Duration;
+use std::{
+    io::Write, net::Shutdown, os::fd::AsRawFd, os::unix::net::UnixStream, sync::mpsc, thread,
+    time::Duration,
+};
+
+#[test]
+fn managed_mount_wait_wakes_on_private_shutdown_descriptor() {
+    let (fuse_reader, _fuse_writer) = UnixStream::pair().expect("create fake FUSE descriptor");
+    let (shutdown_reader, shutdown_writer) =
+        UnixStream::pair().expect("create shutdown descriptor");
+    let (completed, observed) = mpsc::channel();
+    let waiter = thread::spawn(move || {
+        let result = wait_for_managed_input(fuse_reader.as_raw_fd(), shutdown_reader.as_raw_fd());
+        completed.send(result).expect("report managed wait result");
+    });
+
+    shutdown_writer
+        .shutdown(Shutdown::Both)
+        .expect("signal managed shutdown");
+    assert_eq!(
+        observed
+            .recv_timeout(Duration::from_secs(2))
+            .expect("managed wait should stop without FUSE input")
+            .expect("managed wait should succeed"),
+        ManagedInput::Shutdown
+    );
+    waiter.join().expect("managed wait thread");
+}
+
+#[test]
+fn managed_mount_wait_preserves_fuse_readiness() {
+    let (fuse_reader, mut fuse_writer) = UnixStream::pair().expect("create fake FUSE descriptor");
+    let (shutdown_reader, _shutdown_writer) =
+        UnixStream::pair().expect("create shutdown descriptor");
+    let (completed, observed) = mpsc::channel();
+    let waiter = thread::spawn(move || {
+        let result = wait_for_managed_input(fuse_reader.as_raw_fd(), shutdown_reader.as_raw_fd());
+        completed.send(result).expect("report managed wait result");
+    });
+
+    fuse_writer.write_all(&[1]).expect("signal FUSE readiness");
+    assert_eq!(
+        observed
+            .recv_timeout(Duration::from_secs(2))
+            .expect("managed wait should observe FUSE input")
+            .expect("managed wait should succeed"),
+        ManagedInput::Fuse
+    );
+    waiter.join().expect("managed wait thread");
+}
 
 #[test]
 fn maps_truncating_write_flags_to_9p_mode() {

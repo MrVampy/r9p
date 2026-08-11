@@ -23,8 +23,9 @@ use crate::{
 use session::with_fuse_unique;
 use std::{
     fs::File,
-    io::Read,
+    io::{self, Read},
     mem::size_of,
+    os::{fd::AsRawFd, unix::net::UnixStream},
     panic::{self, AssertUnwindSafe},
     sync::{
         mpsc::{sync_channel, Receiver, SyncSender},
@@ -39,6 +40,19 @@ impl R9pFuse {
         file: &mut File,
         feed_events: Option<session::feed::FeedEventReceiver>,
     ) -> Result<()> {
+        self.run_loop(file, feed_events, None)
+    }
+
+    pub(super) fn run_managed(&self, file: &mut File, shutdown: UnixStream) -> Result<()> {
+        self.run_loop(file, None, Some(shutdown))
+    }
+
+    fn run_loop(
+        &self,
+        file: &mut File,
+        feed_events: Option<session::feed::FeedEventReceiver>,
+        shutdown: Option<UnixStream>,
+    ) -> Result<()> {
         let mut workers = WorkerPool::start(self)?;
         let mut change_feed = match feed_events {
             Some(receiver) => self.start_session_feed_events(file, receiver)?,
@@ -47,6 +61,20 @@ impl R9pFuse {
         let mut buf = vec![0_u8; FUSE_BUFFER_SIZE];
         let mut initialized = false;
         loop {
+            if let Some(shutdown) = shutdown.as_ref() {
+                match wait_for_managed_input(file.as_raw_fd(), shutdown.as_raw_fd())
+                    .map_err(|error| Error::io("wait for managed FUSE input", error))?
+                {
+                    ManagedInput::Fuse => {}
+                    ManagedInput::Shutdown => {
+                        if let Some(feed) = change_feed.take() {
+                            feed.stop_and_join();
+                        }
+                        workers.shutdown();
+                        return Ok(());
+                    }
+                }
+            }
             let n = match file.read(&mut buf) {
                 Ok(0) => {
                     if let Some(feed) = change_feed.take() {
@@ -332,6 +360,54 @@ impl R9pFuse {
             let _ = client.clunk_timeout(old_fid, self.config.control_timeout);
         }
         Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ManagedInput {
+    Fuse,
+    Shutdown,
+}
+
+pub(super) fn wait_for_managed_input(
+    fuse_fd: libc::c_int,
+    shutdown_fd: libc::c_int,
+) -> io::Result<ManagedInput> {
+    loop {
+        let mut descriptors = [
+            libc::pollfd {
+                fd: fuse_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: shutdown_fd,
+                events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
+                revents: 0,
+            },
+        ];
+        let ready = unsafe {
+            libc::poll(
+                descriptors.as_mut_ptr(),
+                descriptors.len() as libc::nfds_t,
+                -1,
+            )
+        };
+        if ready < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if descriptors[1].revents != 0 {
+            return Ok(ManagedInput::Shutdown);
+        }
+        if descriptors[0].revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP | libc::POLLNVAL)
+            != 0
+        {
+            return Ok(ManagedInput::Fuse);
+        }
     }
 }
 

@@ -30,12 +30,14 @@ use crate::{
     node::NodeTable,
 };
 use config::{normalize_config, parse_source_path};
-use mount::{block_termination_signals, lazy_unmount, mount_fuse, FuseMount};
+use mount::{block_termination_signals, mount_fuse, FuseMount};
 use recovery::ShapeRecovery;
 use session::{feed::FeedEventReceiver, ClientSession};
 use status::MountStatus;
 use std::{
-    path::{Path, PathBuf},
+    net::Shutdown,
+    os::unix::net::UnixStream,
+    path::Path,
     sync::{mpsc, Arc, Mutex},
     thread::{self, JoinHandle},
 };
@@ -46,7 +48,7 @@ pub use config::{
 };
 
 pub struct MountHandle {
-    mountpoint: PathBuf,
+    shutdown: Option<UnixStream>,
     join: Option<JoinHandle<()>>,
 }
 
@@ -69,12 +71,14 @@ impl MountHandle {
 
         let mut pending = Vec::with_capacity(prepared.len());
         for (config, mount) in prepared {
-            let mountpoint = PathBuf::from(&config.mountpoint);
             let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
+            let (shutdown, shutdown_wait) = UnixStream::pair()
+                .map_err(|error| Error::io("create managed FUSE shutdown wake", error))?;
             let join = thread::Builder::new()
                 .name("r9p-fuse-mount".to_string())
                 .spawn(move || {
-                    let result = R9pFuse::mount_managed(config, mount, ready_sender.clone());
+                    let result =
+                        R9pFuse::mount_managed(config, mount, shutdown_wait, ready_sender.clone());
                     if let Err(error) = result {
                         let _ = ready_sender.send(Err((error.errno, error.message().to_string())));
                     }
@@ -82,7 +86,7 @@ impl MountHandle {
                 .map_err(|error| Error::io("spawn managed FUSE mount", error))?;
             pending.push((
                 Self {
-                    mountpoint,
+                    shutdown: Some(shutdown),
                     join: Some(join),
                 },
                 ready_receiver,
@@ -110,7 +114,9 @@ impl MountHandle {
     }
 
     fn stop_inner(&mut self) {
-        lazy_unmount(&self.mountpoint);
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.shutdown(Shutdown::Both);
+        }
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
@@ -158,13 +164,14 @@ impl R9pFuse {
     fn mount_managed(
         config: Config,
         mut mount: FuseMount,
+        shutdown: UnixStream,
         ready: mpsc::SyncSender<std::result::Result<(), (i32, String)>>,
     ) -> Result<()> {
         drop_managed_mount_thread_capabilities()?;
         let client = ClientSession::connect(&config.connection(), config.connect_timeout)?;
         let fs = Self::prepare(config, client)?;
         let _ = ready.send(Ok(()));
-        fs.run(mount.file_mut(), None)
+        fs.run_managed(mount.file_mut(), shutdown)
     }
 
     fn mount_prepared(

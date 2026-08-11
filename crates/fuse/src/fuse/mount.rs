@@ -2,7 +2,9 @@
 //!
 //! The kernel hands us a single file descriptor representing the FUSE channel;
 //! we obtain it by exec'ing the helper binary and reading the fd off the
-//! shared `SCM_RIGHTS` socket.
+//! shared `SCM_RIGHTS` socket. When `auto_unmount` is active, that socket is
+//! also the helper's liveness guard, so the mount owns both the socket and the
+//! helper process until teardown.
 //!
 //! We also install a SIGINT/SIGTERM/SIGHUP watcher that runs `fusermount -u`
 //! on the way out. Without it, an interrupted process leaves the mount in
@@ -15,13 +17,13 @@ use std::{
     fs::{self, File},
     io,
     mem::zeroed,
-    os::fd::{FromRawFd, RawFd},
+    os::fd::{FromRawFd, OwnedFd, RawFd},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     ptr,
     sync::{
         atomic::{AtomicI32, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     thread,
     time::{Duration, Instant},
@@ -78,6 +80,7 @@ struct MountCleanup {
     mountpoint: PathBuf,
     connection_id: Option<u64>,
     fuse_fd: Arc<AtomicI32>,
+    auto_unmount_guardian: Arc<Mutex<Option<AutoUnmountGuardian>>>,
 }
 
 impl MountCleanup {
@@ -87,8 +90,20 @@ impl MountCleanup {
     }
 
     fn detach_and_abort(&self) {
+        self.stop_auto_unmount_guardian();
         lazy_unmount(&self.mountpoint);
         abort_fuse_connection(self.connection_id);
+    }
+
+    fn stop_auto_unmount_guardian(&self) {
+        let guardian = self
+            .auto_unmount_guardian
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(guardian) = guardian {
+            let _ = guardian.stop();
+        }
     }
 
     fn close_fuse_fd(&self) {
@@ -120,16 +135,18 @@ pub(super) fn mount_fuse(
         .to_str()
         .ok_or_else(|| Error::new(libc::EINVAL, "mountpoint is not valid UTF-8"))?
         .to_string();
-    let fd = match mount_fuse_attempt(&mountpoint_str, true, allow_other) {
-        Ok(fd) => fd,
+    let descriptors = match mount_fuse_attempt(&mountpoint_str, true, allow_other) {
+        Ok(descriptors) => descriptors,
         Err(_) => mount_fuse_attempt(&mountpoint_str, false, allow_other)?,
     };
+    let fd = descriptors.fuse_fd;
     let connection_id = connection_id_for_mountpoint(&mountpoint_str);
     let fuse_fd = Arc::new(AtomicI32::new(fd));
     let cleanup = MountCleanup {
         mountpoint: absolute_mountpoint,
         connection_id,
         fuse_fd: Arc::clone(&fuse_fd),
+        auto_unmount_guardian: Arc::new(Mutex::new(descriptors.auto_unmount_guardian)),
     };
     if unmount_on_signal {
         install_unmount_on_signal(cleanup.clone());
@@ -144,7 +161,7 @@ fn mount_fuse_attempt(
     mountpoint_str: &str,
     auto_unmount: bool,
     allow_other: bool,
-) -> Result<RawFd> {
+) -> Result<MountDescriptors> {
     let mut sockets = [0_i32; 2];
     let rc = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, sockets.as_mut_ptr()) };
     if rc < 0 {
@@ -167,27 +184,82 @@ fn mount_fuse_attempt(
     unsafe {
         libc::close(sockets[0]);
     }
-    let fd = recv_fd(sockets[1]);
-    match (auto_unmount, fd) {
-        (true, Ok(fd)) => {
-            let mut status = 0_i32;
-            unsafe {
-                libc::waitpid(pid, &mut status, libc::WNOHANG);
+    let fuse_fd = recv_fd(sockets[1]);
+    match (auto_unmount, fuse_fd) {
+        (true, Ok(fuse_fd)) => {
+            if let Err(error) = set_close_on_exec(sockets[1]) {
+                unsafe {
+                    libc::close(fuse_fd);
+                    libc::close(sockets[1]);
+                }
+                let _ = wait_for_child_exit(pid);
+                return Err(Error::io("protect fusermount auto-unmount guard", error));
             }
-            std::mem::forget(unsafe { File::from_raw_fd(sockets[1]) });
-            Ok(fd)
+            Ok(MountDescriptors {
+                fuse_fd,
+                auto_unmount_guardian: Some(AutoUnmountGuardian {
+                    guard: Some(unsafe { OwnedFd::from_raw_fd(sockets[1]) }),
+                    pid,
+                }),
+            })
         }
-        (_, fd) => {
+        (_, fuse_fd) => {
             unsafe {
                 libc::close(sockets[1]);
             }
-            let mut status = 0_i32;
-            unsafe {
-                libc::waitpid(pid, &mut status, 0);
-            }
-            fd
+            let _ = wait_for_child_exit(pid);
+            fuse_fd.map(|fuse_fd| MountDescriptors {
+                fuse_fd,
+                auto_unmount_guardian: None,
+            })
         }
     }
+}
+
+struct MountDescriptors {
+    fuse_fd: RawFd,
+    auto_unmount_guardian: Option<AutoUnmountGuardian>,
+}
+
+struct AutoUnmountGuardian {
+    guard: Option<OwnedFd>,
+    pid: libc::pid_t,
+}
+
+impl AutoUnmountGuardian {
+    fn stop(mut self) -> io::Result<i32> {
+        drop(self.guard.take());
+        wait_for_child_exit(self.pid)
+    }
+}
+
+fn wait_for_child_exit(pid: libc::pid_t) -> io::Result<i32> {
+    loop {
+        let mut status = 0_i32;
+        let result = unsafe { libc::waitpid(pid, &mut status, 0) };
+        if result == pid {
+            return Ok(status);
+        }
+        if result < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        return Err(io::Error::other("waitpid returned an unexpected child"));
+    }
+}
+
+fn set_close_on_exec(fd: RawFd) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 fn clear_stale_fuse_mount(mountpoint: &Path) {
@@ -480,8 +552,10 @@ fn decode_mounts_path(path: &str) -> Vec<u8> {
 mod tests {
     use super::{
         decode_mounts_path, fusermount_candidates, mount_options,
-        parse_connection_id_from_mountinfo,
+        parse_connection_id_from_mountinfo, AutoUnmountGuardian,
     };
+    use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+    use std::os::unix::net::UnixStream;
 
     #[test]
     fn prefers_fusermount3_before_fuse2_helper() {
@@ -494,6 +568,35 @@ mod tests {
         assert_eq!("auto_unmount", mount_options(true, false));
         assert_eq!("allow_other", mount_options(false, true));
         assert_eq!("auto_unmount,allow_other", mount_options(true, true));
+    }
+
+    #[test]
+    fn owned_auto_unmount_guard_signals_and_reaps_helper() {
+        let (guard, peer) = UnixStream::pair().expect("auto-unmount guard socket pair");
+        let guard_fd = guard.into_raw_fd();
+        let peer_fd = peer.into_raw_fd();
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork auto-unmount test helper");
+        if pid == 0 {
+            unsafe {
+                libc::close(guard_fd);
+                let mut byte = 0_u8;
+                let read = libc::read(peer_fd, (&mut byte as *mut u8).cast(), 1);
+                libc::close(peer_fd);
+                libc::_exit(if read == 0 { 0 } else { 1 });
+            }
+        }
+
+        unsafe {
+            libc::close(peer_fd);
+        }
+        let guardian = AutoUnmountGuardian {
+            guard: Some(unsafe { OwnedFd::from_raw_fd(guard_fd) }),
+            pid,
+        };
+        let status = guardian.stop().expect("stop and reap auto-unmount helper");
+        assert!(libc::WIFEXITED(status));
+        assert_eq!(0, libc::WEXITSTATUS(status));
     }
 
     #[test]

@@ -88,6 +88,14 @@ record, the Front pins that response to the opened fid, and later ranges
 including explicit EOF are answered without another owner request. The
 ordinary `register_read_relay` remains the distinct range-at-a-time contract.
 
+Demand-backed directories use `register_directory_read_relay`. When a read
+reaches the observed end of an opened fid, Front asks the owner for another
+page. The owner first materializes direct children and then completes the
+request with their names and an EOF fact. Front validates those names, appends
+their stats to that fid's ordered snapshot, and retains responsibility for 9P
+directory encoding and byte offsets. Other fids progress independently and may
+reuse application-owned page caches without sharing their read cursor.
+
 The core owns `Twstat` fields whose mutability is fixed by 9P2000. Immutable
 fields and file-type changes are rejected before backend dispatch. The backend
 then validates its complete mutable-field policy before changing storage and

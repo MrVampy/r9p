@@ -6,7 +6,7 @@ use super::util::{
     dirent_size, flags_to_9p_mode, fuse_name_offset, fuse_open_flags,
     is_lookup_namespace_shape_error, is_namespace_shape_error, is_transport_error,
 };
-use super::wire::{FOPEN_CACHE_DIR, FOPEN_DIRECT_IO, FOPEN_KEEP_CACHE};
+use super::wire::{FOPEN_DIRECT_IO, FOPEN_KEEP_CACHE};
 use super::{
     change_feed, default_congestion_threshold, normalize_config, parse_source_path, Config,
     DEFAULT_MAX_BACKGROUND, DEFAULT_MAX_WORKERS,
@@ -117,11 +117,8 @@ fn coherent_known_length_reads_reuse_the_kernel_page_cache() {
 }
 
 #[test]
-fn directory_opens_allow_kernel_readdir_cache() {
-    assert_eq!(
-        fuse_open_flags(true, OREAD, 0, false),
-        FOPEN_KEEP_CACHE | FOPEN_CACHE_DIR
-    );
+fn directory_opens_keep_readdir_demand_visible() {
+    assert_eq!(fuse_open_flags(true, OREAD, 0, false), 0);
 }
 
 #[test]

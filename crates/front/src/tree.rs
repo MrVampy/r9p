@@ -9,7 +9,7 @@ use r9p::fid::Fid;
 use r9p::qid::Qid;
 use r9p::server::{FileTree, OpenFile, ReadData};
 use r9p::stat::Stat;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::AtomicBool;
 
 pub struct FrontTree {
@@ -20,6 +20,7 @@ pub struct FrontTree {
     rpc_buffers: BTreeMap<Fid, RpcBuffer>,
     rpc_inflight: BTreeMap<Fid, u64>,
     snapshot_relay_inflight: BTreeMap<Fid, u64>,
+    directory_relay_snapshots: BTreeMap<Fid, DirectoryRelaySnapshot>,
     write_relay_buffers: BTreeMap<Fid, WriteRelayBuffer>,
 }
 
@@ -33,6 +34,7 @@ impl FrontTree {
             rpc_buffers: BTreeMap::new(),
             rpc_inflight: BTreeMap::new(),
             snapshot_relay_inflight: BTreeMap::new(),
+            directory_relay_snapshots: BTreeMap::new(),
             write_relay_buffers: BTreeMap::new(),
         }
     }
@@ -75,6 +77,26 @@ struct RequestDetails {
     count: u32,
     open_mode: u8,
     pushed_generation: u64,
+}
+
+struct DirectoryRelaySnapshot {
+    node: u64,
+    entries: Vec<u64>,
+    names: BTreeSet<Vec<u8>>,
+    eof: bool,
+    inflight: Option<u64>,
+}
+
+impl DirectoryRelaySnapshot {
+    fn new(node: u64) -> Self {
+        Self {
+            node,
+            entries: Vec::new(),
+            names: BTreeSet::new(),
+            eof: false,
+            inflight: None,
+        }
+    }
 }
 
 fn request_context(
@@ -278,9 +300,18 @@ impl FileTree for FrontTree {
     fn read(&mut self, fid: Fid, _qid: Qid, offset: u64, count: u32) -> Result<ReadData> {
         match self.read_target_at(fid, offset, count)? {
             ReadTarget::Node(id) => self.front.read_node(id, offset, count, None),
+            ReadTarget::Directory(stats) => Ok(ReadData::Directory(stats)),
             ReadTarget::Response(request_id, response_offset, consume) => {
                 self.front
                     .response_read(request_id, response_offset, count, None, consume)
+            }
+            ReadTarget::DirectoryResponse {
+                request_id,
+                fid,
+                node,
+            } => {
+                let response = self.front.directory_response(request_id, None);
+                self.apply_directory_response(fid, node, request_id, response)
             }
         }
     }
@@ -426,6 +457,13 @@ impl FileTree for FrontTree {
         self.fids.remove(&fid);
         self.open_modes.remove(&fid);
         self.rpc_buffers.remove(&fid);
+        if let Some(snapshot) = self.directory_relay_snapshots.remove(&fid) {
+            if let Some(request_id) = snapshot.inflight {
+                if let Ok(mut state) = self.front.lock() {
+                    state.remove_response_request(request_id);
+                }
+            }
+        }
         let response_request = self
             .rpc_inflight
             .remove(&fid)
@@ -557,9 +595,18 @@ impl FrontTree {
     ) -> Result<ReadData> {
         match self.read_target_at(fid, offset, count)? {
             ReadTarget::Node(id) => self.front.read_node(id, offset, count, cancel),
+            ReadTarget::Directory(stats) => Ok(ReadData::Directory(stats)),
             ReadTarget::Response(request_id, response_offset, consume) => {
                 self.front
                     .response_read(request_id, response_offset, count, cancel, consume)
+            }
+            ReadTarget::DirectoryResponse {
+                request_id,
+                fid,
+                node,
+            } => {
+                let response = self.front.directory_response(request_id, cancel);
+                self.apply_directory_response(fid, node, request_id, response)
             }
         }
     }
@@ -582,6 +629,75 @@ impl FrontTree {
             .ok_or_else(|| Error::from_static(EBADFID))?;
         let id = binding.node;
         let mut state = self.front.lock()?;
+        let directory_prefix = match &state.node(id)?.body {
+            Body::Dir(directory) => directory.read_relay.clone(),
+            _ => None,
+        };
+        if let Some(prefix) = directory_prefix {
+            let snapshot = self
+                .directory_relay_snapshots
+                .entry(fid)
+                .or_insert_with(|| DirectoryRelaySnapshot::new(id));
+            if snapshot.node != id {
+                *snapshot = DirectoryRelaySnapshot::new(id);
+            }
+            let stats = snapshot
+                .entries
+                .iter()
+                .map(|child| state.stat_for(*child))
+                .collect::<Result<Vec<_>>>()?;
+            let observed_bytes = stats.iter().try_fold(0_u64, |total, stat| {
+                let encoded = stat.encode()?;
+                Ok::<u64, Error>(
+                    total.saturating_add(u64::try_from(encoded.len()).unwrap_or(u64::MAX)),
+                )
+            })?;
+            if offset < observed_bytes || snapshot.eof {
+                return Ok(ReadTarget::Directory(stats));
+            }
+            if let Some(request_id) = snapshot.inflight {
+                return Ok(ReadTarget::DirectoryResponse {
+                    request_id,
+                    fid,
+                    node: id,
+                });
+            }
+            let target_path = state.path_relative_to(id, binding.root)?;
+            let front_path = state.path_relative_to(id, ROOT_ID)?;
+            let open_mode = self.open_modes.get(&fid).copied().unwrap_or(0);
+            let pushed_generation = state.node(id)?.generation;
+            let context = request_context(
+                &binding,
+                fid,
+                front_path,
+                target_path,
+                RequestDetails {
+                    offset,
+                    count,
+                    open_mode,
+                    pushed_generation,
+                },
+            );
+            let request_id = state.next_request_id;
+            state.next_request_id = state.next_request_id.saturating_add(1);
+            state.rpc_responses.insert(request_id, None);
+            state.response_prefixes.insert(request_id, prefix.clone());
+            state.directory_response_requests.insert(request_id);
+            state.pending.push_back(IntakeRequest {
+                request_id,
+                prefix,
+                bytes: Vec::new(),
+                context,
+            });
+            snapshot.inflight = Some(request_id);
+            drop(state);
+            self.front.shared.1.notify_all();
+            return Ok(ReadTarget::DirectoryResponse {
+                request_id,
+                fid,
+                node: id,
+            });
+        }
         if matches!(state.node(id)?.body, Body::Rpc(_)) {
             let request_id = match self.rpc_inflight.get(&fid).copied() {
                 Some(request_id) => request_id,
@@ -684,6 +800,64 @@ impl FrontTree {
         Ok(ReadTarget::Node(id))
     }
 
+    pub(crate) fn apply_directory_response(
+        &mut self,
+        fid: Fid,
+        node: u64,
+        request_id: u64,
+        response: Result<(Vec<Vec<u8>>, bool)>,
+    ) -> Result<ReadData> {
+        let mut state = self.front.lock()?;
+        let snapshot = self
+            .directory_relay_snapshots
+            .get_mut(&fid)
+            .ok_or_else(|| Error::from_static(EBADFID))?;
+        if snapshot.node != node || snapshot.inflight != Some(request_id) {
+            state.remove_response_request(request_id);
+            return Err(Error::from_static(
+                "directory response no longer matches its fid",
+            ));
+        }
+        snapshot.inflight = None;
+        let (names, eof) = match response {
+            Ok(response) => response,
+            Err(error) => {
+                state.remove_response_request(request_id);
+                return Err(error);
+            }
+        };
+        let children = match &state.node(node)?.body {
+            Body::Dir(directory) if directory.read_relay.is_some() => &directory.children,
+            _ => {
+                state.remove_response_request(request_id);
+                return Err(Error::from_static(
+                    "directory relay target is no longer a relayed directory",
+                ));
+            }
+        };
+        let mut appended = Vec::with_capacity(names.len());
+        for name in names {
+            let Some(child) = children.get(name.as_slice()).copied() else {
+                state.remove_response_request(request_id);
+                return Err(Error::from_static(
+                    "directory response child is not published",
+                ));
+            };
+            if snapshot.names.insert(name) {
+                appended.push(child);
+            }
+        }
+        snapshot.entries.extend(appended);
+        snapshot.eof = eof;
+        let stats = snapshot
+            .entries
+            .iter()
+            .map(|child| state.stat_for(*child))
+            .collect::<Result<Vec<_>>>();
+        state.remove_response_request(request_id);
+        Ok(ReadData::Directory(stats?))
+    }
+
     pub(crate) fn front(&self) -> Front {
         self.front.clone()
     }
@@ -712,7 +886,13 @@ impl FrontTree {
 
 impl Drop for FrontTree {
     fn drop(&mut self) {
-        if self.rpc_inflight.is_empty() && self.snapshot_relay_inflight.is_empty() {
+        if self.rpc_inflight.is_empty()
+            && self.snapshot_relay_inflight.is_empty()
+            && self
+                .directory_relay_snapshots
+                .values()
+                .all(|snapshot| snapshot.inflight.is_none())
+        {
             self.rpc_buffers.clear();
             self.write_relay_buffers.clear();
             return;
@@ -723,6 +903,11 @@ impl Drop for FrontTree {
             }
             for (_, request_id) in std::mem::take(&mut self.snapshot_relay_inflight) {
                 state.remove_response_request(request_id);
+            }
+            for snapshot in std::mem::take(&mut self.directory_relay_snapshots).into_values() {
+                if let Some(request_id) = snapshot.inflight {
+                    state.remove_response_request(request_id);
+                }
             }
             self.rpc_buffers.clear();
             self.write_relay_buffers.clear();

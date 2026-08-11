@@ -143,6 +143,16 @@ impl R9pFuse {
         let handle = self.nodes()?.remove_handle(input.fh);
         let mut invalidate_after_reply = false;
         if let Some(handle) = handle {
+            if handle.is_dir {
+                if let Some(directory) = handle.directory {
+                    if let Ok(stream) = directory.lock() {
+                        let _ = stream
+                            .client
+                            .clunk_timeout(stream.fid, self.control_timeout());
+                    }
+                }
+                return reply_empty(file, header.unique);
+            }
             if handle.close_commit_flushed {
                 return reply_empty(file, header.unique);
             }

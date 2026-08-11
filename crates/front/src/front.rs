@@ -187,6 +187,21 @@ impl Front {
         Ok(())
     }
 
+    pub fn register_directory_read_relay(&self, path: &str) -> Result<()> {
+        let mut state = self.lock()?;
+        let trimmed = normalise_request_prefix(path)?;
+        let id = state.ensure_path_dir(&trimmed)?;
+        let node = state
+            .nodes
+            .get_mut(&id)
+            .ok_or_else(|| Error::from_static(ENOENT))?;
+        let Body::Dir(directory) = &mut node.body else {
+            return Err(Error::from_static(ENOTDIR));
+        };
+        directory.read_relay = Some(trimmed);
+        Ok(())
+    }
+
     pub fn register_write_relay(&self, path: &str) -> Result<()> {
         let mut state = self.lock()?;
         let trimmed = normalise_request_prefix(path)?;
@@ -475,6 +490,11 @@ impl Front {
         {
             let mut state = self.lock()?;
             if state.rpc_responses.contains_key(&request_id) {
+                if state.directory_response_requests.contains(&request_id) {
+                    return Err(Error::from_static(
+                        "directory request requires directory completion",
+                    ));
+                }
                 let trimmed = normalise_request_prefix(prefix)?;
                 if state.response_prefixes.get(&request_id) != Some(&trimmed) {
                     return Err(Error::from_static(ENOENT));
@@ -497,6 +517,49 @@ impl Front {
         }
         let result_path = format!("{trimmed}/{request_id}/result");
         self.set(&result_path, bytes)
+    }
+
+    pub fn complete_directory_request(
+        &self,
+        prefix: &str,
+        request_id: u64,
+        names: &[String],
+        eof: bool,
+    ) -> Result<()> {
+        let mut encoded = Vec::with_capacity(names.len());
+        for name in names {
+            let bytes = name.as_bytes();
+            if bytes.is_empty()
+                || bytes == b"."
+                || bytes == b".."
+                || bytes.contains(&b'/')
+                || bytes.len() > usize::from(u16::MAX)
+            {
+                return Err(Error::from_static("invalid directory response child name"));
+            }
+            encoded.push(bytes.to_vec());
+        }
+        let mut state = self.lock()?;
+        let trimmed = normalise_request_prefix(prefix)?;
+        if state.response_prefixes.get(&request_id) != Some(&trimmed)
+            || !state.directory_response_requests.contains(&request_id)
+        {
+            return Err(Error::from_static(ENOENT));
+        }
+        let slot = state
+            .rpc_responses
+            .get_mut(&request_id)
+            .ok_or_else(|| Error::from_static(ENOENT))?;
+        if slot.is_some() {
+            return Err(Error::from_static("request already completed"));
+        }
+        *slot = Some(RequestReply::DirectoryAccepted {
+            names: encoded,
+            eof,
+        });
+        drop(state);
+        self.shared.1.notify_all();
+        Ok(())
     }
 
     pub fn reject_request(&self, prefix: &str, request_id: u64, message: &str) -> Result<()> {
@@ -692,6 +755,11 @@ impl Front {
                     let end = bytes.len().min(start.saturating_add(count as usize));
                     return Ok(ReadData::Bytes(bytes[start..end].to_vec()));
                 }
+                Some(Some(RequestReply::DirectoryAccepted { .. })) => {
+                    return Err(Error::from_static(
+                        "directory response used as a file response",
+                    ));
+                }
                 Some(Some(RequestReply::Rejected(message))) => {
                     return Err(Error::from(message.clone()));
                 }
@@ -728,6 +796,49 @@ impl Front {
             state.remove_response_request(request_id);
         }
         response
+    }
+
+    pub(crate) fn directory_response(
+        &self,
+        request_id: u64,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<(Vec<Vec<u8>>, bool)> {
+        let mut state = self.lock()?;
+        let deadline = Instant::now() + state.wait_timeout;
+        loop {
+            if cancel.is_some_and(|cancel| cancel.load(Ordering::SeqCst)) {
+                state.remove_response_request(request_id);
+                return Err(Error::from_static("request flushed"));
+            }
+            match state.rpc_responses.get(&request_id) {
+                None => return Err(Error::from_static(ENOENT)),
+                Some(Some(RequestReply::DirectoryAccepted { names, eof })) => {
+                    return Ok((names.clone(), *eof));
+                }
+                Some(Some(RequestReply::Rejected(message))) => {
+                    return Err(Error::from(message.clone()));
+                }
+                Some(Some(RequestReply::Accepted(_))) => {
+                    return Err(Error::from_static(
+                        "file response used as a directory response",
+                    ));
+                }
+                Some(None) => {}
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                state.remove_response_request(request_id);
+                return Err(Error::from_static(
+                    "directory request timed out awaiting response",
+                ));
+            }
+            let (next, _timeout_result) = self
+                .shared
+                .1
+                .wait_timeout(state, deadline - now)
+                .map_err(|_| Error::from_static("front state poisoned"))?;
+            state = next;
+        }
     }
 
     pub(crate) fn wait_write_relay(
@@ -963,5 +1074,11 @@ impl Front {
 
 pub(crate) enum ReadTarget {
     Node(u64),
+    Directory(Vec<Stat>),
     Response(u64, u64, bool),
+    DirectoryResponse {
+        request_id: u64,
+        fid: r9p::fid::Fid,
+        node: u64,
+    },
 }

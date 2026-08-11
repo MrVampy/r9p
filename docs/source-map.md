@@ -150,6 +150,9 @@ This map defines the local sources agents should inspect before making source-sp
 - `notes/source-reading/2026-08-10-namespace-projection-shutdown.md`
   - Source-backed boundary for projection lifecycle control independent of
     published Unix socket ownership and permissions.
+- `notes/source-reading/2026-08-11-lazy-directory-reads.md`
+  - Source-backed boundary between incremental FUSE directory handles,
+    per-fid Front directory snapshots, and application-owned page loading.
 - `crates/fs/src/`
   - Local filesystem-backed 9P server adapter used by `r9p serve` and
     `r9p export`; read-only by default with an explicit writable mode.

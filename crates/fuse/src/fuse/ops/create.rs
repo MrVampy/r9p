@@ -64,7 +64,7 @@ impl R9pFuse {
                     is_dir: false,
                     write_on_release: mode != OREAD,
                     close_commit: false,
-                    dir_entries: Vec::new(),
+                    directory: None,
                 });
                 let generation = nodes.node(nodeid)?.generation;
                 (nodeid, generation, handle, stat, inserted.clunk_fid)
@@ -80,7 +80,7 @@ impl R9pFuse {
                     is_dir: false,
                     write_on_release: mode != OREAD,
                     close_commit: false,
-                    dir_entries: Vec::new(),
+                    directory: None,
                 });
                 let generation = nodes.node(nodeid)?.generation;
                 (nodeid, generation, handle, stat, None)

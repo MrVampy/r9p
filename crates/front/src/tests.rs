@@ -704,5 +704,6 @@ fn retained_principal_roots_drop_stale_unames() -> Result<()> {
     Ok(())
 }
 
+mod directory_relays;
 mod mutation_relays;
 mod read_rpc;

@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 mod handles;
 pub use handles::Handle;
-pub(crate) use handles::OpenHandle;
+pub(crate) use handles::{DirectoryStream, OpenHandle};
 
 pub const ROOT_NODEID: u64 = 1;
 pub const CLOSE_COMMIT_MODE_FLAG: u32 = 0x0100_0000;

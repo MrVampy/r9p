@@ -1,9 +1,12 @@
 use super::NamespaceChange;
 use crate::{Error, Result as R9pResult};
+use std::collections::VecDeque;
 use std::sync::{
-    mpsc::{sync_channel, Receiver, SyncSender, TrySendError},
-    Arc, Condvar, Mutex,
+    atomic::{AtomicBool, Ordering},
+    mpsc::{RecvError, RecvTimeoutError},
+    Arc, Condvar, Mutex, Weak,
 };
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug)]
 pub enum FeedEvent {
@@ -18,12 +21,35 @@ pub enum FeedEvent {
 
 #[derive(Clone, Debug)]
 pub struct FeedEventBus {
-    inner: Arc<Mutex<Vec<SyncSender<FeedEvent>>>>,
+    inner: Arc<FeedEventBusInner>,
     capacity: usize,
 }
 
 pub struct FeedEventReceiver {
-    receiver: Receiver<FeedEvent>,
+    subscriber: Arc<FeedSubscriber>,
+}
+
+#[derive(Clone, Debug)]
+pub struct FeedReceiverWake {
+    subscriber: Weak<FeedSubscriber>,
+}
+
+#[derive(Debug)]
+struct FeedEventBusInner {
+    subscribers: Mutex<Vec<Weak<FeedSubscriber>>>,
+}
+
+#[derive(Debug)]
+struct FeedSubscriber {
+    state: Mutex<FeedSubscriberState>,
+    changed: Condvar,
+    capacity: usize,
+}
+
+#[derive(Debug, Default)]
+struct FeedSubscriberState {
+    queue: VecDeque<FeedEvent>,
+    closed: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -46,29 +72,41 @@ struct FeedWakeState {
 impl FeedEventBus {
     pub fn new(capacity: usize) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(Vec::new())),
+            inner: Arc::new(FeedEventBusInner {
+                subscribers: Mutex::new(Vec::new()),
+            }),
             capacity: capacity.max(1),
         }
     }
 
     pub fn subscribe(&self) -> FeedEventReceiver {
-        let (sender, receiver) = sync_channel(self.capacity);
-        if let Ok(mut senders) = self.inner.lock() {
-            senders.push(sender);
+        let subscriber = Arc::new(FeedSubscriber {
+            state: Mutex::new(FeedSubscriberState::default()),
+            changed: Condvar::new(),
+            capacity: self.capacity,
+        });
+        if let Ok(mut subscribers) = self.inner.subscribers.lock() {
+            subscribers.push(Arc::downgrade(&subscriber));
+        } else {
+            subscriber.close();
         }
-        FeedEventReceiver { receiver }
+        FeedEventReceiver { subscriber }
     }
 
     pub fn publish(&self, event: FeedEvent) -> bool {
-        let Ok(mut senders) = self.inner.lock() else {
+        let Ok(mut subscribers) = self.inner.subscribers.lock() else {
             return false;
         };
         let mut all_delivered = true;
-        senders.retain(|sender| match sender.try_send(event.clone()) {
-            Ok(()) => true,
-            Err(TrySendError::Disconnected(_)) => false,
-            Err(TrySendError::Full(_)) => {
+        subscribers.retain(|subscriber| {
+            let Some(subscriber) = subscriber.upgrade() else {
+                return false;
+            };
+            if subscriber.publish(event.clone()) {
+                true
+            } else {
                 all_delivered = false;
+                subscriber.close();
                 false
             }
         });
@@ -77,15 +115,127 @@ impl FeedEventBus {
 }
 
 impl FeedEventReceiver {
-    pub fn recv(&self) -> std::result::Result<FeedEvent, std::sync::mpsc::RecvError> {
-        self.receiver.recv()
+    pub fn recv(&self) -> std::result::Result<FeedEvent, RecvError> {
+        self.subscriber.recv()
     }
 
     pub fn recv_timeout(
         &self,
-        timeout: std::time::Duration,
-    ) -> std::result::Result<FeedEvent, std::sync::mpsc::RecvTimeoutError> {
-        self.receiver.recv_timeout(timeout)
+        timeout: Duration,
+    ) -> std::result::Result<FeedEvent, RecvTimeoutError> {
+        self.subscriber.recv_timeout(timeout)
+    }
+
+    pub fn wake_handle(&self) -> FeedReceiverWake {
+        FeedReceiverWake {
+            subscriber: Arc::downgrade(&self.subscriber),
+        }
+    }
+
+    pub fn recv_until_stopped(
+        &self,
+        stop: &AtomicBool,
+    ) -> std::result::Result<Option<FeedEvent>, std::sync::mpsc::RecvError> {
+        self.subscriber.recv_until_stopped(stop)
+    }
+}
+
+impl FeedReceiverWake {
+    pub fn notify(&self) {
+        if let Some(subscriber) = self.subscriber.upgrade() {
+            subscriber.changed.notify_all();
+        }
+    }
+}
+
+impl FeedSubscriber {
+    fn publish(&self, event: FeedEvent) -> bool {
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        if state.closed || state.queue.len() >= self.capacity {
+            return false;
+        }
+        state.queue.push_back(event);
+        self.changed.notify_one();
+        true
+    }
+
+    fn recv(&self) -> std::result::Result<FeedEvent, RecvError> {
+        let mut state = self.state.lock().map_err(|_| RecvError)?;
+        loop {
+            if let Some(event) = state.queue.pop_front() {
+                return Ok(event);
+            }
+            if state.closed {
+                return Err(RecvError);
+            }
+            state = self.changed.wait(state).map_err(|_| RecvError)?;
+        }
+    }
+
+    fn recv_timeout(&self, timeout: Duration) -> std::result::Result<FeedEvent, RecvTimeoutError> {
+        let deadline = Instant::now() + timeout;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| RecvTimeoutError::Disconnected)?;
+        loop {
+            if let Some(event) = state.queue.pop_front() {
+                return Ok(event);
+            }
+            if state.closed {
+                return Err(RecvTimeoutError::Disconnected);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(RecvTimeoutError::Timeout);
+            }
+            let (next, timed_out) = self
+                .changed
+                .wait_timeout(state, remaining)
+                .map_err(|_| RecvTimeoutError::Disconnected)?;
+            state = next;
+            if timed_out.timed_out() && state.queue.is_empty() {
+                return Err(RecvTimeoutError::Timeout);
+            }
+        }
+    }
+
+    fn recv_until_stopped(
+        &self,
+        stop: &AtomicBool,
+    ) -> std::result::Result<Option<FeedEvent>, RecvError> {
+        let mut state = self.state.lock().map_err(|_| RecvError)?;
+        loop {
+            if stop.load(Ordering::SeqCst) {
+                return Ok(None);
+            }
+            if let Some(event) = state.queue.pop_front() {
+                return Ok(Some(event));
+            }
+            if state.closed {
+                return Err(RecvError);
+            }
+            state = self.changed.wait(state).map_err(|_| RecvError)?;
+        }
+    }
+
+    fn close(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.closed = true;
+            self.changed.notify_all();
+        }
+    }
+}
+
+impl Drop for FeedEventBusInner {
+    fn drop(&mut self) {
+        if let Ok(subscribers) = self.subscribers.get_mut() {
+            for subscriber in subscribers.iter().filter_map(Weak::upgrade) {
+                subscriber.close();
+            }
+        }
     }
 }
 
@@ -157,8 +307,14 @@ impl Default for FeedWake {
 
 #[cfg(test)]
 mod tests {
-    use super::FeedWake;
-    use std::thread;
+    use super::{FeedEvent, FeedEventBus, FeedWake};
+    use std::{
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+        thread,
+    };
 
     #[test]
     fn wake_notifies_all_waiters_after_their_observed_generation() {
@@ -189,5 +345,40 @@ mod tests {
             waiter.join().expect("waiter").expect_err("closed").errno,
             libc::ESHUTDOWN
         );
+    }
+
+    #[test]
+    fn receiver_wake_releases_an_event_wait_without_polling() {
+        let receiver = FeedEventBus::default().subscribe();
+        let wake = receiver.wake_handle();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let waiter_stop = Arc::clone(&stopped);
+        let waiter = thread::spawn(move || {
+            receiver
+                .recv_until_stopped(&waiter_stop)
+                .expect("receiver remains connected")
+        });
+
+        stopped.store(true, Ordering::SeqCst);
+        wake.notify();
+
+        assert!(waiter.join().expect("waiter").is_none());
+    }
+
+    #[test]
+    fn subscriber_backpressure_disconnects_after_retained_events_are_drained() {
+        let bus = FeedEventBus::new(1);
+        let receiver = bus.subscribe();
+        assert!(bus.publish(FeedEvent::CoarseInvalidation {
+            reason: "first".to_string(),
+        }));
+        assert!(!bus.publish(FeedEvent::CoarseInvalidation {
+            reason: "overflow".to_string(),
+        }));
+        assert!(matches!(
+            receiver.recv().expect("retained event"),
+            FeedEvent::CoarseInvalidation { reason } if reason == "first"
+        ));
+        assert!(receiver.recv().is_err());
     }
 }

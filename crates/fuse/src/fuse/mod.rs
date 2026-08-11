@@ -24,21 +24,104 @@ mod wire;
 #[cfg(test)]
 mod tests;
 
-use crate::{diagnostics::Diagnostics, error::Result, node::NodeTable};
+use crate::{
+    diagnostics::Diagnostics,
+    error::{Error, Result},
+    node::NodeTable,
+};
 use config::{normalize_config, parse_source_path};
-use mount::{block_termination_signals, mount_fuse};
+use mount::{block_termination_signals, lazy_unmount, mount_fuse, FuseMount};
 use recovery::ShapeRecovery;
 use session::{feed::FeedEventReceiver, ClientSession};
 use status::MountStatus;
 use std::{
-    path::Path,
-    sync::{Arc, Mutex},
+    path::{Path, PathBuf},
+    sync::{mpsc, Arc, Mutex},
+    thread::{self, JoinHandle},
 };
 
 pub use config::{
     default_congestion_threshold, Config, DEFAULT_ATTR_TIMEOUT, DEFAULT_ENTRY_TIMEOUT,
     DEFAULT_MAX_BACKGROUND, DEFAULT_MAX_WORKERS, DEFAULT_NEGATIVE_TIMEOUT,
 };
+
+pub struct MountHandle {
+    mountpoint: PathBuf,
+    join: Option<JoinHandle<()>>,
+}
+
+impl MountHandle {
+    pub fn start(config: Config) -> Result<Self> {
+        Self::start_all(vec![config])?
+            .pop()
+            .ok_or_else(|| Error::new(libc::EIO, "managed FUSE mount missing after startup"))
+    }
+
+    pub fn start_all(mut configs: Vec<Config>) -> Result<Vec<Self>> {
+        let mut prepared = Vec::with_capacity(configs.len());
+        for mut config in configs.drain(..) {
+            normalize_config(&mut config)?;
+            validate_coherent_cache(&config, false)?;
+            parse_source_path(&config.source_path)?;
+            let mount = mount_fuse(Path::new(&config.mountpoint), config.allow_other, false)?;
+            prepared.push((config, mount));
+        }
+
+        let mut pending = Vec::with_capacity(prepared.len());
+        for (config, mount) in prepared {
+            let mountpoint = PathBuf::from(&config.mountpoint);
+            let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
+            let join = thread::Builder::new()
+                .name("r9p-fuse-mount".to_string())
+                .spawn(move || {
+                    let result = R9pFuse::mount_managed(config, mount, ready_sender.clone());
+                    if let Err(error) = result {
+                        let _ = ready_sender.send(Err((error.errno, error.message().to_string())));
+                    }
+                })
+                .map_err(|error| Error::io("spawn managed FUSE mount", error))?;
+            pending.push((
+                Self {
+                    mountpoint,
+                    join: Some(join),
+                },
+                ready_receiver,
+            ));
+        }
+
+        let mut handles = Vec::with_capacity(pending.len());
+        for (handle, ready) in pending {
+            match ready.recv() {
+                Ok(Ok(())) => handles.push(handle),
+                Ok(Err((errno, message))) => return Err(Error::new(errno, message)),
+                Err(_) => {
+                    return Err(Error::new(
+                        libc::EIO,
+                        "managed FUSE mount stopped before readiness",
+                    ));
+                }
+            }
+        }
+        Ok(handles)
+    }
+
+    pub fn stop(mut self) {
+        self.stop_inner();
+    }
+
+    fn stop_inner(&mut self) {
+        lazy_unmount(&self.mountpoint);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+impl Drop for MountHandle {
+    fn drop(&mut self) {
+        self.stop_inner();
+    }
+}
 
 #[derive(Clone)]
 pub struct R9pFuse {
@@ -72,11 +155,30 @@ impl R9pFuse {
         Self::mount_prepared(config, client, feed_events)
     }
 
+    fn mount_managed(
+        config: Config,
+        mut mount: FuseMount,
+        ready: mpsc::SyncSender<std::result::Result<(), (i32, String)>>,
+    ) -> Result<()> {
+        drop_managed_mount_thread_capabilities()?;
+        let client = ClientSession::connect(&config.connection(), config.connect_timeout)?;
+        let fs = Self::prepare(config, client)?;
+        let _ = ready.send(Ok(()));
+        fs.run(mount.file_mut(), None)
+    }
+
     fn mount_prepared(
         config: Config,
         client: ClientSession,
         feed_events: Option<FeedEventReceiver>,
     ) -> Result<()> {
+        validate_coherent_cache(&config, feed_events.is_some())?;
+        let mut mount = mount_fuse(Path::new(&config.mountpoint), config.allow_other, true)?;
+        let fs = Self::prepare(config, client)?;
+        fs.run(mount.file_mut(), feed_events)
+    }
+
+    fn prepare(config: Config, client: ClientSession) -> Result<Self> {
         let source_path = parse_source_path(&config.source_path)?;
         let diagnostics =
             Diagnostics::new(config.diagnostics_capacity, config.diagnostics_path.clone());
@@ -101,8 +203,7 @@ impl R9pFuse {
         let nodes = Arc::new(Mutex::new(NodeTable::new(root_fid, root_stat)));
         let uid = unsafe { libc::getuid() };
         let gid = unsafe { libc::getgid() };
-        let mut mount = mount_fuse(Path::new(&config.mountpoint), config.allow_other)?;
-        let fs = Self {
+        Ok(Self {
             client,
             nodes,
             source_path,
@@ -113,7 +214,118 @@ impl R9pFuse {
             gid,
             shape_recovery: Arc::new(Mutex::new(ShapeRecovery::new())),
             reconnect: Arc::new(Mutex::new(())),
-        };
-        fs.run(mount.file_mut(), feed_events)
+        })
     }
+}
+
+fn validate_coherent_cache(config: &Config, has_session_feed: bool) -> Result<()> {
+    if config.coherent_read_cache && config.change_feed_path.is_none() && !has_session_feed {
+        return Err(Error::new(
+            libc::EINVAL,
+            "coherent read cache requires a namespace change feed",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn drop_managed_mount_thread_capabilities() -> Result<()> {
+    #[repr(C)]
+    struct CapabilityHeader {
+        version: u32,
+        pid: i32,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CapabilityData {
+        effective: u32,
+        permitted: u32,
+        inheritable: u32,
+    }
+
+    if unsafe {
+        libc::prctl(
+            libc::PR_CAP_AMBIENT,
+            libc::PR_CAP_AMBIENT_CLEAR_ALL,
+            0,
+            0,
+            0,
+        )
+    } != 0
+    {
+        return Err(Error::io(
+            "clear managed FUSE mount ambient capabilities",
+            std::io::Error::last_os_error(),
+        ));
+    }
+    let mut header = CapabilityHeader {
+        version: 0x2008_0522,
+        pid: 0,
+    };
+    let data = [
+        CapabilityData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        },
+        CapabilityData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        },
+    ];
+    let capset = unsafe {
+        libc::syscall(
+            libc::SYS_capset,
+            (&mut header as *mut CapabilityHeader).cast::<libc::c_void>(),
+            data.as_ptr().cast::<libc::c_void>(),
+        )
+    };
+    if capset != 0 {
+        return Err(Error::io(
+            "drop managed FUSE mount capabilities",
+            std::io::Error::last_os_error(),
+        ));
+    }
+    let mut current = [
+        CapabilityData {
+            effective: u32::MAX,
+            permitted: u32::MAX,
+            inheritable: u32::MAX,
+        },
+        CapabilityData {
+            effective: u32::MAX,
+            permitted: u32::MAX,
+            inheritable: u32::MAX,
+        },
+    ];
+    let capget = unsafe {
+        libc::syscall(
+            libc::SYS_capget,
+            (&mut header as *mut CapabilityHeader).cast::<libc::c_void>(),
+            current.as_mut_ptr().cast::<libc::c_void>(),
+        )
+    };
+    if capget != 0 {
+        return Err(Error::io(
+            "inspect managed FUSE mount capabilities",
+            std::io::Error::last_os_error(),
+        ));
+    }
+    if current
+        .iter()
+        .any(|entry| entry.effective != 0 || entry.permitted != 0 || entry.inheritable != 0)
+    {
+        return Err(Error::new(
+            libc::EPERM,
+            "managed FUSE mount capabilities remain after drop",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn drop_managed_mount_thread_capabilities() -> Result<()> {
+    Ok(())
 }

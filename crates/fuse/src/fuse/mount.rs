@@ -109,7 +109,11 @@ impl MountCleanup {
     }
 }
 
-pub(super) fn mount_fuse(mountpoint: &Path, allow_other: bool) -> Result<FuseMount> {
+pub(super) fn mount_fuse(
+    mountpoint: &Path,
+    allow_other: bool,
+    unmount_on_signal: bool,
+) -> Result<FuseMount> {
     let absolute_mountpoint = absolute_mountpoint(mountpoint)?;
     clear_stale_fuse_mount(&absolute_mountpoint);
     let mountpoint_str = absolute_mountpoint
@@ -127,7 +131,9 @@ pub(super) fn mount_fuse(mountpoint: &Path, allow_other: bool) -> Result<FuseMou
         connection_id,
         fuse_fd: Arc::clone(&fuse_fd),
     };
-    install_unmount_on_signal(cleanup.clone());
+    if unmount_on_signal {
+        install_unmount_on_signal(cleanup.clone());
+    }
     Ok(FuseMount {
         file: Some(unsafe { File::from_raw_fd(fd) }),
         cleanup,
@@ -351,7 +357,7 @@ fn wait_for_termination_signal() -> libc::c_int {
     }
 }
 
-fn lazy_unmount(mountpoint: &Path) {
+pub(super) fn lazy_unmount(mountpoint: &Path) {
     if umount2_lazy(mountpoint) {
         return;
     }

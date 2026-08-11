@@ -43,9 +43,16 @@ pub(super) fn flags_to_9p_mode(flags: u32) -> u8 {
     mode
 }
 
-pub(super) fn fuse_open_flags(is_dir_open: bool, mode: u8) -> u32 {
+pub(super) fn fuse_open_flags(
+    is_dir_open: bool,
+    mode: u8,
+    known_length: u64,
+    coherent_read_cache: bool,
+) -> u32 {
     if is_dir_open {
         FOPEN_KEEP_CACHE | FOPEN_CACHE_DIR
+    } else if mode == OREAD && coherent_read_cache && known_length > 0 {
+        FOPEN_KEEP_CACHE
     } else if mode::permits_read(mode) {
         FOPEN_DIRECT_IO
     } else {

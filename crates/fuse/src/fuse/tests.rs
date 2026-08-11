@@ -100,17 +100,26 @@ fn dirent_size_uses_linux_name_offset_not_rust_flexible_array_size() {
 
 #[test]
 fn read_capable_file_opens_use_direct_io_for_unknown_size_reads() {
-    assert_eq!(fuse_open_flags(false, OREAD), FOPEN_DIRECT_IO);
-    assert_eq!(fuse_open_flags(false, ORDWR), FOPEN_DIRECT_IO);
-    assert_eq!(fuse_open_flags(false, ORDWR | OTRUNC), FOPEN_DIRECT_IO);
-    assert_eq!(fuse_open_flags(false, OWRITE), 0);
-    assert_eq!(fuse_open_flags(false, OWRITE | OTRUNC), 0);
+    assert_eq!(fuse_open_flags(false, OREAD, 0, true), FOPEN_DIRECT_IO);
+    assert_eq!(fuse_open_flags(false, ORDWR, 20, true), FOPEN_DIRECT_IO);
+    assert_eq!(
+        fuse_open_flags(false, ORDWR | OTRUNC, 20, true),
+        FOPEN_DIRECT_IO
+    );
+    assert_eq!(fuse_open_flags(false, OWRITE, 20, true), 0);
+    assert_eq!(fuse_open_flags(false, OWRITE | OTRUNC, 20, true), 0);
+}
+
+#[test]
+fn coherent_known_length_reads_reuse_the_kernel_page_cache() {
+    assert_eq!(fuse_open_flags(false, OREAD, 20, true), FOPEN_KEEP_CACHE);
+    assert_eq!(fuse_open_flags(false, OREAD, 20, false), FOPEN_DIRECT_IO);
 }
 
 #[test]
 fn directory_opens_allow_kernel_readdir_cache() {
     assert_eq!(
-        fuse_open_flags(true, OREAD),
+        fuse_open_flags(true, OREAD, 0, false),
         FOPEN_KEEP_CACHE | FOPEN_CACHE_DIR
     );
 }
@@ -255,6 +264,7 @@ fn mount_config_normalization_keeps_worker_and_background_limits_nonzero() {
         request_timeout: Duration::from_secs(5),
         lookup_timeout: Duration::ZERO,
         read_timeout: Duration::ZERO,
+        change_feed_read_timeout: Duration::ZERO,
         write_timeout: Duration::ZERO,
         mutation_timeout: Duration::ZERO,
         control_timeout: Duration::ZERO,
@@ -271,6 +281,7 @@ fn mount_config_normalization_keeps_worker_and_background_limits_nonzero() {
         change_feed_scope: None,
         change_feed_reconnect_delay: Duration::ZERO,
         change_feed_backpressure_limit: 0,
+        coherent_read_cache: false,
         allow_other: false,
         debug: false,
     };
@@ -278,6 +289,7 @@ fn mount_config_normalization_keeps_worker_and_background_limits_nonzero() {
     normalize_config(&mut config).expect("normalize config");
 
     assert_eq!(config.lookup_timeout, Duration::from_secs(5));
+    assert_eq!(config.change_feed_read_timeout, Duration::from_secs(5));
     assert_eq!(config.interrupt_timeout, Duration::from_secs(1));
     assert_eq!(config.max_workers, DEFAULT_MAX_WORKERS);
     assert_eq!(

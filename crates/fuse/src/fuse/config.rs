@@ -33,6 +33,7 @@ pub struct Config {
     pub request_timeout: Duration,
     pub lookup_timeout: Duration,
     pub read_timeout: Duration,
+    pub change_feed_read_timeout: Duration,
     pub write_timeout: Duration,
     pub mutation_timeout: Duration,
     pub control_timeout: Duration,
@@ -49,6 +50,7 @@ pub struct Config {
     pub change_feed_scope: Option<String>,
     pub change_feed_reconnect_delay: Duration,
     pub change_feed_backpressure_limit: usize,
+    pub coherent_read_cache: bool,
     pub allow_other: bool,
     pub debug: bool,
 }
@@ -81,6 +83,9 @@ pub(super) fn normalize_config(config: &mut Config) -> Result<()> {
     }
     if config.read_timeout.is_zero() {
         config.read_timeout = config.request_timeout;
+    }
+    if config.change_feed_read_timeout.is_zero() {
+        config.change_feed_read_timeout = config.read_timeout;
     }
     if config.write_timeout.is_zero() {
         config.write_timeout = config.request_timeout;

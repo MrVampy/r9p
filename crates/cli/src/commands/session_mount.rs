@@ -17,6 +17,7 @@ pub(crate) struct SessionMountConfig {
     attr_timeout: Duration,
     entry_timeout: Duration,
     negative_timeout: Duration,
+    coherent_read_cache: bool,
 }
 
 pub(crate) fn take_session_mount_config(args: &mut Vec<String>) -> CliResult<SessionMountConfig> {
@@ -38,6 +39,7 @@ pub(crate) fn take_session_mount_config(args: &mut Vec<String>) -> CliResult<Ses
         .map(|value| parse_duration_secs(&value, "mount negative timeout"))
         .transpose()?
         .unwrap_or(fuse::DEFAULT_NEGATIVE_TIMEOUT);
+    let coherent_read_cache = take_flag(args, "--mount-coherent-read-cache");
     Ok(SessionMountConfig {
         mountpoint,
         source_path,
@@ -46,6 +48,7 @@ pub(crate) fn take_session_mount_config(args: &mut Vec<String>) -> CliResult<Ses
         attr_timeout,
         entry_timeout,
         negative_timeout,
+        coherent_read_cache,
     })
 }
 
@@ -95,6 +98,7 @@ fn mount_config(
         request_timeout: control.request_timeout,
         lookup_timeout: Duration::ZERO,
         read_timeout: Duration::ZERO,
+        change_feed_read_timeout: Duration::ZERO,
         write_timeout: Duration::ZERO,
         mutation_timeout: Duration::ZERO,
         control_timeout: Duration::ZERO,
@@ -111,9 +115,16 @@ fn mount_config(
         change_feed_scope: None,
         change_feed_reconnect_delay: Duration::ZERO,
         change_feed_backpressure_limit: 0,
+        coherent_read_cache: mount.coherent_read_cache,
         allow_other: false,
         debug: false,
     }
+}
+
+fn take_flag(args: &mut Vec<String>, name: &str) -> bool {
+    let present = args.iter().any(|arg| arg == name);
+    args.retain(|arg| arg != name);
+    present
 }
 
 fn parse_duration_secs(value: &str, name: &str) -> CliResult<Duration> {

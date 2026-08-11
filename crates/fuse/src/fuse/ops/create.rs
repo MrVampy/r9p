@@ -97,7 +97,7 @@ impl R9pFuse {
             entry: self.entry_out(nodeid, generation, &stat),
             open: FuseOpenOut {
                 fh: handle,
-                open_flags: fuse_open_flags(false, mode),
+                open_flags: fuse_open_flags(false, mode, stat.length, false),
                 padding: 0,
             },
         };

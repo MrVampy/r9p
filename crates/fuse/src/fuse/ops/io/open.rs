@@ -71,7 +71,7 @@ impl R9pFuse {
                 });
                 let out = FuseOpenOut {
                     fh: handle,
-                    open_flags: fuse_open_flags(true, OREAD),
+                    open_flags: fuse_open_flags(true, OREAD, node_stat.length, false),
                     padding: 0,
                 };
                 return reply_struct(file, header.unique, &out);
@@ -134,7 +134,12 @@ impl R9pFuse {
         });
         let out = FuseOpenOut {
             fh: handle,
-            open_flags: fuse_open_flags(is_dir_open, mode),
+            open_flags: fuse_open_flags(
+                is_dir_open,
+                mode,
+                node_stat.length,
+                self.config.coherent_read_cache,
+            ),
             padding: 0,
         };
         reply_struct(file, header.unique, &out)

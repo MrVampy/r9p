@@ -38,6 +38,7 @@ pub(super) fn parse_mount_config(global: Config, args: Vec<String>) -> CliResult
         request_timeout: Duration::from_secs(5),
         lookup_timeout: Duration::ZERO,
         read_timeout: Duration::ZERO,
+        change_feed_read_timeout: Duration::ZERO,
         write_timeout: Duration::ZERO,
         mutation_timeout: Duration::ZERO,
         control_timeout: Duration::ZERO,
@@ -54,6 +55,7 @@ pub(super) fn parse_mount_config(global: Config, args: Vec<String>) -> CliResult
         change_feed_scope: None,
         change_feed_reconnect_delay: Duration::ZERO,
         change_feed_backpressure_limit: 0,
+        coherent_read_cache: false,
         allow_other: false,
         debug: false,
     };
@@ -65,6 +67,7 @@ pub(super) fn parse_mount_config(global: Config, args: Vec<String>) -> CliResult
         match args[index].as_str() {
             "-D" | "--debug" => config.debug = true,
             "--allow-other" => config.allow_other = true,
+            "--coherent-read-cache" => config.coherent_read_cache = true,
             "--source" => {
                 index += 1;
                 config.source_path = args
@@ -102,6 +105,11 @@ pub(super) fn parse_mount_config(global: Config, args: Vec<String>) -> CliResult
             "--read-timeout" => {
                 index += 1;
                 config.read_timeout = parse_duration(args.get(index), "missing read timeout")?;
+            }
+            "--change-feed-read-timeout" => {
+                index += 1;
+                config.change_feed_read_timeout =
+                    parse_duration(args.get(index), "missing change feed read timeout")?;
             }
             "--write-timeout" => {
                 index += 1;
@@ -324,7 +332,7 @@ fn parse_u16_limit(
 
 fn mount_usage(code: i32) -> ! {
     eprintln!(
-        "usage: r9p mount [--source namespace-path] [--aname aname] [--uname uname] [--msize msize] [--allow-other] [--attr-timeout seconds] [--entry-timeout seconds] [--negative-timeout seconds] [--request-timeout seconds] [--connect-timeout seconds] [--lookup-timeout seconds] [--read-timeout seconds] [--write-timeout seconds] [--mutation-timeout seconds] [--control-timeout seconds] [--interrupt-timeout seconds] [--max-workers count] [--max-background count] [--congestion-threshold count] [--diagnostics-file path] [--diagnostics-capacity count] [--status-file path] [--change-feed namespace-path] [--change-feed-stream namespace-path] [--change-feed-cursor-template path-with-{{event_id}}] [--change-feed-scope scope] [--change-feed-reconnect-delay seconds] [--change-feed-backpressure count] endpoint mountpoint\nusage: r9p mount ensure|status|stop --mountpoint path [--unit name --unit-scope user|system] [--status-file path] [--expect-endpoint endpoint] [--expect-change-feed path] [--expect-status-file path] [--attempts count] [-- mount args...]"
+        "usage: r9p mount [--source namespace-path] [--aname aname] [--uname uname] [--msize msize] [--allow-other] [--coherent-read-cache] [--attr-timeout seconds] [--entry-timeout seconds] [--negative-timeout seconds] [--request-timeout seconds] [--connect-timeout seconds] [--lookup-timeout seconds] [--read-timeout seconds] [--change-feed-read-timeout seconds] [--write-timeout seconds] [--mutation-timeout seconds] [--control-timeout seconds] [--interrupt-timeout seconds] [--max-workers count] [--max-background count] [--congestion-threshold count] [--diagnostics-file path] [--diagnostics-capacity count] [--status-file path] [--change-feed namespace-path] [--change-feed-stream namespace-path] [--change-feed-cursor-template path-with-{{event_id}}] [--change-feed-scope scope] [--change-feed-reconnect-delay seconds] [--change-feed-backpressure count] endpoint mountpoint\nusage: r9p mount ensure|status|stop --mountpoint path [--unit name --unit-scope user|system] [--status-file path] [--expect-endpoint endpoint] [--expect-change-feed path] [--expect-status-file path] [--attempts count] [-- mount args...]"
     );
     std::process::exit(code);
 }

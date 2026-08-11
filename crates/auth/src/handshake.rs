@@ -421,7 +421,7 @@ mod tests {
     use super::*;
     use crate::cert::{generate_root_key_pair, CertificateBody, RootKeyPair};
     use crate::{generate_key_pair, KeyPair};
-    use std::{net::TcpListener, thread};
+    use std::{io::Read as _, net::TcpListener, thread};
 
     const VALID_FROM: crate::UnixSeconds = 1_000;
     const VALID_UNTIL: crate::UnixSeconds = 4_000_000_000;
@@ -514,6 +514,48 @@ mod tests {
         let peer = xx_once(server, &client, "terminal-m7", "tuxedo.operator")?;
         assert_eq!(peer.principal(), "tuxedo.operator");
         assert!(peer.in_group("operator"));
+        Ok(())
+    }
+
+    #[test]
+    fn authenticated_stream_carries_more_than_one_encrypted_record() -> Result<()> {
+        let (_, server_config, client_config) = xx_pair("bulk-service", "bulk-client")?;
+        let listener =
+            TcpListener::bind("127.0.0.1:0").map_err(|error| Error::from(error.to_string()))?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| Error::from(error.to_string()))?;
+        let payload_len = 1024 * 1024;
+        let server = thread::spawn(move || -> Result<Vec<u8>> {
+            let (stream, _) = listener
+                .accept()
+                .map_err(|error| Error::from(error.to_string()))?;
+            let mut session = authenticate_server(stream, &server_config, Duration::from_secs(2))?;
+            let mut payload = vec![0_u8; payload_len];
+            session
+                .stream
+                .read_exact(&mut payload)
+                .map_err(|error| Error::from(error.to_string()))?;
+            Ok(payload)
+        });
+        let stream = TcpStream::connect(address).map_err(|error| Error::from(error.to_string()))?;
+        let mut client = authenticate_client_to(
+            stream,
+            &client_config,
+            "bulk-service",
+            "bulk-client",
+            Duration::from_secs(2),
+        )?;
+        let payload = vec![0x5a; payload_len];
+        client
+            .write_all(&payload)
+            .and_then(|()| client.flush())
+            .map_err(|error| Error::from(error.to_string()))?;
+        let received = server
+            .join()
+            .map_err(|_| Error::from("auth server panicked"))??;
+
+        assert_eq!(received, payload);
         Ok(())
     }
 

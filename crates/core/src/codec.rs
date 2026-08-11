@@ -16,7 +16,7 @@ pub const TWRITE_HEADER_SIZE: u32 = 23;
 pub const IOUNIT_HEADER_SIZE: u32 = 24;
 pub const DEFAULT_MSIZE: u32 = 8192;
 pub const MIN_MSIZE: u32 = 256;
-pub const MAX_MSIZE: u32 = 64 * 1024;
+pub const MAX_MSIZE: u32 = 1024 * 1024;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub enum Variant {
@@ -699,6 +699,22 @@ mod tests {
             .err()
             .ok_or("oversized response frame accepted")?;
         assert!(error.display_lossy().contains("exceeds msize"));
+        Ok(())
+    }
+
+    #[test]
+    fn configured_max_msize_carries_a_bulk_read_response() -> Result<()> {
+        let message = RMessage::Read {
+            tag: 1,
+            data: vec![0x5a; (MAX_MSIZE - RREAD_HEADER_SIZE) as usize],
+        };
+        let frame = encode_rmessage_checked(&message, MAX_MSIZE)?;
+
+        assert_eq!(frame.len(), MAX_MSIZE as usize);
+        assert_eq!(
+            read_rmessage_checked(&mut frame.as_slice(), MAX_MSIZE)?,
+            Some(message)
+        );
         Ok(())
     }
 

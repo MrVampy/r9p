@@ -1,6 +1,6 @@
 use crate::error::{Error, Result};
 use r9p::{fid::Fid, qid::Qid, stat::Stat};
-pub use session::{is_dir, is_symlink, read_open_directory_entries, DirCache, DirEntry};
+pub use session::{is_dir, is_symlink, DirCache, DirEntry};
 use session::{same_qid, Freshness, StaleReason};
 use std::collections::BTreeMap;
 

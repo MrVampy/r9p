@@ -11,7 +11,7 @@
 use crate::{
     error::{Error, Result},
     fuse::{
-        reply::{as_bytes, push_u32, push_u64, read_struct, reply_bytes, reply_error},
+        reply::{as_bytes, push_u32, push_u64, read_struct, reply_bytes},
         util::dirent_size,
         wire::{FuseEntryOut, FuseInHeader, FuseReadIn},
         R9pFuse,
@@ -19,7 +19,7 @@ use crate::{
     node::{is_dir, qid_to_inode, DirEntry},
 };
 use r9p::blocking::DEFAULT_READ_CHUNK;
-use session::decode_dir_entries;
+use session::validate_directory_entries;
 use std::{fs::File, mem::size_of};
 
 impl R9pFuse {
@@ -90,16 +90,7 @@ impl R9pFuse {
                 stream.eof = true;
                 break;
             }
-            let entries = decode_dir_entries(&chunk)?;
-            let mut validated = Vec::with_capacity(entries.len());
-            for entry in entries {
-                let stat = stream.client.validate_stat(entry.stat)?;
-                validated.push(DirEntry {
-                    name: stat.name.clone(),
-                    qid: stat.qid,
-                    stat,
-                });
-            }
+            let validated = validate_directory_entries(&stream.client, &chunk)?;
             stream.remote_offset = stream
                 .remote_offset
                 .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));

@@ -267,7 +267,11 @@ pub fn read_open_directory_entries(
         offset = offset.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
         all.extend(chunk);
     }
-    decode_dir_entries(&all)?
+    validate_directory_entries(client, &all)
+}
+
+pub fn validate_directory_entries(client: &Client, data: &[u8]) -> Result<Vec<DirEntry>> {
+    decode_dir_entries(data)?
         .into_iter()
         .map(|entry| {
             client.validate_stat(entry.stat).map(|stat| DirEntry {

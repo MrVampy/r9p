@@ -6,6 +6,7 @@ use r9p::qid::{Qid, DMDIR, QTDIR, QTFILE};
 use r9p::stat::Stat;
 use r9p::{ORCLOSE, ORDWR, OREAD, OTRUNC, OWRITE};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::ops::{Deref, DerefMut};
 use std::time::Duration;
 
 pub(crate) const ROOT_ID: u64 = 0;
@@ -14,8 +15,28 @@ pub const DEFAULT_LOG_CAPACITY: usize = 1 << 20;
 
 pub const DEFAULT_IOUNIT: u32 = 4096;
 
+#[derive(Default)]
+pub(crate) struct DirectoryBody {
+    pub(crate) children: BTreeMap<Vec<u8>, u64>,
+    pub(crate) read_relay: Option<String>,
+}
+
+impl Deref for DirectoryBody {
+    type Target = BTreeMap<Vec<u8>, u64>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.children
+    }
+}
+
+impl DerefMut for DirectoryBody {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.children
+    }
+}
+
 pub(crate) enum Body {
-    Dir(BTreeMap<Vec<u8>, u64>),
+    Dir(DirectoryBody),
     File(Vec<u8>),
     Log(LogBody),
     IntakeNew(u64),
@@ -141,6 +162,7 @@ pub(crate) enum WriteRelayReply {
 
 pub(crate) enum RequestReply {
     Accepted(Vec<u8>),
+    DirectoryAccepted { names: Vec<Vec<u8>>, eof: bool },
     Rejected(String),
 }
 
@@ -189,6 +211,7 @@ pub(crate) struct State {
     pub(crate) create_pending: VecDeque<CreateRelayRequest>,
     pub(crate) rpc_responses: BTreeMap<u64, Option<RequestReply>>,
     pub(crate) response_prefixes: BTreeMap<u64, String>,
+    pub(crate) directory_response_requests: BTreeSet<u64>,
     pub(crate) create_relay_responses: BTreeMap<u64, Option<CreateRelayReply>>,
     pub(crate) write_relay_responses: BTreeMap<u64, Option<WriteRelayReply>>,
     pub(crate) remove_relay_responses: BTreeMap<u64, Option<RemoveRelayReply>>,
@@ -249,7 +272,7 @@ impl State {
                 write_relay: None,
                 remove_relay: None,
                 wstat_relay: None,
-                body: Body::Dir(BTreeMap::new()),
+                body: Body::Dir(DirectoryBody::default()),
             },
         );
         Self {
@@ -262,6 +285,7 @@ impl State {
             create_pending: VecDeque::new(),
             rpc_responses: BTreeMap::new(),
             response_prefixes: BTreeMap::new(),
+            directory_response_requests: BTreeSet::new(),
             create_relay_responses: BTreeMap::new(),
             write_relay_responses: BTreeMap::new(),
             remove_relay_responses: BTreeMap::new(),
@@ -398,7 +422,7 @@ impl State {
                 write_relay: None,
                 remove_relay: None,
                 wstat_relay: None,
-                body: Body::Dir(BTreeMap::new()),
+                body: Body::Dir(DirectoryBody::default()),
             },
         );
         self.qid_index.insert(id, id);
@@ -600,7 +624,7 @@ impl State {
                         write_relay: None,
                         remove_relay: None,
                         wstat_relay: None,
-                        body: Body::Dir(BTreeMap::new()),
+                        body: Body::Dir(DirectoryBody::default()),
                     },
                 );
                 self.qid_index.insert(metadata.qid_path, id);
@@ -650,7 +674,7 @@ impl State {
             Some(create_prefix.clone())
         };
         let body = if qid.qtype & QTDIR != 0 {
-            Body::Dir(BTreeMap::new())
+            Body::Dir(DirectoryBody::default())
         } else {
             Body::WriteRelay(create_prefix)
         };
@@ -845,6 +869,7 @@ impl State {
     pub(crate) fn remove_response_request(&mut self, request_id: u64) {
         self.rpc_responses.remove(&request_id);
         self.response_prefixes.remove(&request_id);
+        self.directory_response_requests.remove(&request_id);
         self.remove_pending_request(request_id);
     }
 

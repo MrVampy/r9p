@@ -6,7 +6,7 @@ use crate::{
         wire::{FuseInHeader, FuseOpenIn, FuseOpenOut},
         R9pFuse,
     },
-    node::{has_close_commit_mode, is_dir, read_open_directory_entries, OpenHandle},
+    node::{has_close_commit_mode, is_dir, DirectoryStream, OpenHandle},
 };
 use session::{OREAD, OTRUNC};
 use std::fs::File;
@@ -58,25 +58,6 @@ impl R9pFuse {
             return reply_error(file, header.unique, libc::ENOTDIR);
         }
         let client = self.client_snapshot()?;
-        if is_dir_open {
-            if let Some(dir_entries) = self.cached_dir_entries_if_fresh(header.nodeid)? {
-                let handle = self.nodes()?.open_handle(OpenHandle {
-                    client,
-                    fid: None,
-                    open_mode: OREAD,
-                    is_dir: true,
-                    write_on_release: false,
-                    close_commit: false,
-                    dir_entries,
-                });
-                let out = FuseOpenOut {
-                    fh: handle,
-                    open_flags: fuse_open_flags(true, OREAD, node_stat.length, false),
-                    padding: 0,
-                };
-                return reply_struct(file, header.unique, &out);
-            }
-        }
         let open_timeout = if flags_to_9p_mode(input.flags) == OREAD || is_dir_open {
             self.lookup_timeout()
         } else {
@@ -106,31 +87,27 @@ impl R9pFuse {
                 return Err(error.into());
             }
         }
-        let dir_entries = if is_dir_open {
-            match read_open_directory_entries(&client, fid, self.control_timeout()) {
-                Ok(entries) => {
-                    self.nodes()?
-                        .update_dir_cache(header.nodeid, entries.clone())?;
-                    entries
-                }
-                Err(error) => {
-                    let _ = client.clunk_timeout(fid, self.control_timeout());
-                    return Err(error.into());
-                }
-            }
+        let directory = if is_dir_open {
+            Some(DirectoryStream {
+                client: client.clone(),
+                fid,
+                remote_offset: 0,
+                entries: Vec::new(),
+                eof: false,
+            })
         } else {
-            Vec::new()
+            None
         };
         let write_on_release = !is_dir_open && mode != OREAD;
         let close_commit = write_on_release && close_commit_target;
         let handle = self.nodes()?.open_handle(OpenHandle {
             client: client.clone(),
-            fid: Some(fid),
+            fid: (!is_dir_open).then_some(fid),
             open_mode: mode,
             is_dir: is_dir_open,
             write_on_release,
             close_commit,
-            dir_entries,
+            directory,
         });
         let out = FuseOpenOut {
             fh: handle,

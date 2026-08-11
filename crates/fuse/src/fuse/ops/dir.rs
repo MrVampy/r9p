@@ -1,6 +1,7 @@
-//! Directory read handling. Plan 9 returns a stable directory listing at
-//! open time; we cache it on the handle and serve FUSE READDIR /
-//! READDIRPLUS slices from that snapshot.
+//! Incremental directory read handling. The opened 9P fid is the stable
+//! snapshot boundary. Each FUSE handle retains decoded entries and advances
+//! the 9P byte offset only when a requested FUSE buffer reaches the end of
+//! what that handle has already observed.
 //!
 //! READDIRPLUS lets us return entry attributes alongside each name, so
 //! Linux's dcache is populated without follow-up LOOKUP+GETATTR round
@@ -10,13 +11,15 @@
 use crate::{
     error::{Error, Result},
     fuse::{
-        reply::{as_bytes, push_u32, push_u64, read_struct, reply_bytes, reply_error},
+        reply::{as_bytes, push_u32, push_u64, read_struct, reply_bytes},
         util::dirent_size,
         wire::{FuseEntryOut, FuseInHeader, FuseReadIn},
         R9pFuse,
     },
     node::{is_dir, qid_to_inode, DirEntry},
 };
+use r9p::blocking::DEFAULT_READ_CHUNK;
+use session::validate_directory_entries;
 use std::{fs::File, mem::size_of};
 
 impl R9pFuse {
@@ -27,13 +30,15 @@ impl R9pFuse {
         payload: &[u8],
     ) -> Result<()> {
         let input = read_struct::<FuseReadIn>(payload)?;
-        let handle = self.nodes()?.handle(input.fh)?.clone();
-        if !handle.is_dir {
-            return reply_error(file, header.unique, libc::ENOTDIR);
-        }
         let size = usize::try_from(input.size)
             .map_err(|_| Error::new(libc::EINVAL, "readdir too large"))?;
-        let data = self.encode_dirents(header.nodeid, input.offset, size, &handle.dir_entries)?;
+        let entries = self.directory_entries_for_read(
+            input.fh,
+            input.offset,
+            size,
+            DirectoryEncoding::Plain,
+        )?;
+        let data = self.encode_dirents(header.nodeid, input.offset, size, &entries)?;
         reply_bytes(file, header.unique, &data)
     }
 
@@ -44,15 +49,54 @@ impl R9pFuse {
         payload: &[u8],
     ) -> Result<()> {
         let input = read_struct::<FuseReadIn>(payload)?;
-        let handle = self.nodes()?.handle(input.fh)?.clone();
-        if !handle.is_dir {
-            return reply_error(file, header.unique, libc::ENOTDIR);
-        }
         let size = usize::try_from(input.size)
             .map_err(|_| Error::new(libc::EINVAL, "readdirplus too large"))?;
-        let data =
-            self.encode_dirents_plus(header.nodeid, input.offset, size, &handle.dir_entries)?;
+        let entries =
+            self.directory_entries_for_read(input.fh, input.offset, size, DirectoryEncoding::Plus)?;
+        let data = self.encode_dirents_plus(header.nodeid, input.offset, size, &entries)?;
         reply_bytes(file, header.unique, &data)
+    }
+
+    fn directory_entries_for_read(
+        &self,
+        handle_id: u64,
+        offset: u64,
+        size: usize,
+        encoding: DirectoryEncoding,
+    ) -> Result<Vec<DirEntry>> {
+        let handle = self.nodes()?.handle(handle_id)?.clone();
+        if !handle.is_dir {
+            return Err(Error::new(libc::ENOTDIR, "file handle is not a directory"));
+        }
+        let directory = handle.directory.ok_or_else(|| {
+            Error::new(libc::ESTALE, "directory handle has no incremental stream")
+        })?;
+        let mut stream = directory
+            .lock()
+            .map_err(|_| Error::new(libc::EIO, "directory stream lock poisoned"))?;
+        while !stream.eof && !directory_buffer_satisfied(offset, size, &stream.entries, encoding) {
+            let requested = size
+                .max(4096)
+                .min(usize::try_from(DEFAULT_READ_CHUNK).unwrap_or(usize::MAX));
+            let count = u32::try_from(requested)
+                .map_err(|_| Error::new(libc::EINVAL, "directory read too large"))?;
+            let chunk = stream.client.read_timeout(
+                stream.fid,
+                stream.remote_offset,
+                count,
+                self.read_timeout(),
+            )?;
+            if chunk.is_empty() {
+                stream.eof = true;
+                break;
+            }
+            let validated = validate_directory_entries(&stream.client, &chunk)?;
+            stream.remote_offset = stream
+                .remote_offset
+                .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+            stream.entries.extend(validated);
+        }
+        Ok(stream.entries.clone())
     }
 
     fn encode_dirents_plus(
@@ -159,6 +203,48 @@ impl R9pFuse {
     }
 }
 
+#[derive(Clone, Copy)]
+enum DirectoryEncoding {
+    Plain,
+    Plus,
+}
+
+fn directory_buffer_satisfied(
+    offset: u64,
+    size: usize,
+    entries: &[DirEntry],
+    encoding: DirectoryEncoding,
+) -> bool {
+    if size == 0 {
+        return true;
+    }
+    let start = usize::try_from(offset).unwrap_or(usize::MAX);
+    let total = entries.len().saturating_add(2);
+    if start >= total {
+        return false;
+    }
+    let mut used = 0usize;
+    for index in start..total {
+        let name_len = match index {
+            0 => 1,
+            1 => 2,
+            current => entries[current - 2].name.len(),
+        };
+        let needed = match encoding {
+            DirectoryEncoding::Plain => dirent_size(name_len),
+            DirectoryEncoding::Plus => direntplus_size(name_len),
+        };
+        if used.saturating_add(needed) > size {
+            return true;
+        }
+        used = used.saturating_add(needed);
+        if used == size {
+            return true;
+        }
+    }
+    false
+}
+
 pub(in crate::fuse) fn encode_dirents(
     dot_ino: u64,
     dotdot_ino: u64,
@@ -207,4 +293,54 @@ pub(in crate::fuse) fn encode_dirents(
 
 fn direntplus_size(name_len: usize) -> usize {
     size_of::<FuseEntryOut>() + dirent_size(name_len)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{directory_buffer_satisfied, DirectoryEncoding};
+    use crate::{fuse::util::dirent_size, node::DirEntry};
+    use r9p::{qid::Qid, stat::Stat};
+
+    fn entry(name: &str, path: u64) -> DirEntry {
+        let stat = Stat::new(name, Qid::file(path), 0o444);
+        DirEntry {
+            name: name.as_bytes().to_vec(),
+            qid: stat.qid,
+            stat,
+        }
+    }
+
+    #[test]
+    fn an_empty_remote_directory_is_needed_after_dot_entries() {
+        let dot_bytes = dirent_size(1) + dirent_size(2);
+        assert!(!directory_buffer_satisfied(
+            0,
+            dot_bytes + dirent_size(5),
+            &[],
+            DirectoryEncoding::Plain,
+        ));
+        assert!(!directory_buffer_satisfied(
+            2,
+            dirent_size(5),
+            &[],
+            DirectoryEncoding::Plain,
+        ));
+    }
+
+    #[test]
+    fn cached_entries_stop_an_unnecessary_remote_read() {
+        let entries = vec![entry("alpha", 10), entry("beta", 11)];
+        assert!(directory_buffer_satisfied(
+            2,
+            dirent_size(5),
+            &entries,
+            DirectoryEncoding::Plain,
+        ));
+        assert!(!directory_buffer_satisfied(
+            4,
+            dirent_size(5),
+            &entries,
+            DirectoryEncoding::Plain,
+        ));
+    }
 }

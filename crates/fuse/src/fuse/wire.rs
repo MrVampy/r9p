@@ -66,7 +66,6 @@ pub(super) const FUSE_NOTIFY_INVAL_ENTRY: i32 = 3;
 
 pub(super) const FOPEN_DIRECT_IO: u32 = 1 << 0;
 pub(super) const FOPEN_KEEP_CACHE: u32 = 1 << 1;
-pub(super) const FOPEN_CACHE_DIR: u32 = 1 << 3;
 
 pub(super) const FUSE_KERNEL_VERSION: u32 = 7;
 pub(super) const FUSE_KERNEL_MINOR_VERSION: u32 = 31;

@@ -3,6 +3,15 @@ use crate::error::{Error, Result};
 use r9p::fid::Fid;
 use session::Client;
 use std::fmt;
+use std::sync::{Arc, Mutex};
+
+pub(crate) struct DirectoryStream {
+    pub(crate) client: Client,
+    pub(crate) fid: Fid,
+    pub(crate) remote_offset: u64,
+    pub(crate) entries: Vec<DirEntry>,
+    pub(crate) eof: bool,
+}
 
 #[derive(Clone)]
 pub struct Handle {
@@ -14,7 +23,7 @@ pub struct Handle {
     pub close_commit: bool,
     pub close_commit_flushed: bool,
     pub bytes_written: u64,
-    pub dir_entries: Vec<DirEntry>,
+    pub(crate) directory: Option<Arc<Mutex<DirectoryStream>>>,
 }
 
 pub(crate) struct OpenHandle {
@@ -24,7 +33,7 @@ pub(crate) struct OpenHandle {
     pub is_dir: bool,
     pub write_on_release: bool,
     pub close_commit: bool,
-    pub dir_entries: Vec<DirEntry>,
+    pub directory: Option<DirectoryStream>,
 }
 
 impl fmt::Debug for Handle {
@@ -38,7 +47,7 @@ impl fmt::Debug for Handle {
             .field("close_commit", &self.close_commit)
             .field("close_commit_flushed", &self.close_commit_flushed)
             .field("bytes_written", &self.bytes_written)
-            .field("dir_entries", &self.dir_entries)
+            .field("has_directory_stream", &self.directory.is_some())
             .finish()
     }
 }
@@ -65,7 +74,9 @@ impl NodeTable {
                 close_commit: open.close_commit,
                 close_commit_flushed: false,
                 bytes_written: 0,
-                dir_entries: open.dir_entries,
+                directory: open
+                    .directory
+                    .map(|directory| Arc::new(Mutex::new(directory))),
             },
         );
         handle

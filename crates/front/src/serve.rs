@@ -3,8 +3,8 @@ use crate::ReadTarget;
 use r9p::error::{Error, Result};
 use r9p::fid::{Fid, NOFID};
 use r9p::server::{
-    serve_connection as serve_protocol_connection, ConnectionHandler, FileTree, ServerCompletion,
-    ServerConfig, ServerRequest, ServerRequestKind,
+    serve_connection as serve_protocol_connection, ConnectionHandler, FileTree, ReadData,
+    ServerCompletion, ServerConfig, ServerRequest, ServerRequestKind,
 };
 use r9p_auth::{authenticate_server, ServerConfig as SessionAuthConfig};
 use std::io::{self, Read, Write};
@@ -307,8 +307,20 @@ fn perform_request(
             };
             let read = match target {
                 ReadTarget::Node(id) => front.read_node(id, *offset, *count, cancel),
+                ReadTarget::Directory(stats) => Ok(ReadData::Directory(stats)),
                 ReadTarget::Response(request_id, response_offset, consume) => {
                     front.response_read(request_id, response_offset, *count, cancel, consume)
+                }
+                ReadTarget::DirectoryResponse {
+                    request_id,
+                    fid,
+                    node,
+                } => {
+                    let response = front.directory_response(request_id, cancel);
+                    let mut tree = tree
+                        .lock()
+                        .map_err(|_| Error::from_static("front tree poisoned"))?;
+                    tree.apply_directory_response(fid, node, request_id, response)
                 }
             };
             read.map(ServerCompletion::Read)

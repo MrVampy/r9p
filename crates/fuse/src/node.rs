@@ -1,12 +1,12 @@
 use crate::error::{Error, Result};
 use r9p::{fid::Fid, qid::Qid, stat::Stat};
-pub use session::{is_dir, is_symlink, read_open_directory_entries, DirCache, DirEntry};
+pub use session::{is_dir, is_symlink, DirCache, DirEntry};
 use session::{same_qid, Freshness, StaleReason};
 use std::collections::BTreeMap;
 
 mod handles;
 pub use handles::Handle;
-pub(crate) use handles::OpenHandle;
+pub(crate) use handles::{DirectoryStream, OpenHandle};
 
 pub const ROOT_NODEID: u64 = 1;
 pub const CLOSE_COMMIT_MODE_FLAG: u32 = 0x0100_0000;
@@ -225,6 +225,7 @@ impl NodeTable {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn update_dir_cache(&mut self, nodeid: u64, entries: Vec<DirEntry>) -> Result<()> {
         let node = self.node_mut(nodeid)?;
         if !is_dir(&node.stat) {

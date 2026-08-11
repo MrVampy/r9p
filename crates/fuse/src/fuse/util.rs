@@ -1,6 +1,6 @@
 //! Stateless conversion helpers between the FUSE and 9P views of the world.
 
-use super::wire::{FOPEN_CACHE_DIR, FOPEN_DIRECT_IO, FOPEN_KEEP_CACHE};
+use super::wire::{FOPEN_DIRECT_IO, FOPEN_KEEP_CACHE};
 use crate::error::Error;
 use r9p::mode;
 use session::{ORDWR, OREAD, OTRUNC, OWRITE};
@@ -50,7 +50,7 @@ pub(super) fn fuse_open_flags(
     coherent_read_cache: bool,
 ) -> u32 {
     if is_dir_open {
-        FOPEN_KEEP_CACHE | FOPEN_CACHE_DIR
+        0
     } else if mode == OREAD && coherent_read_cache && known_length > 0 {
         FOPEN_KEEP_CACHE
     } else if mode::permits_read(mode) {

@@ -15,8 +15,9 @@ mod resumable_fid;
 mod transport;
 
 pub use cache::{
-    decode_dir_entries, is_dir, is_symlink, read_open_directory_entries, same_qid, DirCache,
-    DirEntry, Freshness, NamespaceCache, NamespaceCacheStats, StaleReason,
+    decode_dir_entries, is_dir, is_symlink, read_open_directory_entries, same_qid,
+    validate_directory_entries, DirCache, DirEntry, Freshness, NamespaceCache, NamespaceCacheStats,
+    StaleReason,
 };
 pub use client::Client;
 pub use client_session::ClientSession;

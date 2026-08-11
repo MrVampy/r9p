@@ -30,8 +30,8 @@ use commands::{
 use errors::{cli_error, CliResult};
 use target::Config;
 
-pub(crate) const DEFAULT_MSIZE: u32 = 65_536;
-pub(crate) const READ_CHUNK: u32 = 65_536;
+pub(crate) const DEFAULT_MSIZE: u32 = r9p::codec::MAX_MSIZE;
+pub(crate) const READ_CHUNK: u32 = r9p::codec::MAX_MSIZE;
 pub(crate) const CTRL_R: u8 = b'R' - b'A' + 1;
 
 pub(crate) const DMEXCL: u32 = 0x2000_0000;

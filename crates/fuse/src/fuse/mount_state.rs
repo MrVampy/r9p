@@ -1,7 +1,7 @@
 use crate::{
     diagnostics::{DiagnosticContext, DiagnosticRecord},
     error::Result,
-    node::{mode_kind, qid_to_inode, DirEntry, StaleBinding},
+    node::{mode_kind, qid_to_inode, StaleBinding},
 };
 use r9p::stat::Stat;
 use session::Client;
@@ -187,24 +187,6 @@ impl R9pFuse {
             return Ok(None);
         }
         Ok(Some(node.stat.clone()))
-    }
-
-    pub(in crate::fuse) fn cached_dir_entries_if_fresh(
-        &self,
-        nodeid: u64,
-    ) -> Result<Option<Vec<DirEntry>>> {
-        let nodes = self.nodes()?;
-        let node = nodes.node(nodeid)?;
-        if node.needs_rebind || self.config.entry_timeout.is_zero() {
-            return Ok(None);
-        }
-        let Some(cache) = &node.dir_cache else {
-            return Ok(None);
-        };
-        if !cache.is_fresh_at(Instant::now(), self.config.entry_timeout) {
-            return Ok(None);
-        }
-        Ok(Some(cache.entries.clone()))
     }
 
     pub(in crate::fuse) fn invalidate_namespace_bindings_after_reply(

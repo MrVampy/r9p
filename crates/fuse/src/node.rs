@@ -225,6 +225,7 @@ impl NodeTable {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn update_dir_cache(&mut self, nodeid: u64, entries: Vec<DirEntry>) -> Result<()> {
         let node = self.node_mut(nodeid)?;
         if !is_dir(&node.stat) {

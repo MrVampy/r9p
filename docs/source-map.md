@@ -150,6 +150,12 @@ This map defines the local sources agents should inspect before making source-sp
 - `notes/source-reading/2026-08-10-namespace-projection-shutdown.md`
   - Source-backed boundary for projection lifecycle control independent of
     published Unix socket ownership and permissions.
+- `notes/source-reading/2026-08-11-managed-fuse-shutdown.md`
+  - Source-backed managed FUSE shutdown wake that does not depend on reconnecting
+    to a published endpoint.
+- `notes/source-reading/2026-08-11-fusermount-guardian-custody.md`
+  - Source-backed ownership of the `auto_unmount` liveness socket and resident
+    `fusermount3` helper through normal managed teardown.
 - `notes/source-reading/2026-08-11-lazy-directory-reads.md`
   - Source-backed boundary between incremental FUSE directory handles,
     per-fid Front directory snapshots, and application-owned page loading.

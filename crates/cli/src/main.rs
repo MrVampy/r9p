@@ -239,6 +239,7 @@ pub(crate) fn usage() -> ! {
     eprintln!("  stat name");
     eprintln!("  rdwr name");
     eprintln!("  rpc name [request]       write request, read response on the same fid");
+    eprintln!("                           request omitted: empty at a terminal, else stdin");
     eprintln!("  ls [-ldnt] name...");
     eprintln!("  list name                machine mode");
     eprintln!("  read-to name local       machine mode");

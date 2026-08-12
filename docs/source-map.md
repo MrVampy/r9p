@@ -150,6 +150,9 @@ This map defines the local sources agents should inspect before making source-sp
 - `notes/source-reading/2026-08-10-namespace-projection-shutdown.md`
   - Source-backed boundary for projection lifecycle control independent of
     published Unix socket ownership and permissions.
+- `notes/source-reading/2026-08-12-managed-fuse-active-request-shutdown.md`
+  - Live proof that managed shutdown must abort the FUSE connection before it
+    joins change-feed and request workers with active kernel requests.
 - `notes/source-reading/2026-08-11-managed-fuse-shutdown.md`
   - Source-backed managed FUSE shutdown wake that does not depend on reconnecting
     to a published endpoint.

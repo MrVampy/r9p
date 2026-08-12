@@ -30,7 +30,7 @@ use crate::{
     node::NodeTable,
 };
 use config::{normalize_config, parse_source_path};
-use mount::{block_termination_signals, mount_fuse, FuseMount};
+use mount::{block_termination_signals, mount_fuse, FuseMount, MountCleanup};
 use recovery::ShapeRecovery;
 use session::{feed::FeedEventReceiver, ClientSession};
 use status::MountStatus;
@@ -171,7 +171,8 @@ impl R9pFuse {
         let client = ClientSession::connect(&config.connection(), config.connect_timeout)?;
         let fs = Self::prepare(config, client)?;
         let _ = ready.send(Ok(()));
-        fs.run_managed(mount.file_mut(), shutdown)
+        let cleanup = mount.cleanup_handle();
+        fs.run_managed(mount.file_mut(), shutdown, cleanup)
     }
 
     fn mount_prepared(

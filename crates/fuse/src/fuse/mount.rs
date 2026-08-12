@@ -59,6 +59,10 @@ impl FuseMount {
     pub(super) fn file_mut(&mut self) -> &mut File {
         self.file.as_mut().expect("FUSE mount file missing")
     }
+
+    pub(super) fn cleanup_handle(&self) -> MountCleanup {
+        self.cleanup.clone()
+    }
 }
 
 impl Drop for FuseMount {
@@ -76,7 +80,7 @@ impl Drop for FuseMount {
 }
 
 #[derive(Clone)]
-struct MountCleanup {
+pub(super) struct MountCleanup {
     mountpoint: PathBuf,
     connection_id: Option<u64>,
     fuse_fd: Arc<AtomicI32>,
@@ -84,15 +88,15 @@ struct MountCleanup {
 }
 
 impl MountCleanup {
-    fn cleanup(&self) {
+    pub(super) fn cleanup(&self) {
         self.close_fuse_fd();
         self.detach_and_abort();
     }
 
     fn detach_and_abort(&self) {
+        abort_fuse_connection(self.connection_id);
         self.stop_auto_unmount_guardian();
         lazy_unmount(&self.mountpoint);
-        abort_fuse_connection(self.connection_id);
     }
 
     fn stop_auto_unmount_guardian(&self) {

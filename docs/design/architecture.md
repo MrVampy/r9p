@@ -165,10 +165,20 @@ spawning unbounded per-request threads in the client process.
 Namespace-change observation is stream-primary. Enabling a change feed requires
 both a recent or cursor-addressed catch-up path and a blocking stream path. The
 client blocks on the stream for new records. After transport loss it reads the
-catch-up path once from its last event ID, then reopens the stream. There is no
-periodic snapshot fallback; the configured delay is reconnect backoff, not an
+catch-up path once from its last event ID, but only after opening the replacement
+stream so changes arriving during catch-up are retained. There is no periodic
+snapshot fallback; the configured delay is reconnect backoff, not an
 observation cadence. Read deadlines remain bounded liveness and shutdown
 limits.
+
+The session layer also provides a reusable bounded coherent local
+materialization for consumers that need a complete native read tree. It opens
+the same stream before taking its initial parallel snapshot, incrementally
+publishes ordinary file changes, and reconstructs the derived tree after any
+coarse invalidation. FUSE remains lazy and translates the shared feed events
+into kernel cache invalidations; it and the eager local materializer share one
+strict decoder, cursor, reconnect, and backpressure implementation rather than
+duplicating feed behavior.
 
 The generic pattern is described in
 [`event-driven-9p.md`](../guides/event-driven-9p.md). A retained blocking read is the

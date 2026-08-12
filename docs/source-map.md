@@ -94,6 +94,15 @@ This map defines the local sources agents should inspect before making source-sp
   - The recent or cursor path is a one-shot catch-up source after connection
     loss, never a periodic polling source. The configured delay bounds
     reconnect attempts only.
+- `crates/session/src/materialization.rs` and
+  `crates/session/src/materialization/local.rs`
+  - Reusable bounded coherent local read materialization of one admitted 9P
+    subtree.
+  - The shared feed is opened before the initial parallel snapshot; malformed
+    input, overflow, cursor loss, and transport loss fail closed to a complete
+    resynchronization.
+  - The local tree rejects symlinks, enforces entry, byte, file, depth, and
+    in-flight bounds, and publishes file changes atomically.
 - `crates/session/src/projection/`
   - Private local projection of one authenticated namespace subtree.
   - Each local session gets its own upstream client; shutdown uses an internal
@@ -128,9 +137,10 @@ This map defines the local sources agents should inspect before making source-sp
 - `crates/fuse/src/`
   - Canonical Linux FUSE bridge over the `r9p` client primitives, exposed as
     `r9p mount`.
-  - Its direct change-feed adapter uses the same stream-primary and
-    cursor-catch-up contract; session-hosted mounts consume the session feed's
-    event bus.
+  - Direct and session-hosted mounts both consume the shared session feed
+    worker and event bus. FUSE translates those generic coherence events into
+    kernel cache invalidations; it does not maintain a second feed parser or
+    reconnect loop.
 - `notes/source-reading/2026-07-29-qid-version-is-not-inode-identity.md`
   - Source and live evidence that `qid.version` is modification state, not
     inode identity, and that remappers and FUSE generations must retain a

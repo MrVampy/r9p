@@ -7,6 +7,7 @@ pub mod control;
 mod epoch;
 mod error;
 pub mod feed;
+pub mod materialization;
 mod opened_fid;
 #[cfg(unix)]
 mod projection;

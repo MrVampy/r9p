@@ -1,5 +1,6 @@
 //! High-level FUSE event loop and opcode dispatch.
 
+use super::mount::MountCleanup;
 use super::{
     reply::{read_struct, reply_bytes, reply_error},
     wire::{
@@ -43,15 +44,20 @@ impl R9pFuse {
         self.run_loop(file, feed_events, None)
     }
 
-    pub(super) fn run_managed(&self, file: &mut File, shutdown: UnixStream) -> Result<()> {
-        self.run_loop(file, None, Some(shutdown))
+    pub(super) fn run_managed(
+        &self,
+        file: &mut File,
+        shutdown: UnixStream,
+        cleanup: MountCleanup,
+    ) -> Result<()> {
+        self.run_loop(file, None, Some((shutdown, cleanup)))
     }
 
     fn run_loop(
         &self,
         file: &mut File,
         feed_events: Option<session::feed::FeedEventReceiver>,
-        shutdown: Option<UnixStream>,
+        shutdown: Option<(UnixStream, MountCleanup)>,
     ) -> Result<()> {
         let mut workers = WorkerPool::start(self)?;
         let mut change_feed = match feed_events {
@@ -61,12 +67,13 @@ impl R9pFuse {
         let mut buf = vec![0_u8; FUSE_BUFFER_SIZE];
         let mut initialized = false;
         loop {
-            if let Some(shutdown) = shutdown.as_ref() {
+            if let Some((shutdown, cleanup)) = shutdown.as_ref() {
                 match wait_for_managed_input(file.as_raw_fd(), shutdown.as_raw_fd())
                     .map_err(|error| Error::io("wait for managed FUSE input", error))?
                 {
                     ManagedInput::Fuse => {}
                     ManagedInput::Shutdown => {
+                        cleanup.cleanup();
                         if let Some(feed) = change_feed.take() {
                             feed.stop_and_join();
                         }

@@ -23,6 +23,8 @@ pub struct FeedWorkerConfig {
     pub cache: Option<NamespaceCache>,
     pub event_bus: Option<FeedEventBus>,
     pub wake: Option<FeedWake>,
+    pub ready: Option<FeedWake>,
+    pub catch_up_initial: bool,
     pub reconnect_delay: Duration,
     pub lookup_timeout: Duration,
     pub read_timeout: Duration,
@@ -89,7 +91,7 @@ fn feed_loop(
     cancellation: Arc<FeedCancellation>,
 ) {
     state.set_connecting();
-    let mut since_event_id = None;
+    let mut since_event_id = state.snapshot().last_event_id;
     while !stop.load(Ordering::SeqCst) {
         let attachment = match client.snapshot() {
             Ok(client) => client,
@@ -121,16 +123,19 @@ fn feed_loop(
             }
             break;
         }
-        if let Some(wake) = &config.wake {
-            wake.notify();
-        }
-        if let Some(event_id) = since_event_id.as_deref() {
+        if since_event_id.is_some() || config.catch_up_initial {
             let catch_up_path = feed_catch_up_path(
                 &config.path,
-                Some(event_id),
+                since_event_id.as_deref(),
                 config.cursor_template.as_deref(),
             );
-            match consume_catch_up(&attachment, &config, &catch_up_path, Some(event_id), &state) {
+            match consume_catch_up(
+                &attachment,
+                &config,
+                &catch_up_path,
+                since_event_id.as_deref(),
+                &state,
+            ) {
                 Ok(next_event_id) => {
                     if next_event_id.is_some() {
                         since_event_id = next_event_id;
@@ -147,6 +152,12 @@ fn feed_loop(
                     continue;
                 }
             }
+        }
+        if let Some(ready) = &config.ready {
+            ready.notify();
+        }
+        if let Some(wake) = &config.wake {
+            wake.notify();
         }
         match consume_stream_until_error(&stream, &config, &state, &stop) {
             Ok(next_event_id) => {
@@ -173,6 +184,9 @@ fn feed_loop(
     }
     if let Some(wake) = &config.wake {
         wake.close();
+    }
+    if let Some(ready) = &config.ready {
+        ready.close();
     }
 }
 
@@ -381,7 +395,8 @@ fn process_feed_data(
         state.set_degraded("change feed backpressure limit exceeded");
         return Ok(records.last().map(|record| record.event_id.clone()));
     }
-    for record in &records {
+    let final_record = records.len().saturating_sub(1);
+    for (index, record) in records.iter().enumerate() {
         if let Some(cache) = &config.cache {
             cache.mark_namespace_change(&record.path, record.old_path.as_deref());
         }
@@ -390,6 +405,7 @@ fn process_feed_data(
             FeedEvent::Change {
                 change: record.clone(),
                 source: mode.source(),
+                cursor_complete: index == final_record,
             },
             state,
         );
@@ -462,6 +478,8 @@ mod tests {
             cache: None,
             event_bus: Some(bus),
             wake: None,
+            ready: None,
+            catch_up_initial: false,
             reconnect_delay: Duration::from_secs(1),
             lookup_timeout: Duration::from_secs(1),
             read_timeout: Duration::from_secs(1),
@@ -513,6 +531,37 @@ mod tests {
         assert!(!matches!(
             receiver.recv_timeout(Duration::ZERO),
             Err(RecvTimeoutError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn feed_cursor_completes_only_after_every_record_in_the_batch() {
+        let bus = FeedEventBus::new(4);
+        let receiver = bus.subscribe();
+        let state = FeedState::new();
+        process_feed_data(
+            b"namespace_change\tg3-s7\t3\tshared\tmodified\t/one.md\nnamespace_change\tg3-s7\t3\tshared\tmodified\t/two.md\n",
+            FeedReadMode::CatchUp {
+                since_event_id: Some("g3-s6"),
+            },
+            &config(bus),
+            &state,
+        )
+        .expect("feed batch");
+
+        assert!(matches!(
+            receiver.recv_timeout(Duration::ZERO),
+            Ok(FeedEvent::Change {
+                cursor_complete: false,
+                ..
+            })
+        ));
+        assert!(matches!(
+            receiver.recv_timeout(Duration::ZERO),
+            Ok(FeedEvent::Change {
+                cursor_complete: true,
+                ..
+            })
         ));
     }
 }

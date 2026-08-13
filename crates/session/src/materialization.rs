@@ -19,7 +19,7 @@ use std::{
 use crate::{
     feed::{
         scope_matches, start_feed_worker, FeedEvent, FeedEventBus, FeedEventReceiver, FeedState,
-        FeedWake, FeedWorkerConfig, FeedWorkerHandle,
+        FeedWake, FeedWorkerConfig, FeedWorkerHandle, NamespaceChange,
     },
     is_dir, is_symlink, Client, ClientSession, ConnectionConfig, DirEntry, Error, Result, OREAD,
 };
@@ -84,6 +84,12 @@ struct RemoteFile {
 enum RemoteNode {
     Directory,
     File(Vec<u8>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MaterializationCursor {
+    event_id: String,
+    generation: u64,
 }
 
 impl MaterializationLimits {
@@ -179,12 +185,19 @@ impl CoherentMaterialization {
         }
         config.validate()?;
         let cache = Arc::new(LocalMaterialization::prepare(local_root)?);
+        let resume_cursor = cache.resume_cursor(&config)?;
         let session = ClientSession::connect(connection, connect_timeout)?;
         let bus = FeedEventBus::new(CHANGE_FEED_CAPACITY);
         let mut receiver = bus.subscribe();
         let receiver_wake = receiver.wake_handle();
         let feed_wake = FeedWake::new();
-        let observed_generation = feed_wake.generation()?;
+        let ready = FeedWake::new();
+        let observed_ready = ready.generation()?;
+        let feed_state = resume_cursor
+            .as_ref()
+            .map_or_else(FeedState::new, |cursor| {
+                FeedState::with_cursor(cursor.event_id.clone(), cursor.generation)
+            });
         let feed = start_feed_worker(
             session.clone(),
             FeedWorkerConfig {
@@ -194,22 +207,33 @@ impl CoherentMaterialization {
                 cache: None,
                 event_bus: Some(bus.clone()),
                 wake: Some(feed_wake.clone()),
+                ready: Some(ready.clone()),
+                catch_up_initial: resume_cursor.is_none(),
                 reconnect_delay: CHANGE_FEED_RECONNECT_DELAY,
                 lookup_timeout: config.request_timeout,
                 read_timeout: Duration::from_secs(24 * 60 * 60),
                 control_timeout: config.request_timeout,
                 backpressure_limit: CHANGE_FEED_CAPACITY,
             },
-            FeedState::new(),
+            feed_state,
         )?;
-        if let Err(error) = feed_wake.wait_after(observed_generation) {
+        if let Err(error) = ready.wait_after(observed_ready) {
             let _ = session.shutdown();
             feed.stop_and_join();
             return Err(error);
         }
 
-        let startup = synchronize(&cache, &session, &config)
-            .and_then(|()| drain_startup_events(&cache, &session, &config, &bus, &mut receiver));
+        let startup = if resume_cursor.is_some() {
+            drain_startup_events(&cache, &session, &config, &bus, &mut receiver)
+        } else {
+            let baseline = drain_before_snapshot(&bus, &mut receiver);
+            synchronize(&cache, &session, &config).and_then(|()| {
+                if let Some(cursor) = baseline.as_ref() {
+                    cache.persist_cursor(&config, cursor)?;
+                }
+                drain_startup_events(&cache, &session, &config, &bus, &mut receiver)
+            })
+        };
         if let Err(error) = startup {
             let _ = session.shutdown();
             feed.stop_and_join();
@@ -304,16 +328,24 @@ fn event_loop(
     stop: Arc<AtomicBool>,
 ) {
     let mut resync = false;
+    let mut resync_cursor = None;
     while !stop.load(Ordering::Acquire) {
         if resync {
             coherent.store(false, Ordering::Release);
             let observed = wake.generation().unwrap_or(0);
             match synchronize(&cache, &session, &config)
+                .and_then(|()| {
+                    if let Some(cursor) = resync_cursor.as_ref() {
+                        cache.persist_cursor(&config, cursor)?;
+                    }
+                    Ok(())
+                })
                 .and_then(|()| drain_startup_events(&cache, &session, &config, &bus, &mut receiver))
             {
                 Ok(()) => {
                     coherent.store(true, Ordering::Release);
                     resync = false;
+                    resync_cursor = None;
                     continue;
                 }
                 Err(error) => {
@@ -331,18 +363,33 @@ fn event_loop(
         }
 
         match receiver.recv_until_stopped(&stop) {
-            Ok(Some(event)) => {
-                if event_requires_resync(&event) {
+            Ok(Some(FeedEvent::CoarseInvalidation { .. })) => {
+                resync_cursor = None;
+                resync = true;
+            }
+            Ok(Some(FeedEvent::Change {
+                change,
+                cursor_complete,
+                ..
+            })) => {
+                let cursor = cursor_complete.then(|| cursor_for(&change));
+                if change_requires_resync(&change) {
+                    resync_cursor = cursor;
                     resync = true;
                     continue;
                 }
-                if !event_is_in_scope(&config, &event) {
-                    continue;
-                }
                 coherent.store(false, Ordering::Release);
-                match apply_event(&cache, &session, &config, event) {
+                match apply_change(&cache, &session, &config, &change).and_then(|()| {
+                    if let Some(cursor) = cursor.as_ref() {
+                        cache.persist_cursor(&config, cursor)?;
+                    }
+                    Ok(())
+                }) {
                     Ok(()) => coherent.store(true, Ordering::Release),
-                    Err(_) => resync = true,
+                    Err(_) => {
+                        resync_cursor = cursor;
+                        resync = true;
+                    }
                 }
             }
             Ok(None) => break,
@@ -364,9 +411,21 @@ fn drain_startup_events(
 ) -> Result<()> {
     loop {
         match receiver.recv_timeout(Duration::ZERO) {
-            Ok(event) if event_requires_resync(&event) => synchronize(cache, session, config)?,
-            Ok(event) if !event_is_in_scope(config, &event) => {}
-            Ok(event) => apply_event(cache, session, config, event)?,
+            Ok(FeedEvent::CoarseInvalidation { .. }) => synchronize(cache, session, config)?,
+            Ok(FeedEvent::Change {
+                change,
+                cursor_complete,
+                ..
+            }) => {
+                if change_requires_resync(&change) {
+                    synchronize(cache, session, config)?;
+                } else {
+                    apply_change(cache, session, config, &change)?;
+                }
+                if cursor_complete {
+                    cache.persist_cursor(config, &cursor_for(&change))?;
+                }
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Ok(()),
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 *receiver = bus.subscribe();
@@ -376,36 +435,41 @@ fn drain_startup_events(
     }
 }
 
-fn event_requires_resync(event: &FeedEvent) -> bool {
-    match event {
-        FeedEvent::CoarseInvalidation { .. } => true,
-        FeedEvent::Change { change, .. } => {
-            change.change_kind == "resync" || change.change_kind == "renamed"
+fn drain_before_snapshot(
+    bus: &FeedEventBus,
+    receiver: &mut FeedEventReceiver,
+) -> Option<MaterializationCursor> {
+    let mut cursor = None;
+    loop {
+        match receiver.recv_timeout(Duration::ZERO) {
+            Ok(FeedEvent::Change {
+                change,
+                cursor_complete: true,
+                ..
+            }) => cursor = Some(cursor_for(&change)),
+            Ok(_) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return cursor,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                *receiver = bus.subscribe();
+                return None;
+            }
         }
     }
 }
 
-fn event_is_in_scope(config: &MaterializationConfig, event: &FeedEvent) -> bool {
-    match event {
-        FeedEvent::CoarseInvalidation { .. } => true,
-        FeedEvent::Change { change, .. } => {
-            scope_matches(config.change_scope.as_deref(), &change.scope)
-        }
-    }
+fn change_requires_resync(change: &NamespaceChange) -> bool {
+    change.change_kind == "resync" || change.change_kind == "renamed"
 }
 
-fn apply_event(
+fn apply_change(
     cache: &LocalMaterialization,
     session: &ClientSession,
     config: &MaterializationConfig,
-    event: FeedEvent,
+    change: &NamespaceChange,
 ) -> Result<()> {
-    let FeedEvent::Change { change, .. } = event else {
-        return Err(Error::new(
-            libc::EAGAIN,
-            "local materialization requires resynchronization",
-        ));
-    };
+    if !scope_matches(config.change_scope.as_deref(), &change.scope) {
+        return Ok(());
+    }
     let relative = relative_change_path(&change.path)?;
     match change.change_kind.as_str() {
         "removed" => cache.remove(&relative),
@@ -430,11 +494,19 @@ fn apply_event(
     }
 }
 
+fn cursor_for(change: &NamespaceChange) -> MaterializationCursor {
+    MaterializationCursor {
+        event_id: change.event_id.clone(),
+        generation: change.generation,
+    }
+}
+
 fn synchronize(
     cache: &LocalMaterialization,
     session: &ClientSession,
     config: &MaterializationConfig,
 ) -> Result<()> {
+    cache.invalidate_cursor()?;
     let staging = cache.create_staging()?;
     let result = discover_snapshot(session, config).and_then(|plan| {
         for directory in &plan.directories {
@@ -797,5 +869,38 @@ mod tests {
             limits: limits(),
         };
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn snapshot_baseline_advances_only_at_a_complete_feed_batch() {
+        let bus = FeedEventBus::new(4);
+        let mut receiver = bus.subscribe();
+        let change = NamespaceChange {
+            scope: "shared".to_string(),
+            path: "/first.md".to_string(),
+            change_kind: "modified".to_string(),
+            generation: 7,
+            event_id: "g7-s9".to_string(),
+            old_path: None,
+        };
+        assert!(bus.publish(FeedEvent::Change {
+            change: change.clone(),
+            source: "catch_up",
+            cursor_complete: false,
+        }));
+        assert_eq!(drain_before_snapshot(&bus, &mut receiver), None);
+
+        assert!(bus.publish(FeedEvent::Change {
+            change,
+            source: "catch_up",
+            cursor_complete: true,
+        }));
+        assert_eq!(
+            drain_before_snapshot(&bus, &mut receiver),
+            Some(MaterializationCursor {
+                event_id: "g7-s9".to_string(),
+                generation: 7,
+            })
+        );
     }
 }

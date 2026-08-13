@@ -1,17 +1,22 @@
 use std::{
     collections::BTreeMap,
     fs::{self, DirBuilder, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use serde_json::{json, Value};
+
 use crate::{Error, Result};
 
-use super::MaterializationLimits;
+use super::{MaterializationConfig, MaterializationCursor, MaterializationLimits};
 
 static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+const STATE_FILE: &str = ".state.json";
+const MAXIMUM_STATE_BYTES: u64 = 64 * 1024;
+const STATE_SCHEMA: &str = "r9p-coherent-materialization-state";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EntryKind {
@@ -29,14 +34,121 @@ impl LocalMaterialization {
         ensure_directory(root, 0o700)?;
         let tree = root.join("tree");
         ensure_directory(&tree, 0o755)?;
-        Ok(Self {
+        let materialization = Self {
             root: root.to_path_buf(),
             tree,
-        })
+        };
+        materialization.cleanup_temporary_entries();
+        Ok(materialization)
     }
 
     pub(super) fn tree(&self) -> &Path {
         &self.tree
+    }
+
+    pub(super) fn resume_cursor(
+        &self,
+        config: &MaterializationConfig,
+    ) -> Result<Option<MaterializationCursor>> {
+        let path = self.root.join(STATE_FILE);
+        let mut file = match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(Error::io("open materialization state", error)),
+        };
+        let metadata = file
+            .metadata()
+            .map_err(|error| Error::io("inspect materialization state", error))?;
+        if !metadata.is_file()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.nlink() != 1
+            || metadata.permissions().mode() & 0o777 != 0o600
+            || metadata.len() > MAXIMUM_STATE_BYTES
+        {
+            return Err(Error::new(libc::EPERM, "materialization state is unsafe"));
+        }
+        let mut bytes = Vec::new();
+        (&mut file)
+            .take(MAXIMUM_STATE_BYTES.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|error| Error::io("read materialization state", error))?;
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAXIMUM_STATE_BYTES {
+            return Err(Error::new(
+                libc::EFBIG,
+                "materialization state exceeds its bound",
+            ));
+        }
+        let decoded = serde_json::from_slice::<Value>(&bytes)
+            .map_err(|_| Error::new(libc::EINVAL, "materialization state is invalid"))
+            .and_then(|value| decode_state(&value, config));
+        let cursor = match decoded {
+            Ok(cursor) => cursor,
+            Err(_) => {
+                drop(file);
+                self.invalidate_cursor()?;
+                return Ok(None);
+            }
+        };
+        if validate_reusable_tree(&self.tree, &config.limits).is_err() {
+            drop(file);
+            self.invalidate_cursor()?;
+            return Ok(None);
+        }
+        Ok(Some(cursor))
+    }
+
+    pub(super) fn persist_cursor(
+        &self,
+        config: &MaterializationConfig,
+        cursor: &MaterializationCursor,
+    ) -> Result<()> {
+        if !valid_event_id(&cursor.event_id) {
+            return Err(Error::new(
+                libc::EINVAL,
+                "materialization cursor is invalid",
+            ));
+        }
+        let bytes = serde_json::to_vec(&state_value(config, cursor))
+            .map_err(|_| Error::new(libc::EINVAL, "encode materialization state failed"))?;
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAXIMUM_STATE_BYTES {
+            return Err(Error::new(
+                libc::EFBIG,
+                "materialization state exceeds its bound",
+            ));
+        }
+        let temporary = temporary_state_path(&self.root)?;
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+                .open(&temporary)
+                .map_err(|error| Error::io("create materialization state", error))?;
+            file.write_all(&bytes)
+                .map_err(|error| Error::io("write materialization state", error))?;
+            file.sync_all()
+                .map_err(|error| Error::io("sync materialization state", error))?;
+            fs::rename(&temporary, self.root.join(STATE_FILE))
+                .map_err(|error| Error::io("publish materialization state", error))?;
+            sync_directory(&self.root)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
+    }
+
+    pub(super) fn invalidate_cursor(&self) -> Result<()> {
+        match fs::remove_file(self.root.join(STATE_FILE)) {
+            Ok(()) => sync_directory(&self.root),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(Error::io("remove materialization state", error)),
+        }
     }
 
     pub(super) fn create_staging(&self) -> Result<PathBuf> {
@@ -114,8 +226,7 @@ impl LocalMaterialization {
             if live.get(relative) == Some(&EntryKind::Directory) {
                 remove_directory_tree(&destination)?;
             }
-            fs::rename(&source, &destination)
-                .map_err(|error| Error::io("publish materialization file", error))?;
+            rename_file(&source, &destination)?;
         }
 
         let mut stale = live
@@ -133,8 +244,7 @@ impl LocalMaterialization {
             }
         }
 
-        fs::remove_dir_all(staging)
-            .map_err(|error| Error::io("remove materialization staging tree", error))?;
+        remove_directory_tree(staging)?;
         Ok(())
     }
 
@@ -212,11 +322,9 @@ impl LocalMaterialization {
                 return Err(Error::new(libc::EPERM, "materialization rejects symlinks"));
             }
         }
-        let temporary = temporary_sibling(&destination)?;
-        let result = write_new_file(&temporary, bytes).and_then(|()| {
-            fs::rename(&temporary, &destination)
-                .map_err(|error| Error::io("publish materialization file", error))
-        });
+        let temporary = temporary_update_path(&self.root)?;
+        let result =
+            write_new_file(&temporary, bytes).and_then(|()| rename_file(&temporary, &destination));
         if result.is_err() {
             let _ = fs::remove_file(&temporary);
         }
@@ -249,14 +357,29 @@ impl LocalMaterialization {
 
 impl Drop for LocalMaterialization {
     fn drop(&mut self) {
+        self.cleanup_temporary_entries();
+    }
+}
+
+impl LocalMaterialization {
+    fn cleanup_temporary_entries(&self) {
         if let Ok(entries) = fs::read_dir(&self.root) {
             for entry in entries.flatten() {
-                if entry
-                    .file_name()
-                    .to_str()
-                    .is_some_and(|name| name.starts_with(".snapshot-"))
-                {
-                    let _ = fs::remove_dir_all(entry.path());
+                if entry.file_name().to_str().is_some_and(|name| {
+                    name.starts_with(".snapshot-")
+                        || name.starts_with(".state-")
+                        || name.starts_with(".update-")
+                }) {
+                    let path = entry.path();
+                    match fs::symlink_metadata(&path) {
+                        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                            let _ = fs::remove_dir_all(path);
+                        }
+                        Ok(_) => {
+                            let _ = fs::remove_file(path);
+                        }
+                        Err(_) => {}
+                    }
                 }
             }
         }
@@ -266,11 +389,11 @@ impl Drop for LocalMaterialization {
 fn ensure_directory(path: &Path, mode: u32) -> Result<()> {
     let mut builder = DirBuilder::new();
     builder.mode(mode);
-    match builder.create(path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+    let created = match builder.create(path) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
         Err(error) => return Err(Error::io("create materialization directory", error)),
-    }
+    };
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| Error::io("inspect materialization directory", error))?;
     if metadata.file_type().is_symlink()
@@ -283,7 +406,14 @@ fn ensure_directory(path: &Path, mode: u32) -> Result<()> {
         ));
     }
     fs::set_permissions(path, fs::Permissions::from_mode(mode))
-        .map_err(|error| Error::io("protect materialization directory", error))
+        .map_err(|error| Error::io("protect materialization directory", error))?;
+    if created {
+        sync_directory(path)?;
+        if let Some(parent) = path.parent() {
+            sync_directory(parent)?;
+        }
+    }
+    Ok(())
 }
 
 fn create_staged_directories(staging: &Path, destination: &Path) -> Result<()> {
@@ -335,23 +465,26 @@ fn write_new_file(path: &Path, bytes: &[u8]) -> Result<()> {
     file.write_all(bytes)
         .map_err(|error| Error::io("write materialization file", error))?;
     file.set_permissions(fs::Permissions::from_mode(0o444))
-        .map_err(|error| Error::io("protect materialization file", error))
-}
-
-fn temporary_sibling(path: &Path) -> Result<PathBuf> {
+        .map_err(|error| Error::io("protect materialization file", error))?;
+    file.sync_all()
+        .map_err(|error| Error::io("sync materialization file", error))?;
     let parent = path
         .parent()
         .ok_or_else(|| Error::new(libc::EINVAL, "materialization path has no parent"))?;
+    sync_directory(parent)
+}
+
+fn temporary_update_path(root: &Path) -> Result<PathBuf> {
     for _ in 0..32 {
         let sequence = TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let candidate = parent.join(format!(".cache-file-{}-{sequence}", std::process::id()));
+        let candidate = root.join(format!(".update-{}-{sequence}", std::process::id()));
         if !candidate.exists() {
             return Ok(candidate);
         }
     }
     Err(Error::new(
         libc::EEXIST,
-        "create materialization temporary file exhausted retries",
+        "create materialization update file exhausted retries",
     ))
 }
 
@@ -375,12 +508,20 @@ fn collect_entries(
             validate_relative(&child)?;
             let metadata = fs::symlink_metadata(entry.path())
                 .map_err(|error| Error::io("inspect materialization path", error))?;
+            if metadata.uid() != unsafe { libc::geteuid() }
+                || metadata.permissions().mode() & 0o022 != 0
+            {
+                return Err(Error::new(libc::EPERM, "materialization path is unsafe"));
+            }
             let kind = if metadata.file_type().is_symlink() {
                 return Err(Error::new(libc::EPERM, "materialization rejects symlinks"));
             } else if metadata.is_dir() {
                 pending.push(child.clone());
                 EntryKind::Directory
             } else if metadata.is_file() {
+                if metadata.nlink() != 1 {
+                    return Err(Error::new(libc::EPERM, "materialization file is unsafe"));
+                }
                 total_bytes = total_bytes.saturating_add(metadata.len());
                 if total_bytes > maximum_total_bytes {
                     return Err(Error::new(
@@ -443,7 +584,7 @@ fn require_descendant_or_same(parent: &Path, child: &Path) -> Result<()> {
 
 fn remove_file(path: &Path) -> Result<()> {
     match fs::remove_file(path) {
-        Ok(()) => Ok(()),
+        Ok(()) => sync_parent(path),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(Error::io("remove materialization file", error)),
     }
@@ -451,7 +592,7 @@ fn remove_file(path: &Path) -> Result<()> {
 
 fn remove_empty_directory(path: &Path) -> Result<()> {
     match fs::remove_dir(path) {
-        Ok(()) => Ok(()),
+        Ok(()) => sync_parent(path),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(Error::io("remove materialization directory", error)),
     }
@@ -466,12 +607,162 @@ fn remove_directory_tree(path: &Path) -> Result<()> {
             "materialization directory is unsafe",
         ));
     }
-    fs::remove_dir_all(path).map_err(|error| Error::io("remove materialization directory", error))
+    fs::remove_dir_all(path)
+        .map_err(|error| Error::io("remove materialization directory", error))?;
+    sync_parent(path)
+}
+
+fn rename_file(source: &Path, destination: &Path) -> Result<()> {
+    fs::rename(source, destination)
+        .map_err(|error| Error::io("publish materialization file", error))?;
+    let source_parent = source
+        .parent()
+        .ok_or_else(|| Error::new(libc::EINVAL, "materialization path has no parent"))?;
+    let destination_parent = destination
+        .parent()
+        .ok_or_else(|| Error::new(libc::EINVAL, "materialization path has no parent"))?;
+    sync_directory(destination_parent)?;
+    if source_parent != destination_parent {
+        sync_directory(source_parent)?;
+    }
+    Ok(())
+}
+
+fn sync_parent(path: &Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| Error::new(libc::EINVAL, "materialization path has no parent"))?;
+    sync_directory(parent)
+}
+
+fn sync_directory(path: &Path) -> Result<()> {
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|error| Error::io("open materialization directory for sync", error))?;
+    directory
+        .sync_all()
+        .map_err(|error| Error::io("sync materialization directory", error))
+}
+
+fn temporary_state_path(root: &Path) -> Result<PathBuf> {
+    for _ in 0..32 {
+        let sequence = TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let candidate = root.join(format!(".state-{}-{sequence}", std::process::id()));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err(Error::new(
+        libc::EEXIST,
+        "create materialization state exhausted retries",
+    ))
+}
+
+fn validate_reusable_tree(root: &Path, limits: &MaterializationLimits) -> Result<()> {
+    let entries = collect_entries(root, limits.maximum_entries, limits.maximum_total_bytes)?;
+    for (relative, kind) in entries {
+        let components = u64::try_from(relative.components().count()).unwrap_or(u64::MAX);
+        match kind {
+            EntryKind::Directory if components > limits.maximum_depth => {
+                return Err(Error::new(
+                    libc::EFBIG,
+                    "materialization depth bound exceeded",
+                ));
+            }
+            EntryKind::File(length)
+                if length > limits.maximum_file_bytes
+                    || components > limits.maximum_depth.saturating_add(1) =>
+            {
+                return Err(Error::new(
+                    libc::EFBIG,
+                    "materialization file bound exceeded",
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn state_value(config: &MaterializationConfig, cursor: &MaterializationCursor) -> Value {
+    json!({
+        "schema_id": STATE_SCHEMA,
+        "configuration": configuration_value(config),
+        "cursor": {
+            "event_id": cursor.event_id,
+            "generation": cursor.generation,
+        }
+    })
+}
+
+fn configuration_value(config: &MaterializationConfig) -> Value {
+    json!({
+        "label": config.label,
+        "source": config.source,
+        "change_feed_catch_up": config.change_feed_catch_up,
+        "change_feed_stream": config.change_feed_stream,
+        "change_feed_cursor_template": config.change_feed_cursor_template,
+        "change_scope": config.change_scope,
+        "request_timeout_ms": u64::try_from(config.request_timeout.as_millis()).unwrap_or(u64::MAX),
+        "limits": {
+            "maximum_entries": config.limits.maximum_entries,
+            "maximum_total_bytes": config.limits.maximum_total_bytes,
+            "maximum_file_bytes": config.limits.maximum_file_bytes,
+            "maximum_depth": config.limits.maximum_depth,
+            "parallelism": config.limits.parallelism,
+        }
+    })
+}
+
+fn decode_state(value: &Value, config: &MaterializationConfig) -> Result<MaterializationCursor> {
+    let object = value
+        .as_object()
+        .filter(|object| object.len() == 3)
+        .ok_or_else(|| Error::new(libc::EINVAL, "materialization state is invalid"))?;
+    if object.get("schema_id").and_then(Value::as_str) != Some(STATE_SCHEMA)
+        || object.get("configuration") != Some(&configuration_value(config))
+    {
+        return Err(Error::new(
+            libc::EINVAL,
+            "materialization state configuration changed",
+        ));
+    }
+    let cursor = object
+        .get("cursor")
+        .and_then(Value::as_object)
+        .filter(|cursor| cursor.len() == 2)
+        .ok_or_else(|| Error::new(libc::EINVAL, "materialization cursor is invalid"))?;
+    let event_id = cursor
+        .get("event_id")
+        .and_then(Value::as_str)
+        .filter(|event_id| valid_event_id(event_id))
+        .ok_or_else(|| Error::new(libc::EINVAL, "materialization cursor is invalid"))?;
+    let generation = cursor
+        .get("generation")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| Error::new(libc::EINVAL, "materialization cursor is invalid"))?;
+    Ok(MaterializationCursor {
+        event_id: event_id.to_string(),
+        generation,
+    })
+}
+
+fn valid_event_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value != "."
+        && value != ".."
+        && !value
+            .bytes()
+            .any(|byte| byte == b'/' || byte == 0 || byte.is_ascii_control())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     struct TestDirectory(PathBuf);
 
@@ -500,6 +791,19 @@ mod tests {
             maximum_file_bytes: 512,
             maximum_depth: 4,
             parallelism: 2,
+        }
+    }
+
+    fn config() -> MaterializationConfig {
+        MaterializationConfig {
+            label: "memory".to_string(),
+            source: "/memory/personal/wiki/entries".to_string(),
+            change_feed_catch_up: "/memory/personal/changes/recent".to_string(),
+            change_feed_stream: "/memory/personal/changes/stream".to_string(),
+            change_feed_cursor_template: "/memory/personal/changes/after/{event_id}".to_string(),
+            change_scope: Some("shared".to_string()),
+            request_timeout: Duration::from_secs(5),
+            limits: limits(),
         }
     }
 
@@ -564,5 +868,93 @@ mod tests {
         assert!(validate_relative(Path::new("nested/entry.md")).is_ok());
         assert!(validate_relative(Path::new("../entry.md")).is_err());
         assert!(validate_relative(Path::new("/entry.md")).is_err());
+    }
+
+    #[test]
+    fn durable_cursor_reuses_only_the_exact_bounded_tree() -> Result<()> {
+        let temporary =
+            TestDirectory::new().map_err(|error| Error::io("create test directory", error))?;
+        let root = temporary.0.join("memory");
+        let cursor = MaterializationCursor {
+            event_id: "g3-s7".to_string(),
+            generation: 3,
+        };
+        {
+            let cache = LocalMaterialization::prepare(&root)?;
+            cache.replace_file(Path::new("arch.example.md"), b"current", &limits())?;
+            cache.persist_cursor(&config(), &cursor)?;
+        }
+
+        let resumed = LocalMaterialization::prepare(&root)?;
+        assert_eq!(resumed.resume_cursor(&config())?, Some(cursor));
+        assert_eq!(
+            fs::read(resumed.tree().join("arch.example.md"))
+                .map_err(|error| Error::io("read resumed materialization", error))?,
+            b"current"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn changed_configuration_invalidates_the_derived_cursor() -> Result<()> {
+        let temporary =
+            TestDirectory::new().map_err(|error| Error::io("create test directory", error))?;
+        let root = temporary.0.join("memory");
+        let cache = LocalMaterialization::prepare(&root)?;
+        cache.replace_file(Path::new("entry.md"), b"value", &limits())?;
+        cache.persist_cursor(
+            &config(),
+            &MaterializationCursor {
+                event_id: "g2-s4".to_string(),
+                generation: 2,
+            },
+        )?;
+        let mut changed = config();
+        changed.source = "/memory/personal/wiki/other".to_string();
+
+        assert_eq!(cache.resume_cursor(&changed)?, None);
+        assert!(!root.join(STATE_FILE).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_state_invalidates_the_derived_cursor() -> Result<()> {
+        let temporary =
+            TestDirectory::new().map_err(|error| Error::io("create test directory", error))?;
+        let root = temporary.0.join("memory");
+        let cache = LocalMaterialization::prepare(&root)?;
+        cache.replace_file(Path::new("entry.md"), b"value", &limits())?;
+        let state_path = root.join(STATE_FILE);
+        fs::write(&state_path, b"not-json")
+            .map_err(|error| Error::io("write malformed state", error))?;
+        fs::set_permissions(&state_path, fs::Permissions::from_mode(0o600))
+            .map_err(|error| Error::io("protect malformed state", error))?;
+
+        assert_eq!(cache.resume_cursor(&config())?, None);
+        assert!(!state_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn cursor_advances_only_after_a_durable_tree_mutation() -> Result<()> {
+        let temporary =
+            TestDirectory::new().map_err(|error| Error::io("create test directory", error))?;
+        let root = temporary.0.join("memory");
+        let cache = LocalMaterialization::prepare(&root)?;
+        let first = MaterializationCursor {
+            event_id: "g5-s8".to_string(),
+            generation: 5,
+        };
+        cache.replace_file(Path::new("entry.md"), b"first", &limits())?;
+        cache.persist_cursor(&config(), &first)?;
+        cache.replace_file(Path::new("entry.md"), b"later", &limits())?;
+
+        assert_eq!(cache.resume_cursor(&config())?, Some(first));
+        assert_eq!(
+            fs::read(cache.tree().join("entry.md"))
+                .map_err(|error| Error::io("read materialization", error))?,
+            b"later"
+        );
+        Ok(())
     }
 }

@@ -19,7 +19,19 @@ pub struct SelectedFeedRecords {
 
 pub fn parse_namespace_change_record(line: &str) -> Option<NamespaceChange> {
     let fields = line.split('\t').collect::<Vec<_>>();
-    parse_key_value_record(&fields).or_else(|| parse_positional_record(&fields))
+    parse_key_value_record(&fields)
+        .or_else(|| parse_positional_record(&fields))
+        .filter(|change| valid_event_id(&change.event_id))
+}
+
+fn valid_event_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value != "."
+        && value != ".."
+        && !value
+            .bytes()
+            .any(|byte| byte == b'/' || byte == 0 || byte.is_ascii_control())
 }
 
 pub fn parse_namespace_path(path: &str) -> Result<Vec<Vec<u8>>> {
@@ -175,6 +187,18 @@ mod tests {
 
         assert_eq!(record.old_path.as_deref(), Some("/tree/old"));
         assert_eq!(record.path, "/tree/new");
+    }
+
+    #[test]
+    fn rejects_event_ids_that_cannot_become_cursor_path_components() {
+        assert!(parse_namespace_change_record(
+            "namespace_change\tbad/id\t43\tshared\tmodified\t/tree/value"
+        )
+        .is_none());
+        assert!(parse_namespace_change_record(
+            "namespace_change\t..\t43\tshared\tmodified\t/tree/value"
+        )
+        .is_none());
     }
 
     #[test]

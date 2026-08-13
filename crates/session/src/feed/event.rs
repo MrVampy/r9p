@@ -13,6 +13,7 @@ pub enum FeedEvent {
     Change {
         change: NamespaceChange,
         source: &'static str,
+        cursor_complete: bool,
     },
     CoarseInvalidation {
         reason: String,

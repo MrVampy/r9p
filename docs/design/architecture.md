@@ -178,7 +178,13 @@ publishes ordinary file changes, and reconstructs the derived tree after any
 coarse invalidation. FUSE remains lazy and translates the shared feed events
 into kernel cache invalidations; it and the eager local materializer share one
 strict decoder, cursor, reconnect, and backpressure implementation rather than
-duplicating feed behavior.
+duplicating feed behavior. The eager materializer retains a strict internal
+cursor beside its derived tree. A restart opens the stream first, catches up
+from that cursor, and reuses the local tree only when the exact materialization
+configuration and bounded tree are still valid. Cursor publication follows a
+durable complete feed batch, never an individual path record. Missing,
+malformed, stale, or unprovable state falls forward to a full snapshot; the
+derived tree never becomes a second authority.
 
 The generic pattern is described in
 [`event-driven-9p.md`](../guides/event-driven-9p.md). A retained blocking read is the

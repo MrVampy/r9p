@@ -21,7 +21,7 @@ pub use cache::{
     StaleReason,
 };
 pub use client::Client;
-pub use client_session::ClientSession;
+pub use client_session::{ClientSession, PreparedClientSession};
 pub use connection_config::{
     ClientCredential, ConnectionAuthentication, ConnectionConfig, ResponderName,
     SessionAuthentication,

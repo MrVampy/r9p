@@ -109,7 +109,7 @@ fn bounded_path_create_sends_native_tcreate_and_publishes_the_child() {
 }
 
 #[test]
-fn reconciles_a_missing_or_existing_file_without_a_stat_preflight() {
+fn bounded_reconcile_handles_a_missing_or_existing_file_without_a_stat_preflight() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("session listener");
     let address = listener.local_addr().expect("session address");
     let value = Arc::new(Mutex::new(None));
@@ -131,13 +131,13 @@ fn reconciles_a_missing_or_existing_file_without_a_stat_preflight() {
 
     assert_eq!(
         client
-            .reconcile_file_at("/", "published", 0o666, b"first")
+            .reconcile_file_at_timeout("/", "published", 0o666, b"first", Duration::from_secs(1),)
             .expect("missing file should be created"),
         5
     );
     assert_eq!(
         client
-            .reconcile_file_at("/", "published", 0o666, b"second")
+            .reconcile_file_at_timeout("/", "published", 0o666, b"second", Duration::from_secs(1),)
             .expect("existing file should be replaced"),
         6
     );
@@ -275,6 +275,39 @@ fn client_session_reconnects_once_and_bumps_its_epoch() {
     drop(shared);
     drop(replacement);
     drop(first);
+    drop(session);
+    server.join().expect("server should not panic");
+}
+
+#[test]
+fn prepared_client_session_adopts_the_initial_attachment_without_reconnecting() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("session listener");
+    let address = listener.local_addr().expect("session address");
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("session accept");
+        handle_connection(stream).expect("session connection");
+    });
+
+    let prepared = crate::PreparedClientSession::connect(
+        &connection(address.to_string()),
+        Duration::from_secs(1),
+    )
+    .expect("prepared session should connect");
+    let initial = prepared.client().clone();
+    initial
+        .stat_timeout(initial.root_fid(), Duration::from_secs(1))
+        .expect("initial operation should use the prepared attachment");
+
+    let session = prepared.into_session();
+    let adopted = session.snapshot().expect("adopted attachment");
+    assert!(adopted.same_session(&initial));
+    adopted
+        .stat_timeout(adopted.root_fid(), Duration::from_secs(1))
+        .expect("adopted attachment should remain usable");
+
+    session.shutdown().expect("session should shut down");
+    drop(adopted);
+    drop(initial);
     drop(session);
     server.join().expect("server should not panic");
 }

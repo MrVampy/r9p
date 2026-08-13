@@ -119,6 +119,13 @@ impl Client {
         finish_fid(self, fid, result)
     }
 
+    pub fn write_file_timeout(&self, path: &str, data: &[u8], timeout: Duration) -> Result<u32> {
+        let mut file = self.open_path_timeout(path, OWRITE | OTRUNC, timeout)?;
+        let written = file.write_timeout(0, data, timeout)?;
+        file.close()?;
+        Ok(written)
+    }
+
     /// Replaces one file or creates it when it is definitively absent.
     ///
     /// This is intended for desired-state publication whose full contents are
@@ -141,6 +148,44 @@ impl Client {
                     Ok(count) => Ok(count),
                     Err(error) if error.errno == libc::EEXIST => {
                         self.write_file(&target_path, data)
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Bounded form of [`Self::reconcile_file_at`].
+    ///
+    /// Every transport operation uses `timeout`. Definitive absence or an
+    /// `EEXIST` create race may select the next valid operation, but an
+    /// ambiguous write or create failure is returned without replay.
+    pub fn reconcile_file_at_timeout(
+        &self,
+        parent: &str,
+        name: &str,
+        perm: u32,
+        data: &[u8],
+        timeout: Duration,
+    ) -> Result<u32> {
+        let (target_parent, leaf) = create_target(parent, name)?;
+        let target_path = child_path(&target_parent, leaf);
+        match self.write_file_timeout(&target_path, data, timeout) {
+            Ok(count) => Ok(count),
+            Err(error) if error.errno == libc::ENOENT => {
+                match self.create_write_at_timeout(
+                    &target_parent,
+                    leaf,
+                    perm,
+                    OWRITE,
+                    0,
+                    data,
+                    timeout,
+                ) {
+                    Ok(count) => Ok(count),
+                    Err(error) if error.errno == libc::EEXIST => {
+                        self.write_file_timeout(&target_path, data, timeout)
                     }
                     Err(error) => Err(error),
                 }
@@ -248,6 +293,28 @@ impl Client {
                 finish_fid(self, fid, write)
             });
         finish_fid(self, parent_fid, result)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_write_at_timeout(
+        &self,
+        parent: &str,
+        name: &str,
+        perm: u32,
+        mode: u8,
+        offset: u64,
+        data: &[u8],
+        timeout: Duration,
+    ) -> Result<u32> {
+        let (parent, name) = create_target(parent, name)?;
+        let parent_fid = self.walk_path_timeout(&parent, timeout)?;
+        let result = self
+            .create_timeout(parent_fid, name.as_bytes(), perm, mode, timeout)
+            .and_then(|(fid, _)| {
+                let write = self.write_timeout(fid, offset, data, timeout);
+                finish_fid_timeout(self, fid, timeout, write)
+            });
+        finish_fid_timeout(self, parent_fid, timeout, result)
     }
 
     pub fn remove_path(&self, path: &str) -> Result<()> {

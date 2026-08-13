@@ -8,6 +8,38 @@ use std::{
 
 use crate::{Client, ConnectionConfig, Error, Result, SessionEpoch};
 
+/// One established namespace attachment that can perform an initial operation
+/// before becoming a renewable [`ClientSession`].
+///
+/// Keeping preparation and adoption in one type prevents callers from pairing
+/// an arbitrary connected client with unrelated reconnect configuration.
+pub struct PreparedClientSession {
+    config: ConnectionConfig,
+    connect_timeout: Duration,
+    client: Client,
+}
+
+impl PreparedClientSession {
+    pub fn connect(config: &ConnectionConfig, connect_timeout: Duration) -> Result<Self> {
+        let client = Client::connect_with_timeout(config, connect_timeout)?;
+        Ok(Self {
+            config: config.clone(),
+            connect_timeout,
+            client,
+        })
+    }
+
+    /// Returns the established attachment for caller-owned initial work.
+    pub fn client(&self) -> &Client {
+        &self.client
+    }
+
+    /// Transfers the same authenticated attachment into renewable ownership.
+    pub fn into_session(self) -> ClientSession {
+        ClientSession::from_connected(self.config, self.connect_timeout, self.client)
+    }
+}
+
 /// One renewable attachment to a logical 9P namespace.
 ///
 /// The session owns connection establishment, serialized replacement, and the
@@ -28,14 +60,22 @@ pub struct ClientSession {
 impl ClientSession {
     pub fn connect(config: &ConnectionConfig, connect_timeout: Duration) -> Result<Self> {
         let client = Client::connect_with_timeout(config, connect_timeout)?;
-        Ok(Self {
-            config: Arc::new(config.clone()),
+        Ok(Self::from_connected(
+            config.clone(),
+            connect_timeout,
+            client,
+        ))
+    }
+
+    fn from_connected(config: ConnectionConfig, connect_timeout: Duration, client: Client) -> Self {
+        Self {
+            config: Arc::new(config),
             connect_timeout,
             current: Arc::new(RwLock::new(client)),
             epoch: SessionEpoch::new(),
             reconnect: Arc::new(Mutex::new(())),
             closed: Arc::new(AtomicBool::new(false)),
-        })
+        }
     }
 
     pub fn snapshot(&self) -> Result<Client> {

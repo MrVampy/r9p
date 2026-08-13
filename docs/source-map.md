@@ -101,6 +101,10 @@ This map defines the local sources agents should inspect before making source-sp
   - The shared feed is opened before the initial parallel snapshot; malformed
     input, overflow, cursor loss, and transport loss fail closed to a complete
     resynchronization.
+  - A strict internal cursor is published only after the complete feed batch
+    has been applied durably. A later process resumes with cursor catch-up when
+    its exact configuration and bounded local tree still match, otherwise it
+    performs a full snapshot.
   - The local tree rejects symlinks, enforces entry, byte, file, depth, and
     in-flight bounds, and publishes file changes atomically.
 - `crates/session/src/projection/`

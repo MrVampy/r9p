@@ -90,6 +90,8 @@ impl ControlRuntime {
                     cache: Some(cache.clone()),
                     event_bus: Some(feed_events.clone()),
                     wake: None,
+                    ready: None,
+                    catch_up_initial: false,
                     reconnect_delay: config.change_feed_reconnect_delay,
                     lookup_timeout: config.request_timeout,
                     read_timeout: config.request_timeout,

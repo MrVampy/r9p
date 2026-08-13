@@ -29,6 +29,19 @@ impl FeedState {
         }
     }
 
+    pub(crate) fn with_cursor(event_id: String, generation: u64) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(FeedSnapshot {
+                state: "disabled",
+                source: None,
+                last_event_id: Some(event_id),
+                last_generation: Some(generation),
+                last_error: None,
+                fresh_instance: false,
+            })),
+        }
+    }
+
     pub fn snapshot(&self) -> FeedSnapshot {
         self.inner
             .lock()
@@ -130,5 +143,16 @@ mod tests {
         assert_eq!(snapshot.last_event_id.as_deref(), Some("event-7"));
         assert_eq!(snapshot.last_generation, Some(42));
         assert_eq!(snapshot.last_error, None);
+    }
+
+    #[test]
+    fn retained_cursor_survives_the_connecting_transition() {
+        let state = FeedState::with_cursor("g4-s9".to_string(), 4);
+        state.set_connecting();
+
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.state, "connecting");
+        assert_eq!(snapshot.last_event_id.as_deref(), Some("g4-s9"));
+        assert_eq!(snapshot.last_generation, Some(4));
     }
 }

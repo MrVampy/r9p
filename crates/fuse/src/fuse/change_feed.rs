@@ -88,6 +88,8 @@ impl R9pFuse {
                 cache: None,
                 event_bus: Some(bus),
                 wake: None,
+                ready: None,
+                catch_up_initial: false,
                 reconnect_delay: self.config.change_feed_reconnect_delay,
                 lookup_timeout: self.lookup_timeout(),
                 read_timeout: self.config.change_feed_read_timeout,
@@ -238,7 +240,7 @@ fn session_feed_event_loop(
         .set_change_feed("connected", Some("session"), None, None);
     loop {
         match receiver.recv_until_stopped(&stop) {
-            Ok(Some(FeedEvent::Change { change, source })) => {
+            Ok(Some(FeedEvent::Change { change, source, .. })) => {
                 if let Err(error) = fs.apply_namespace_change(file, change, source) {
                     fs.status.set_change_feed(
                         "degraded",

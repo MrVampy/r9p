@@ -280,6 +280,39 @@ fn client_session_reconnects_once_and_bumps_its_epoch() {
 }
 
 #[test]
+fn prepared_client_session_adopts_the_initial_attachment_without_reconnecting() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("session listener");
+    let address = listener.local_addr().expect("session address");
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("session accept");
+        handle_connection(stream).expect("session connection");
+    });
+
+    let prepared = crate::PreparedClientSession::connect(
+        &connection(address.to_string()),
+        Duration::from_secs(1),
+    )
+    .expect("prepared session should connect");
+    let initial = prepared.client().clone();
+    initial
+        .stat_timeout(initial.root_fid(), Duration::from_secs(1))
+        .expect("initial operation should use the prepared attachment");
+
+    let session = prepared.into_session();
+    let adopted = session.snapshot().expect("adopted attachment");
+    assert!(adopted.same_session(&initial));
+    adopted
+        .stat_timeout(adopted.root_fid(), Duration::from_secs(1))
+        .expect("adopted attachment should remain usable");
+
+    session.shutdown().expect("session should shut down");
+    drop(adopted);
+    drop(initial);
+    drop(session);
+    server.join().expect("server should not panic");
+}
+
+#[test]
 fn ordinary_namespace_operations_cross_referrals_transparently() {
     let service_listener = TcpListener::bind("127.0.0.1:0").expect("service listener");
     let service_address = service_listener.local_addr().expect("service address");

@@ -109,7 +109,7 @@ fn bounded_path_create_sends_native_tcreate_and_publishes_the_child() {
 }
 
 #[test]
-fn reconciles_a_missing_or_existing_file_without_a_stat_preflight() {
+fn bounded_reconcile_handles_a_missing_or_existing_file_without_a_stat_preflight() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("session listener");
     let address = listener.local_addr().expect("session address");
     let value = Arc::new(Mutex::new(None));
@@ -131,13 +131,13 @@ fn reconciles_a_missing_or_existing_file_without_a_stat_preflight() {
 
     assert_eq!(
         client
-            .reconcile_file_at("/", "published", 0o666, b"first")
+            .reconcile_file_at_timeout("/", "published", 0o666, b"first", Duration::from_secs(1),)
             .expect("missing file should be created"),
         5
     );
     assert_eq!(
         client
-            .reconcile_file_at("/", "published", 0o666, b"second")
+            .reconcile_file_at_timeout("/", "published", 0o666, b"second", Duration::from_secs(1),)
             .expect("existing file should be replaced"),
         6
     );

@@ -26,3 +26,9 @@ that same client and configuration into `ClientSession`. The type prevents a
 configuration/client mismatch while avoiding an unnecessary authenticated
 reconnect. It does not replay the initial operation or change reconnect
 semantics.
+
+The same latency-sensitive caller publishes a desired-state measurement file
+after attachment. `Client::reconcile_file_at_timeout` therefore composes the
+existing bounded walk, open, create, write, and clunk primitives. It advances
+only after definitive `ENOENT` or `EEXIST` evidence and never replays an
+ambiguous mutation failure.

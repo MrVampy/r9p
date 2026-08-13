@@ -23,13 +23,17 @@ pub struct FeedWorkerConfig {
     pub cache: Option<NamespaceCache>,
     pub event_bus: Option<FeedEventBus>,
     pub wake: Option<FeedWake>,
-    pub ready: Option<FeedWake>,
-    pub catch_up_initial: bool,
     pub reconnect_delay: Duration,
     pub lookup_timeout: Duration,
     pub read_timeout: Duration,
     pub control_timeout: Duration,
     pub backpressure_limit: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FeedWorkerStartup {
+    pub(crate) ready: Option<FeedWake>,
+    pub(crate) catch_up_initial: bool,
 }
 
 pub struct FeedWorkerHandle {
@@ -68,13 +72,31 @@ pub fn start_feed_worker(
     config: FeedWorkerConfig,
     state: FeedState,
 ) -> Result<FeedWorkerHandle> {
+    start_feed_worker_with_startup(client, config, state, FeedWorkerStartup::default())
+}
+
+pub(crate) fn start_feed_worker_with_startup(
+    client: ClientSession,
+    config: FeedWorkerConfig,
+    state: FeedState,
+    startup: FeedWorkerStartup,
+) -> Result<FeedWorkerHandle> {
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
     let cancellation = Arc::new(FeedCancellation::default());
     let thread_cancellation = Arc::clone(&cancellation);
     let handle = thread::Builder::new()
         .name("r9p-session-feed".to_string())
-        .spawn(move || feed_loop(client, config, state, thread_stop, thread_cancellation))
+        .spawn(move || {
+            feed_loop(
+                client,
+                config,
+                state,
+                startup,
+                thread_stop,
+                thread_cancellation,
+            )
+        })
         .map_err(|error| Error::io("spawn namespace feed consumer", error))?;
     Ok(FeedWorkerHandle {
         stop,
@@ -87,6 +109,7 @@ fn feed_loop(
     client: ClientSession,
     config: FeedWorkerConfig,
     state: FeedState,
+    startup: FeedWorkerStartup,
     stop: Arc<AtomicBool>,
     cancellation: Arc<FeedCancellation>,
 ) {
@@ -123,7 +146,7 @@ fn feed_loop(
             }
             break;
         }
-        if since_event_id.is_some() || config.catch_up_initial {
+        if since_event_id.is_some() || startup.catch_up_initial {
             let catch_up_path = feed_catch_up_path(
                 &config.path,
                 since_event_id.as_deref(),
@@ -153,7 +176,7 @@ fn feed_loop(
                 }
             }
         }
-        if let Some(ready) = &config.ready {
+        if let Some(ready) = &startup.ready {
             ready.notify();
         }
         if let Some(wake) = &config.wake {
@@ -185,7 +208,7 @@ fn feed_loop(
     if let Some(wake) = &config.wake {
         wake.close();
     }
-    if let Some(ready) = &config.ready {
+    if let Some(ready) = &startup.ready {
         ready.close();
     }
 }
@@ -478,8 +501,6 @@ mod tests {
             cache: None,
             event_bus: Some(bus),
             wake: None,
-            ready: None,
-            catch_up_initial: false,
             reconnect_delay: Duration::from_secs(1),
             lookup_timeout: Duration::from_secs(1),
             read_timeout: Duration::from_secs(1),

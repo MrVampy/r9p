@@ -18,8 +18,9 @@ use std::{
 
 use crate::{
     feed::{
-        scope_matches, start_feed_worker, FeedEvent, FeedEventBus, FeedEventReceiver, FeedState,
-        FeedWake, FeedWorkerConfig, FeedWorkerHandle, NamespaceChange,
+        scope_matches, start_feed_worker_with_startup, FeedEvent, FeedEventBus, FeedEventReceiver,
+        FeedState, FeedWake, FeedWorkerConfig, FeedWorkerHandle, FeedWorkerStartup,
+        NamespaceChange,
     },
     is_dir, is_symlink, Client, ClientSession, ConnectionConfig, DirEntry, Error, Result, OREAD,
 };
@@ -198,7 +199,7 @@ impl CoherentMaterialization {
             .map_or_else(FeedState::new, |cursor| {
                 FeedState::with_cursor(cursor.event_id.clone(), cursor.generation)
             });
-        let feed = start_feed_worker(
+        let feed = start_feed_worker_with_startup(
             session.clone(),
             FeedWorkerConfig {
                 path: config.change_feed_catch_up.clone(),
@@ -207,8 +208,6 @@ impl CoherentMaterialization {
                 cache: None,
                 event_bus: Some(bus.clone()),
                 wake: Some(feed_wake.clone()),
-                ready: Some(ready.clone()),
-                catch_up_initial: resume_cursor.is_none(),
                 reconnect_delay: CHANGE_FEED_RECONNECT_DELAY,
                 lookup_timeout: config.request_timeout,
                 read_timeout: Duration::from_secs(24 * 60 * 60),
@@ -216,6 +215,10 @@ impl CoherentMaterialization {
                 backpressure_limit: CHANGE_FEED_CAPACITY,
             },
             feed_state,
+            FeedWorkerStartup {
+                ready: Some(ready.clone()),
+                catch_up_initial: resume_cursor.is_none(),
+            },
         )?;
         if let Err(error) = ready.wait_after(observed_ready) {
             let _ = session.shutdown();

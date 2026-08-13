@@ -66,6 +66,11 @@ failing closed when change-feed lineage cannot be proven?
 - A first materialization still takes one full snapshot. Subsequent clean or
   crashed process starts normally perform only cursor catch-up and changed-file
   reads.
+- The exact Tuxedo fleet closure exposed that materializer readiness had leaked
+  into the public `FeedWorkerConfig`, breaking r9wm's independent feed client.
+  Readiness and initial catch-up policy now travel through a crate-private
+  startup object; generic feed consumers retain the consumer-owned public
+  configuration contract.
 
 ## Open questions
 

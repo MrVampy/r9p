@@ -88,8 +88,6 @@ impl R9pFuse {
                 cache: None,
                 event_bus: Some(bus),
                 wake: None,
-                ready: None,
-                catch_up_initial: false,
                 reconnect_delay: self.config.change_feed_reconnect_delay,
                 lookup_timeout: self.lookup_timeout(),
                 read_timeout: self.config.change_feed_read_timeout,

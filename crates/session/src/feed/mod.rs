@@ -10,3 +10,4 @@ pub use record::{
 };
 pub use state::{FeedSnapshot, FeedState};
 pub use worker::{start_feed_worker, FeedWorkerConfig, FeedWorkerHandle};
+pub(crate) use worker::{start_feed_worker_with_startup, FeedWorkerStartup};

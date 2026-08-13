@@ -202,6 +202,31 @@ impl Client {
         finish_fid(self, parent_fid, result)
     }
 
+    /// Creates a child below `parent` with one deadline for walk, create, and
+    /// fid cleanup.
+    ///
+    /// Like [`Self::create_at`], `name` may be one canonical relative path.
+    /// A timeout after `Tcreate` was sent is an ambiguous mutation result; this
+    /// helper does not replay the create.
+    pub fn create_at_timeout(
+        &self,
+        parent: &str,
+        name: &str,
+        perm: u32,
+        mode: u8,
+        timeout: Duration,
+    ) -> Result<Qid> {
+        let (parent, name) = create_target(parent, name)?;
+        let parent_fid = self.walk_path_timeout(&parent, timeout)?;
+        let result = self
+            .create_timeout(parent_fid, name.as_bytes(), perm, mode, timeout)
+            .and_then(|(fid, qid)| {
+                self.clunk_timeout(fid, timeout)?;
+                Ok(qid)
+            });
+        finish_fid_timeout(self, parent_fid, timeout, result)
+    }
+
     /// Creates a child below `parent` and writes its initial contents.
     ///
     /// `name` has the same canonical relative-path behavior as [`Self::create_at`].

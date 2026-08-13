@@ -73,6 +73,42 @@ fn connects_explicit_unix_socket() {
 }
 
 #[test]
+fn bounded_path_create_sends_native_tcreate_and_publishes_the_child() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("session listener");
+    let address = listener.local_addr().expect("session address");
+    let value = Arc::new(Mutex::new(None));
+    let server_value = Arc::clone(&value);
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("session accept");
+        handle_configured_connection(
+            stream,
+            PublicationTree {
+                value: server_value,
+            },
+            ServerConfig::default(),
+        )
+        .expect("serve publication tree");
+    });
+
+    let client =
+        Client::connect_with_timeout(&connection(address.to_string()), Duration::from_secs(1))
+            .expect("namespace client should connect");
+    let qid = client
+        .create_at_timeout("/", "published", 0o600, r9p::OWRITE, Duration::from_secs(1))
+        .expect("bounded native create should succeed");
+    assert_eq!(qid, PUBLICATION_QID);
+    assert!(value
+        .lock()
+        .expect("publication value lock")
+        .as_ref()
+        .is_some());
+
+    client.shutdown().expect("namespace should shut down");
+    drop(client);
+    server.join().expect("server should not panic");
+}
+
+#[test]
 fn reconciles_a_missing_or_existing_file_without_a_stat_preflight() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("session listener");
     let address = listener.local_addr().expect("session address");

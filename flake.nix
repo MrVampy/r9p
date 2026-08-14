@@ -202,12 +202,19 @@
                     else "0";
                   executable = service.serviceConfig.ExecStart;
                   packageName = sessionAuthModuleEval.config.services.r9p-session-auth.package.pname;
+                  orderedAfterTmpfilesResetup =
+                    if builtins.elem
+                      "systemd-tmpfiles-resetup.service"
+                      service.after
+                    then "1"
+                    else "0";
                   serviceGroup = service.serviceConfig.Group;
                   serviceUser = service.serviceConfig.User;
                   sharedServiceGroup = sharedService.serviceConfig.Group;
                   sharedServiceUser = sharedService.serviceConfig.User;
                 } ''
                 test "$packageName" = "r9p"
+                test "$orderedAfterTmpfilesResetup" = "1"
                 test "$serviceUser" = "r9p-proof"
                 test "$serviceGroup" = "r9p-proof"
                 test "$directoryRulePresent" = "1"

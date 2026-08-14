@@ -87,6 +87,11 @@ enum RemoteNode {
     File(Vec<u8>),
 }
 
+struct StartupEventBatch {
+    events: Vec<FeedEvent>,
+    disconnected: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct MaterializationCursor {
     event_id: String,
@@ -412,28 +417,97 @@ fn drain_startup_events(
     bus: &FeedEventBus,
     receiver: &mut FeedEventReceiver,
 ) -> Result<()> {
-    loop {
-        match receiver.recv_timeout(Duration::ZERO) {
-            Ok(FeedEvent::CoarseInvalidation { .. }) => synchronize(cache, session, config)?,
-            Ok(FeedEvent::Change {
+    while let Some(batch) = receive_startup_batch(bus, receiver) {
+        if batch.requires_resynchronization() {
+            synchronize(cache, session, config)?;
+            if let Some(cursor) = batch.cursor_after_last_coherence_loss() {
+                cache.persist_cursor(config, &cursor)?;
+            }
+            continue;
+        }
+        for event in batch.events {
+            let FeedEvent::Change {
                 change,
                 cursor_complete,
                 ..
-            }) => {
-                if change_requires_resync(&change) {
-                    synchronize(cache, session, config)?;
-                } else {
-                    apply_change(cache, session, config, &change)?;
-                }
-                if cursor_complete {
-                    cache.persist_cursor(config, &cursor_for(&change))?;
+            } = event
+            else {
+                unreachable!("resynchronization events were handled as one batch")
+            };
+            apply_change(cache, session, config, &change)?;
+            if cursor_complete {
+                cache.persist_cursor(config, &cursor_for(&change))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn receive_startup_batch(
+    bus: &FeedEventBus,
+    receiver: &mut FeedEventReceiver,
+) -> Option<StartupEventBatch> {
+    let mut events = Vec::new();
+    loop {
+        match receiver.recv_timeout(Duration::ZERO) {
+            Ok(event) => {
+                events.push(event);
+                if events.len() >= CHANGE_FEED_CAPACITY {
+                    return Some(StartupEventBatch {
+                        events,
+                        disconnected: false,
+                    });
                 }
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Ok(()),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                return (!events.is_empty()).then_some(StartupEventBatch {
+                    events,
+                    disconnected: false,
+                });
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 *receiver = bus.subscribe();
-                synchronize(cache, session, config)?;
+                return Some(StartupEventBatch {
+                    events,
+                    disconnected: true,
+                });
             }
+        }
+    }
+}
+
+impl StartupEventBatch {
+    fn requires_resynchronization(&self) -> bool {
+        self.disconnected
+            || self.events.iter().any(|event| match event {
+                FeedEvent::CoarseInvalidation { .. } => true,
+                FeedEvent::Change { change, .. } => change_requires_resync(change),
+            })
+    }
+
+    fn cursor_after_last_coherence_loss(&self) -> Option<MaterializationCursor> {
+        let mut cursor = None;
+        for event in &self.events {
+            match event {
+                FeedEvent::CoarseInvalidation { .. } => cursor = None,
+                FeedEvent::Change {
+                    change,
+                    cursor_complete,
+                    ..
+                } => {
+                    if change_requires_resync(change) {
+                        cursor = None;
+                    }
+                    if *cursor_complete {
+                        cursor = Some(cursor_for(change));
+                    }
+                }
+            }
+        }
+        if self.disconnected {
+            None
+        } else {
+            cursor
         }
     }
 }
@@ -905,5 +979,71 @@ mod tests {
                 generation: 7,
             })
         );
+    }
+
+    #[test]
+    fn startup_coalesces_available_coherence_losses_into_one_batch() {
+        let bus = FeedEventBus::new(8);
+        let mut receiver = bus.subscribe();
+        for reason in ["transport", "malformed", "overflow"] {
+            assert!(bus.publish(FeedEvent::CoarseInvalidation {
+                reason: reason.to_string(),
+            }));
+        }
+
+        let batch = receive_startup_batch(&bus, &mut receiver).expect("startup batch");
+        assert_eq!(batch.events.len(), 3);
+        assert!(batch.requires_resynchronization());
+        assert_eq!(batch.cursor_after_last_coherence_loss(), None);
+        assert!(receive_startup_batch(&bus, &mut receiver).is_none());
+    }
+
+    #[test]
+    fn startup_cursor_must_follow_the_last_coherence_loss() {
+        let bus = FeedEventBus::new(8);
+        let mut receiver = bus.subscribe();
+        assert!(bus.publish(change_event("g7-s8", true)));
+        assert!(bus.publish(FeedEvent::CoarseInvalidation {
+            reason: "transport".to_string(),
+        }));
+        assert!(bus.publish(change_event("g7-s9", false)));
+        assert!(bus.publish(change_event("g7-s9", true)));
+
+        let batch = receive_startup_batch(&bus, &mut receiver).expect("startup batch");
+        assert!(batch.requires_resynchronization());
+        assert_eq!(
+            batch.cursor_after_last_coherence_loss(),
+            Some(MaterializationCursor {
+                event_id: "g7-s9".to_string(),
+                generation: 7,
+            })
+        );
+    }
+
+    #[test]
+    fn startup_disconnect_invalidates_every_retained_cursor() {
+        let bus = FeedEventBus::new(1);
+        let mut receiver = bus.subscribe();
+        assert!(bus.publish(change_event("g7-s9", true)));
+        assert!(!bus.publish(change_event("g7-s10", true)));
+
+        let batch = receive_startup_batch(&bus, &mut receiver).expect("startup batch");
+        assert!(batch.requires_resynchronization());
+        assert_eq!(batch.cursor_after_last_coherence_loss(), None);
+    }
+
+    fn change_event(event_id: &str, cursor_complete: bool) -> FeedEvent {
+        FeedEvent::Change {
+            change: NamespaceChange {
+                scope: "shared".to_string(),
+                path: "/arch/example.md".to_string(),
+                change_kind: "modified".to_string(),
+                generation: 7,
+                event_id: event_id.to_string(),
+                old_path: None,
+            },
+            source: "catch_up",
+            cursor_complete,
+        }
     }
 }

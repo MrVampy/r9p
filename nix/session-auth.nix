@@ -131,6 +131,7 @@ let
       lib.nameValuePair "r9p-session-key-${name}" {
         description = "Provision and verify r9p session key ${name}";
         wantedBy = [ "multi-user.target" ];
+        after = [ "systemd-tmpfiles-resetup.service" ];
         serviceConfig = {
           Type = "oneshot";
           User = key.user;

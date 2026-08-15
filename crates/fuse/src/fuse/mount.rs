@@ -130,6 +130,7 @@ impl MountCleanup {
 
 pub(super) fn mount_fuse(
     mountpoint: &Path,
+    namespace_source: &str,
     allow_other: bool,
     unmount_on_signal: bool,
 ) -> Result<FuseMount> {
@@ -139,10 +140,12 @@ pub(super) fn mount_fuse(
         .to_str()
         .ok_or_else(|| Error::new(libc::EINVAL, "mountpoint is not valid UTF-8"))?
         .to_string();
-    let descriptors = match mount_fuse_attempt(&mountpoint_str, true, allow_other) {
-        Ok(descriptors) => descriptors,
-        Err(_) => mount_fuse_attempt(&mountpoint_str, false, allow_other)?,
-    };
+    let filesystem_source = filesystem_source(namespace_source);
+    let descriptors =
+        match mount_fuse_attempt(&mountpoint_str, &filesystem_source, true, allow_other) {
+            Ok(descriptors) => descriptors,
+            Err(_) => mount_fuse_attempt(&mountpoint_str, &filesystem_source, false, allow_other)?,
+        };
     let fd = descriptors.fuse_fd;
     let connection_id = connection_id_for_mountpoint(&mountpoint_str);
     let fuse_fd = Arc::new(AtomicI32::new(fd));
@@ -163,6 +166,7 @@ pub(super) fn mount_fuse(
 
 fn mount_fuse_attempt(
     mountpoint_str: &str,
+    filesystem_source: &str,
     auto_unmount: bool,
     allow_other: bool,
 ) -> Result<MountDescriptors> {
@@ -182,7 +186,13 @@ fn mount_fuse_attempt(
     if pid == 0 {
         unsafe {
             libc::close(sockets[1]);
-            child_exec_fusermount(sockets[0], mountpoint_str, auto_unmount, allow_other);
+            child_exec_fusermount(
+                sockets[0],
+                mountpoint_str,
+                filesystem_source,
+                auto_unmount,
+                allow_other,
+            );
         }
     }
     unsafe {
@@ -317,6 +327,7 @@ fn absolute_mountpoint(mountpoint: &Path) -> Result<PathBuf> {
 unsafe fn child_exec_fusermount(
     comm_fd: RawFd,
     mountpoint: &str,
+    filesystem_source: &str,
     auto_unmount: bool,
     allow_other: bool,
 ) -> ! {
@@ -327,41 +338,48 @@ unsafe fn child_exec_fusermount(
     libc::setenv(env_name.as_ptr(), env_value.as_ptr(), 1);
 
     let opt_flag = CString::new("-o").expect("static arg contains no NUL");
-    let opt_value =
-        CString::new(mount_options(auto_unmount, allow_other)).expect("static arg contains no NUL");
+    let opt_value = CString::new(mount_options(filesystem_source, auto_unmount, allow_other))
+        .expect("validated FUSE options contain no NUL");
     let dashdash = CString::new("--").expect("static arg contains no NUL");
     for binary in fusermount_candidates() {
         let fusermount = CString::new(binary).expect("static command contains no NUL");
-        if auto_unmount || allow_other {
-            libc::execlp(
-                fusermount.as_ptr(),
-                fusermount.as_ptr(),
-                opt_flag.as_ptr(),
-                opt_value.as_ptr(),
-                dashdash.as_ptr(),
-                mountpoint.as_ptr(),
-                ptr::null::<libc::c_char>(),
-            );
-        } else {
-            libc::execlp(
-                fusermount.as_ptr(),
-                fusermount.as_ptr(),
-                dashdash.as_ptr(),
-                mountpoint.as_ptr(),
-                ptr::null::<libc::c_char>(),
-            );
-        }
+        libc::execlp(
+            fusermount.as_ptr(),
+            fusermount.as_ptr(),
+            opt_flag.as_ptr(),
+            opt_value.as_ptr(),
+            dashdash.as_ptr(),
+            mountpoint.as_ptr(),
+            ptr::null::<libc::c_char>(),
+        );
     }
     libc::_exit(1);
 }
 
-const fn mount_options(auto_unmount: bool, allow_other: bool) -> &'static str {
-    match (auto_unmount, allow_other) {
-        (true, true) => "auto_unmount,allow_other",
-        (true, false) => "auto_unmount",
-        (false, true) => "allow_other",
-        (false, false) => "",
+fn mount_options(filesystem_source: &str, auto_unmount: bool, allow_other: bool) -> String {
+    let mut options = vec![
+        "subtype=r9p".to_string(),
+        format!("fsname={filesystem_source}"),
+    ];
+    if auto_unmount {
+        options.push("auto_unmount".to_string());
     }
+    if allow_other {
+        options.push("allow_other".to_string());
+    }
+    options.join(",")
+}
+
+fn filesystem_source(namespace_source: &str) -> String {
+    let mut encoded = String::from("r9p:");
+    for byte in namespace_source.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
 }
 
 const fn fusermount_candidates() -> [&'static str; 2] {
@@ -555,7 +573,7 @@ fn decode_mounts_path(path: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_mounts_path, fusermount_candidates, mount_options,
+        decode_mounts_path, filesystem_source, fusermount_candidates, mount_options,
         parse_connection_id_from_mountinfo, AutoUnmountGuardian,
     };
     use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
@@ -567,11 +585,25 @@ mod tests {
     }
 
     #[test]
-    fn renders_explicit_fuse_access_options() {
-        assert_eq!("", mount_options(false, false));
-        assert_eq!("auto_unmount", mount_options(true, false));
-        assert_eq!("allow_other", mount_options(false, true));
-        assert_eq!("auto_unmount,allow_other", mount_options(true, true));
+    fn renders_namespace_provenance_and_explicit_fuse_access_options() {
+        let source = filesystem_source("/sources/newsgroups/browse");
+        assert_eq!(source, "r9p:%2Fsources%2Fnewsgroups%2Fbrowse");
+        assert_eq!(
+            "subtype=r9p,fsname=r9p:%2Fsources%2Fnewsgroups%2Fbrowse",
+            mount_options(&source, false, false)
+        );
+        assert_eq!(
+            "subtype=r9p,fsname=r9p:%2Fsources%2Fnewsgroups%2Fbrowse,auto_unmount,allow_other",
+            mount_options(&source, true, true)
+        );
+    }
+
+    #[test]
+    fn filesystem_source_escapes_fuse_option_delimiters_and_utf8() {
+        assert_eq!(
+            filesystem_source("/sources/a,b/cover æ"),
+            "r9p:%2Fsources%2Fa%2Cb%2Fcover%20%C3%A6"
+        );
     }
 
     #[test]

@@ -16,6 +16,7 @@ pub(super) struct MountStatus {
 #[derive(Clone)]
 struct State {
     path: Option<PathBuf>,
+    namespace_source: String,
     change_feed: &'static str,
     source: Option<&'static str>,
     last_event_id: Option<String>,
@@ -23,10 +24,11 @@ struct State {
 }
 
 impl MountStatus {
-    pub(super) fn new(path: Option<PathBuf>) -> Self {
+    pub(super) fn new(path: Option<PathBuf>, namespace_source: String) -> Self {
         Self {
             state: Arc::new(Mutex::new(State {
                 path,
+                namespace_source,
                 change_feed: "disabled",
                 source: None,
                 last_event_id: None,
@@ -74,7 +76,8 @@ fn write_status(state: State) -> Result<()> {
 
 fn status_json(state: &State) -> String {
     format!(
-        "{{\"change_feed\":\"{}\",\"source\":{},\"last_event_id\":{},\"last_error\":{}}}",
+        "{{\"namespace_source\":\"{}\",\"change_feed\":\"{}\",\"source\":{},\"last_event_id\":{},\"last_error\":{}}}",
+        escape_json(&state.namespace_source),
         state.change_feed,
         optional_static_json(state.source),
         optional_json(&state.last_event_id),
@@ -122,11 +125,13 @@ mod tests {
     fn status_json_reports_feed_state() {
         let json = status_json(&State {
             path: None,
+            namespace_source: "/sources/newsgroups/browse".to_string(),
             change_feed: "degraded",
             source: Some("stream"),
             last_event_id: Some("event-1".to_string()),
             last_error: Some("feed missing".to_string()),
         });
+        assert!(json.contains("\"namespace_source\":\"/sources/newsgroups/browse\""));
         assert!(json.contains("\"change_feed\":\"degraded\""));
         assert!(json.contains("\"source\":\"stream\""));
         assert!(json.contains("\"last_event_id\":\"event-1\""));

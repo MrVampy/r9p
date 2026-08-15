@@ -65,7 +65,12 @@ impl MountHandle {
             normalize_config(&mut config)?;
             validate_coherent_cache(&config, false)?;
             parse_source_path(&config.source_path)?;
-            let mount = mount_fuse(Path::new(&config.mountpoint), config.allow_other, false)?;
+            let mount = mount_fuse(
+                Path::new(&config.mountpoint),
+                &config.source_path,
+                config.allow_other,
+                false,
+            )?;
             prepared.push((config, mount));
         }
 
@@ -181,7 +186,12 @@ impl R9pFuse {
         feed_events: Option<FeedEventReceiver>,
     ) -> Result<()> {
         validate_coherent_cache(&config, feed_events.is_some())?;
-        let mut mount = mount_fuse(Path::new(&config.mountpoint), config.allow_other, true)?;
+        let mut mount = mount_fuse(
+            Path::new(&config.mountpoint),
+            &config.source_path,
+            config.allow_other,
+            true,
+        )?;
         let fs = Self::prepare(config, client)?;
         fs.run(mount.file_mut(), feed_events)
     }
@@ -190,7 +200,7 @@ impl R9pFuse {
         let source_path = parse_source_path(&config.source_path)?;
         let diagnostics =
             Diagnostics::new(config.diagnostics_capacity, config.diagnostics_path.clone());
-        let status = MountStatus::new(config.status_path.clone());
+        let status = MountStatus::new(config.status_path.clone(), config.source_path.clone());
         let client_snapshot = client.snapshot()?;
         let _ = diagnostics.record(
             "mount_attached",

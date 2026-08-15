@@ -179,6 +179,9 @@ This map defines the local sources agents should inspect before making source-sp
 - `notes/source-reading/2026-08-11-lazy-directory-reads.md`
   - Source-backed boundary between incremental FUSE directory handles,
     per-fid Front directory snapshots, and application-owned page loading.
+- `notes/source-reading/2026-08-15-fuse-namespace-source-provenance.md`
+  - FUSE `fsname` and subtype provenance for translating a local projection
+    path back to its original logical namespace source.
 - `crates/fs/src/`
   - Local filesystem-backed 9P server adapter used by `r9p serve` and
     `r9p export`; read-only by default with an explicit writable mode.

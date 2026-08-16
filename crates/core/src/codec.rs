@@ -2,8 +2,9 @@ use crate::{
     error::{Error, Result},
     message::{
         RMessage, TMessage, MAXWELEM, RATTACH, RAUTH, RCLUNK, RCREATE, RERROR, RFLUSH, ROPEN,
-        RREAD, RREFERRALS, RREMOVE, RSTAT, RVERSION, RWALK, RWRITE, RWSTAT, TATTACH, TAUTH, TCLUNK,
-        TCREATE, TFLUSH, TOPEN, TREAD, TREFERRALS, TREMOVE, TSTAT, TVERSION, TWALK, TWRITE, TWSTAT,
+        RREAD, RREFERRALS, RREMOVE, RRENAMEAT, RSTAT, RVERSION, RWALK, RWRITE, RWSTAT, TATTACH,
+        TAUTH, TCLUNK, TCREATE, TFLUSH, TOPEN, TREAD, TREFERRALS, TREMOVE, TRENAMEAT, TSTAT,
+        TVERSION, TWALK, TWRITE, TWSTAT,
     },
     referral::NamespaceReferral,
     stat::{push_qid, push_string, push_u16, push_u32, push_u64, Cursor, Stat},
@@ -45,6 +46,10 @@ impl Variant {
     }
 
     pub const fn supports_referrals(self) -> bool {
+        matches!(self, Self::R)
+    }
+
+    pub const fn supports_rename_at(self) -> bool {
         matches!(self, Self::R)
     }
 
@@ -267,6 +272,13 @@ pub fn decode_tmessage(frame: &[u8]) -> Result<TMessage> {
             let stat = Stat::decode(&cursor.bytes(nstat)?)?;
             TMessage::Wstat { tag, fid, stat }
         }
+        TRENAMEAT => TMessage::RenameAt {
+            tag,
+            olddirfid: cursor.u32()?,
+            oldname: cursor.string()?,
+            newdirfid: cursor.u32()?,
+            newname: cursor.string()?,
+        },
         TREFERRALS => TMessage::Referrals {
             tag,
             fid: cursor.u32()?,
@@ -342,6 +354,7 @@ pub fn decode_rmessage(frame: &[u8]) -> Result<RMessage> {
             RMessage::Stat { tag, stat }
         }
         RWSTAT => RMessage::Wstat { tag },
+        RRENAMEAT => RMessage::RenameAt { tag },
         RREFERRALS => {
             let count = usize::from(cursor.u16()?);
             let mut referrals = Vec::with_capacity(count);
@@ -448,6 +461,18 @@ pub fn encode_tmessage(message: &TMessage) -> Result<Vec<u8>> {
             );
             frame.extend(encoded);
         }
+        TMessage::RenameAt {
+            olddirfid,
+            oldname,
+            newdirfid,
+            newname,
+            ..
+        } => {
+            push_u32(&mut frame, *olddirfid);
+            push_string(&mut frame, oldname)?;
+            push_u32(&mut frame, *newdirfid);
+            push_string(&mut frame, newname)?;
+        }
         TMessage::Referrals { fid, .. } => push_u32(&mut frame, *fid),
     }
     finish_frame(frame)
@@ -475,7 +500,8 @@ pub fn encode_rmessage(message: &RMessage) -> Result<Vec<u8>> {
         RMessage::Flush { .. }
         | RMessage::Clunk { .. }
         | RMessage::Remove { .. }
-        | RMessage::Wstat { .. } => {}
+        | RMessage::Wstat { .. }
+        | RMessage::RenameAt { .. } => {}
         RMessage::Walk { qids, .. } => {
             if qids.len() > MAXWELEM {
                 return Err(Error::from("name too long"));
@@ -628,6 +654,26 @@ mod tests {
             }],
         };
         assert_eq!(decode_rmessage(&encode_rmessage(&response)?)?, response);
+        Ok(())
+    }
+
+    #[test]
+    fn rename_at_uses_the_9p2000_l_wire_shape_inside_the_r_dialect() -> Result<()> {
+        let request = TMessage::RenameAt {
+            tag: 12,
+            olddirfid: 3,
+            oldname: b"old".to_vec(),
+            newdirfid: 4,
+            newname: b"new".to_vec(),
+        };
+        let request_frame = encode_tmessage(&request)?;
+        assert_eq!(request_frame[4], TRENAMEAT);
+        assert_eq!(decode_tmessage(&request_frame)?, request);
+
+        let response = RMessage::RenameAt { tag: 12 };
+        let response_frame = encode_rmessage(&response)?;
+        assert_eq!(response_frame[4], RRENAMEAT);
+        assert_eq!(decode_rmessage(&response_frame)?, response);
         Ok(())
     }
 

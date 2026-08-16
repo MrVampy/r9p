@@ -134,6 +134,16 @@ pub struct CreateRelayRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenameRelayRequest {
+    pub request_id: u64,
+    pub prefix: String,
+    pub old_parent: RequestContext,
+    pub old_name: Vec<u8>,
+    pub new_parent: RequestContext,
+    pub new_name: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RequestContext {
     pub principal_id: String,
     pub uname: String,
@@ -199,6 +209,11 @@ pub(crate) enum WstatRelayReply {
     Rejected(String),
 }
 
+pub(crate) enum RenameRelayReply {
+    Accepted,
+    Rejected(String),
+}
+
 pub(crate) enum CreateRelayReply {
     Accepted {
         qtype: u8,
@@ -234,6 +249,7 @@ pub(crate) struct State {
     pub(crate) intakes: BTreeMap<u64, Intake>,
     pub(crate) pending: VecDeque<IntakeRequest>,
     pub(crate) create_pending: VecDeque<CreateRelayRequest>,
+    pub(crate) rename_pending: VecDeque<RenameRelayRequest>,
     pub(crate) rpc_responses: BTreeMap<u64, Option<RequestReply>>,
     pub(crate) response_prefixes: BTreeMap<u64, String>,
     pub(crate) directory_response_requests: BTreeSet<u64>,
@@ -243,9 +259,11 @@ pub(crate) struct State {
     pub(crate) write_relay_responses: BTreeMap<u64, Option<WriteRelayReply>>,
     pub(crate) remove_relay_responses: BTreeMap<u64, Option<RemoveRelayReply>>,
     pub(crate) wstat_relay_responses: BTreeMap<u64, Option<WstatRelayReply>>,
+    pub(crate) rename_relay_responses: BTreeMap<u64, (String, Option<RenameRelayReply>)>,
     pub(crate) write_relay_prefixes: BTreeSet<String>,
     pub(crate) remove_relay_prefixes: BTreeSet<String>,
     pub(crate) wstat_relay_prefixes: BTreeSet<String>,
+    pub(crate) rename_relay_roots: BTreeMap<u64, String>,
     pub(crate) principal_roots_required: bool,
     pub(crate) principal_roots: BTreeMap<Vec<u8>, PrincipalRoot>,
     pub(crate) wait_timeout: Duration,
@@ -312,6 +330,7 @@ impl State {
             intakes: BTreeMap::new(),
             pending: VecDeque::new(),
             create_pending: VecDeque::new(),
+            rename_pending: VecDeque::new(),
             rpc_responses: BTreeMap::new(),
             response_prefixes: BTreeMap::new(),
             directory_response_requests: BTreeSet::new(),
@@ -321,9 +340,11 @@ impl State {
             write_relay_responses: BTreeMap::new(),
             remove_relay_responses: BTreeMap::new(),
             wstat_relay_responses: BTreeMap::new(),
+            rename_relay_responses: BTreeMap::new(),
             write_relay_prefixes: BTreeSet::new(),
             remove_relay_prefixes: BTreeSet::new(),
             wstat_relay_prefixes: BTreeSet::new(),
+            rename_relay_roots: BTreeMap::new(),
             principal_roots_required: false,
             principal_roots: BTreeMap::new(),
             wait_timeout: Duration::from_secs(30),
@@ -919,6 +940,7 @@ impl State {
         };
         self.qid_index.remove(&node.qid_path);
         self.intakes.remove(&id);
+        self.rename_relay_roots.remove(&id);
         if let Body::Dir(children) = node.body {
             for child in children.values() {
                 self.remove_node_recursive(*child);
@@ -1014,6 +1036,32 @@ impl State {
             .iter()
             .position(|request| request.prefix == prefix)?;
         self.create_pending.remove(index)
+    }
+
+    pub(crate) fn pop_rename_pending_for_prefix(
+        &mut self,
+        prefix: &str,
+    ) -> Option<RenameRelayRequest> {
+        let index = self
+            .rename_pending
+            .iter()
+            .position(|request| request.prefix == prefix)?;
+        self.rename_pending.remove(index)
+    }
+
+    pub(crate) fn rename_relay_for(&self, old_parent: u64, new_parent: u64) -> Option<String> {
+        let mut current = old_parent;
+        loop {
+            if let Some(prefix) = self.rename_relay_roots.get(&current) {
+                if self.path_relative_to(new_parent, current).is_ok() {
+                    return Some(prefix.clone());
+                }
+            }
+            if current == ROOT_ID {
+                return None;
+            }
+            current = self.nodes.get(&current)?.parent;
+        }
     }
 
     pub(crate) fn path_relative_to(&self, id: u64, root: u64) -> Result<String> {

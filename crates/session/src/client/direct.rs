@@ -335,6 +335,31 @@ impl DirectClient {
         self.inner.wstat(fid, stat).map_err(client_error)
     }
 
+    pub fn rename_at_timeout(
+        &self,
+        olddirfid: Fid,
+        oldname: &[u8],
+        newdirfid: Fid,
+        newname: &[u8],
+        timeout: Duration,
+    ) -> Result<()> {
+        self.inner
+            .rename_at_timeout(olddirfid, oldname, newdirfid, newname, timeout)
+            .map_err(client_error)
+    }
+
+    pub fn rename_at(
+        &self,
+        olddirfid: Fid,
+        oldname: &[u8],
+        newdirfid: Fid,
+        newname: &[u8],
+    ) -> Result<()> {
+        self.inner
+            .rename_at(olddirfid, oldname, newdirfid, newname)
+            .map_err(client_error)
+    }
+
     pub(crate) fn validate_stat(&self, stat: Stat) -> Result<Stat> {
         if !self.variant().supports_symlinks()
             && (stat.qid.is_symlink() || stat.mode & r9p::qid::DMSYMLINK != 0)

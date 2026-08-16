@@ -758,3 +758,4 @@ mod child_directory_resolution;
 mod directory_relays;
 mod mutation_relays;
 mod read_rpc;
+mod rename_relay;

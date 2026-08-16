@@ -24,6 +24,7 @@ pub enum Completion {
     Remove,
     Stat { stat: Stat },
     Wstat,
+    RenameAt,
     Referrals { referrals: Vec<NamespaceReferral> },
 }
 
@@ -212,6 +213,27 @@ impl Client {
         })
     }
 
+    pub fn rename_at(
+        &mut self,
+        olddirfid: Fid,
+        oldname: Vec<u8>,
+        newdirfid: Fid,
+        newname: Vec<u8>,
+    ) -> Result<Op> {
+        let tag = self.alloc_tag()?;
+        Ok(Op {
+            tag,
+            fid: Some(olddirfid),
+            message: TMessage::RenameAt {
+                tag,
+                olddirfid,
+                oldname,
+                newdirfid,
+                newname,
+            },
+        })
+    }
+
     pub fn referrals(&mut self, fid: Fid) -> Result<Op> {
         let tag = self.alloc_tag()?;
         Ok(Op {
@@ -371,6 +393,13 @@ impl Client {
                     completion: Completion::Wstat,
                 })
             }
+            RMessage::RenameAt { tag } => {
+                self.finish(tag)?;
+                Ok(ClientResponse::Completion {
+                    tag,
+                    completion: Completion::RenameAt,
+                })
+            }
             RMessage::Referrals { tag, referrals } => {
                 self.finish(tag)?;
                 Ok(ClientResponse::Completion {
@@ -522,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn builds_create_remove_and_wstat_ops() {
+    fn builds_create_remove_wstat_and_rename_at_ops() {
         let mut client = Client::new();
 
         let create = must_op(client.create(3, b"created".to_vec(), 0o644, 1));
@@ -569,6 +598,25 @@ mod tests {
                 assert_eq!(actual, stat);
             }
             other => panic!("expected Twstat, got {other:?}"),
+        }
+
+        let rename = must_op(client.rename_at(6, b"before".to_vec(), 7, b"after".to_vec()));
+        assert_eq!(rename.fid, Some(6));
+        match rename.message {
+            TMessage::RenameAt {
+                tag,
+                olddirfid,
+                oldname,
+                newdirfid,
+                newname,
+            } => {
+                assert_eq!(tag, rename.tag);
+                assert_eq!(olddirfid, 6);
+                assert_eq!(oldname, b"before".to_vec());
+                assert_eq!(newdirfid, 7);
+                assert_eq!(newname, b"after".to_vec());
+            }
+            other => panic!("expected Trenameat, got {other:?}"),
         }
     }
 

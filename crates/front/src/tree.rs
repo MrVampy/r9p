@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::AtomicBool;
 
 mod child_directory_resolution;
+mod rename;
 
 pub struct FrontTree {
     front: Front,
@@ -598,6 +599,20 @@ impl FileTree for FrontTree {
 
         let state = self.front.lock()?;
         self.front.wait_wstat_relay(state, request_id)
+    }
+
+    fn rename_at(
+        &mut self,
+        olddirfid: Fid,
+        olddir_qid: Qid,
+        oldname: &[u8],
+        newdirfid: Fid,
+        newdir_qid: Qid,
+        newname: &[u8],
+    ) -> Result<()> {
+        self.relay_rename_at(
+            olddirfid, olddir_qid, oldname, newdirfid, newdir_qid, newname,
+        )
     }
 }
 

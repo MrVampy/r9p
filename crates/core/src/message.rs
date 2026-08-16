@@ -6,6 +6,10 @@ pub type Tag = u16;
 pub const NOTAG: Tag = u16::MAX;
 pub const MAXWELEM: usize = 16;
 
+// 9P2000.R adopts the exact 9P2000.L renameat wire shape so a namespace
+// client can request one owner-atomic cross-parent rename.
+pub const TRENAMEAT: u8 = 74;
+pub const RRENAMEAT: u8 = 75;
 pub const TVERSION: u8 = 100;
 pub const RVERSION: u8 = 101;
 pub const TAUTH: u8 = 102;
@@ -107,6 +111,13 @@ pub enum TMessage {
         fid: Fid,
         stat: Stat,
     },
+    RenameAt {
+        tag: Tag,
+        olddirfid: Fid,
+        oldname: Vec<u8>,
+        newdirfid: Fid,
+        newname: Vec<u8>,
+    },
     Referrals {
         tag: Tag,
         fid: Fid,
@@ -129,6 +140,7 @@ impl TMessage {
             | Self::Remove { tag, .. }
             | Self::Stat { tag, .. }
             | Self::Wstat { tag, .. }
+            | Self::RenameAt { tag, .. }
             | Self::Referrals { tag, .. } => *tag,
         }
     }
@@ -148,6 +160,7 @@ impl TMessage {
             Self::Remove { .. } => TREMOVE,
             Self::Stat { .. } => TSTAT,
             Self::Wstat { .. } => TWSTAT,
+            Self::RenameAt { .. } => TRENAMEAT,
             Self::Referrals { .. } => TREFERRALS,
         }
     }
@@ -210,6 +223,9 @@ pub enum RMessage {
     Wstat {
         tag: Tag,
     },
+    RenameAt {
+        tag: Tag,
+    },
     Referrals {
         tag: Tag,
         referrals: Vec<NamespaceReferral>,
@@ -233,6 +249,7 @@ impl RMessage {
             | Self::Remove { tag }
             | Self::Stat { tag, .. }
             | Self::Wstat { tag }
+            | Self::RenameAt { tag }
             | Self::Referrals { tag, .. } => *tag,
         }
     }
@@ -253,6 +270,7 @@ impl RMessage {
             Self::Remove { .. } => RREMOVE,
             Self::Stat { .. } => RSTAT,
             Self::Wstat { .. } => RWSTAT,
+            Self::RenameAt { .. } => RRENAMEAT,
             Self::Referrals { .. } => RREFERRALS,
         }
     }

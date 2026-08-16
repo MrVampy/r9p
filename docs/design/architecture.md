@@ -107,11 +107,12 @@ never exposes symlink qids, symlink stat bits, or namespace referrals.
 `9P2000.R` is the r9p dialect. It admits `QTSYMLINK` and `DMSYMLINK`, the
 existing read-target representation used by the filesystem exporter and FUSE
 bridge, and the `Treferrals` and `Rreferrals` messages used for transparent
-namespace composition. It deliberately does not claim 9P2000.u or 9P2000.L.
-Servers configured for the dialect can downgrade a plain requester, while
-extension-aware clients reject extended metadata after a downgrade. P9any and
-Noise authenticate the stream before version negotiation and are not part of
-the dialect.
+namespace composition. It also adopts the exact 9P2000.L `Trenameat` wire
+shape as its single owner-atomic cross-parent rename operation. This does not
+claim the rest of 9P2000.u or 9P2000.L. Servers configured for the dialect can
+downgrade a plain requester, while extension-aware clients reject extended
+operations or metadata after a downgrade. P9any and Noise authenticate the
+stream before version negotiation and are not part of the dialect.
 
 `r9p` provides generic client create, write, remove, read, and RPC operations,
 plus language bindings that encode the transport-neutral `r9p-export.v1`

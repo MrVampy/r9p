@@ -87,6 +87,21 @@ pub trait FileTree {
     fn wstat(&mut self, _fid: Fid, _qid: Qid, _stat: &Stat) -> Result<()> {
         Err(Error::from_static(EPERM))
     }
+
+    /// Atomically renames one direct child between two directories. The
+    /// implementation owns replacement policy and must either commit the
+    /// complete rename or leave both names unchanged.
+    fn rename_at(
+        &mut self,
+        _olddirfid: Fid,
+        _olddir_qid: Qid,
+        _oldname: &[u8],
+        _newdirfid: Fid,
+        _newdir_qid: Qid,
+        _newname: &[u8],
+    ) -> Result<()> {
+        Err(Error::from_static(EPERM))
+    }
 }
 
 pub struct Server<T> {

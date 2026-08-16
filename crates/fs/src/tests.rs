@@ -354,6 +354,58 @@ fn writable_wstat_applies_supported_single_mutations() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn writable_r_dialect_rename_at_moves_and_replaces_in_one_owner_call() -> Result<()> {
+    let root = fixture_root("rename-at")?;
+    fs::create_dir(root.join("old")).map_err(|error| Error::from(error.to_string()))?;
+    fs::create_dir(root.join("new")).map_err(|error| Error::from(error.to_string()))?;
+    fs::write(root.join("old/source"), b"source")
+        .map_err(|error| Error::from(error.to_string()))?;
+    fs::write(root.join("new/target"), b"replaced")
+        .map_err(|error| Error::from(error.to_string()))?;
+
+    let mut server = Server::with_config(
+        LocalTree::open_with_config(&root, LocalTreeConfig { writable: true })?,
+        ServerConfig {
+            variant: Variant::R,
+            ..ServerConfig::default()
+        },
+    );
+    attach_with_variant(&mut server, Variant::R);
+    walk(&mut server, 1, 2, b"old");
+    walk(&mut server, 1, 3, b"new");
+    walk(&mut server, 2, 4, b"source");
+    let before = match server.handle(TMessage::Stat { tag: 5, fid: 4 }) {
+        RMessage::Stat { stat, .. } => stat,
+        other => return Err(Error::from(format!("unexpected source stat: {other:?}"))),
+    };
+
+    assert_eq!(
+        server.handle(TMessage::RenameAt {
+            tag: 6,
+            olddirfid: 2,
+            oldname: b"source".to_vec(),
+            newdirfid: 3,
+            newname: b"target".to_vec(),
+        }),
+        RMessage::RenameAt { tag: 6 }
+    );
+    assert!(!root.join("old/source").exists());
+    assert_eq!(
+        fs::read(root.join("new/target")).map_err(|error| Error::from(error.to_string()))?,
+        b"source"
+    );
+    let after = match server.handle(TMessage::Stat { tag: 7, fid: 4 }) {
+        RMessage::Stat { stat, .. } => stat,
+        other => return Err(Error::from(format!("unexpected renamed stat: {other:?}"))),
+    };
+    assert_eq!(after.qid.path, before.qid.path);
+    assert_eq!(after.name, b"target");
+
+    remove_fixture(root);
+    Ok(())
+}
+
 fn attach(server: &mut Server<LocalTree>) {
     attach_with_variant(server, Variant::Plain);
 }

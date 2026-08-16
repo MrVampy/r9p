@@ -182,6 +182,9 @@ This map defines the local sources agents should inspect before making source-sp
 - `notes/source-reading/2026-08-15-fuse-namespace-source-provenance.md`
   - FUSE `fsname` and subtype provenance for translating a local projection
     path back to its original logical namespace source.
+- `notes/source-reading/2026-08-16-owner-atomic-cross-parent-rename.md`
+  - Source-backed boundary between plain `Twstat`, the exact `Trenameat` wire
+    shape admitted by 9P2000.R, and one application-owner rename transaction.
 - `crates/fs/src/`
   - Local filesystem-backed 9P server adapter used by `r9p serve` and
     `r9p export`; read-only by default with an explicit writable mode.

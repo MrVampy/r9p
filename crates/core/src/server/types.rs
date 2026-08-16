@@ -101,6 +101,14 @@ pub enum ServerRequestKind {
         qid: Qid,
         stat: Stat,
     },
+    RenameAt {
+        olddirfid: Fid,
+        olddir_qid: Qid,
+        oldname: Vec<u8>,
+        newdirfid: Fid,
+        newdir_qid: Qid,
+        newname: Vec<u8>,
+    },
     Referrals {
         fid: Fid,
         qid: Qid,
@@ -120,5 +128,6 @@ pub enum ServerCompletion {
     Remove,
     Stat { stat: Stat },
     Wstat,
+    RenameAt,
     Referrals { referrals: Vec<NamespaceReferral> },
 }

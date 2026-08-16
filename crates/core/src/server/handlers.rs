@@ -300,6 +300,42 @@ impl<T> Server<T> {
                     },
                 }))
             }
+            TMessage::RenameAt {
+                olddirfid,
+                oldname,
+                newdirfid,
+                newname,
+                ..
+            } => {
+                let variant = self
+                    .session
+                    .variant()
+                    .ok_or_else(|| Error::from_static("version not negotiated"))?;
+                if !variant.supports_rename_at() {
+                    return Err(Error::from_static("renameat requires negotiated 9P2000.R"));
+                }
+                validate_walk_names(&[oldname.clone(), newname.clone()])?;
+                let olddir = self.session.fid(olddirfid)?;
+                let newdir = self.session.fid(newdirfid)?;
+                if !olddir.qid.is_dir() || !newdir.qid.is_dir() {
+                    return Err(Error::from_static(ENOTDIR));
+                }
+                self.session.reserve_shared_fid(key, olddirfid)?;
+                if newdirfid != olddirfid {
+                    self.session.reserve_shared_fid(key, newdirfid)?;
+                }
+                Ok(ServerEvent::Dispatch(ServerRequest {
+                    key,
+                    kind: ServerRequestKind::RenameAt {
+                        olddirfid,
+                        olddir_qid: olddir.qid,
+                        oldname,
+                        newdirfid,
+                        newdir_qid: newdir.qid,
+                        newname,
+                    },
+                }))
+            }
             TMessage::Referrals { fid, .. } => {
                 let variant = self
                     .session
@@ -461,6 +497,9 @@ impl<T> Server<T> {
             (ServerRequestKind::Wstat { .. }, ServerCompletion::Wstat) => {
                 Ok(RMessage::Wstat { tag })
             }
+            (ServerRequestKind::RenameAt { .. }, ServerCompletion::RenameAt) => {
+                Ok(RMessage::RenameAt { tag })
+            }
             (ServerRequestKind::Referrals { .. }, ServerCompletion::Referrals { referrals }) => {
                 for referral in &referrals {
                     referral.validate()?;
@@ -569,6 +608,23 @@ pub fn perform_file_tree_request<T: FileTree>(
         ServerRequestKind::Wstat { fid, qid, stat } => tree
             .wstat(*fid, *qid, stat)
             .map(|()| ServerCompletion::Wstat),
+        ServerRequestKind::RenameAt {
+            olddirfid,
+            olddir_qid,
+            oldname,
+            newdirfid,
+            newdir_qid,
+            newname,
+        } => tree
+            .rename_at(
+                *olddirfid,
+                *olddir_qid,
+                oldname,
+                *newdirfid,
+                *newdir_qid,
+                newname,
+            )
+            .map(|()| ServerCompletion::RenameAt),
         ServerRequestKind::Referrals { fid, qid } => tree
             .referrals(*fid, *qid)
             .map(|referrals| ServerCompletion::Referrals { referrals }),

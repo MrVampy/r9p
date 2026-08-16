@@ -202,6 +202,25 @@ impl ProjectionHandler {
             .map(|()| ServerCompletion::Wstat)
             .map_err(projected_error)
     }
+
+    fn rename_at(
+        &self,
+        olddirfid: Fid,
+        oldname: &[u8],
+        newdirfid: Fid,
+        newname: &[u8],
+    ) -> Result<ServerCompletion> {
+        self.client
+            .rename_at_timeout(
+                self.remote_fid(olddirfid)?,
+                oldname,
+                self.remote_fid(newdirfid)?,
+                newname,
+                self.operation_timeout,
+            )
+            .map(|()| ServerCompletion::RenameAt)
+            .map_err(projected_error)
+    }
 }
 
 impl ConnectionHandler for ProjectionHandler {
@@ -239,6 +258,13 @@ impl ConnectionHandler for ProjectionHandler {
             ServerRequestKind::Remove { fid, .. } => self.remove(*fid),
             ServerRequestKind::Stat { fid, .. } => self.stat(*fid),
             ServerRequestKind::Wstat { fid, stat, .. } => self.wstat(*fid, stat.clone()),
+            ServerRequestKind::RenameAt {
+                olddirfid,
+                oldname,
+                newdirfid,
+                newname,
+                ..
+            } => self.rename_at(*olddirfid, oldname, *newdirfid, newname),
             ServerRequestKind::Referrals { .. } => Ok(ServerCompletion::Referrals {
                 referrals: Vec::new(),
             }),

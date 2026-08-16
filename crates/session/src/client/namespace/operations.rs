@@ -320,6 +320,47 @@ impl Client {
         remote.client.wstat(remote.fid, stat)
     }
 
+    pub fn rename_at_timeout(
+        &self,
+        olddirfid: Fid,
+        oldname: &[u8],
+        newdirfid: Fid,
+        newname: &[u8],
+        timeout: Duration,
+    ) -> Result<()> {
+        let olddir = self.binding(olddirfid)?.writable_remote()?;
+        let newdir = self.binding(newdirfid)?.writable_remote()?;
+        if !olddir.client.same_connection(&newdir.client) {
+            return Err(Error::new(
+                libc::EXDEV,
+                "rename endpoints belong to different namespace services",
+            ));
+        }
+        olddir
+            .client
+            .rename_at_timeout(olddir.fid, oldname, newdir.fid, newname, timeout)
+    }
+
+    pub fn rename_at(
+        &self,
+        olddirfid: Fid,
+        oldname: &[u8],
+        newdirfid: Fid,
+        newname: &[u8],
+    ) -> Result<()> {
+        let olddir = self.binding(olddirfid)?.writable_remote()?;
+        let newdir = self.binding(newdirfid)?.writable_remote()?;
+        if !olddir.client.same_connection(&newdir.client) {
+            return Err(Error::new(
+                libc::EXDEV,
+                "rename endpoints belong to different namespace services",
+            ));
+        }
+        olddir
+            .client
+            .rename_at(olddir.fid, oldname, newdir.fid, newname)
+    }
+
     pub(crate) fn validate_stat(&self, stat: Stat) -> Result<Stat> {
         if !self.variant().supports_symlinks()
             && (stat.qid.is_symlink() || stat.mode & r9p::qid::DMSYMLINK != 0)

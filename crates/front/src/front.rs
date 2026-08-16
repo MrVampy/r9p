@@ -13,6 +13,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+mod child_directory_resolution;
+
 #[derive(Clone)]
 pub struct Front {
     pub(crate) shared: Arc<(Mutex<State>, Condvar)>,

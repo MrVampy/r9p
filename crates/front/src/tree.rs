@@ -12,6 +12,8 @@ use r9p::stat::Stat;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::AtomicBool;
 
+mod child_directory_resolution;
+
 pub struct FrontTree {
     front: Front,
     session_id: u64,
@@ -152,7 +154,6 @@ impl FileTree for FrontTree {
     }
 
     fn walk(&mut self, fid: Fid, newfid: Fid, _start: Qid, names: &[Vec<u8>]) -> Result<Vec<Qid>> {
-        let state = self.front.lock()?;
         let binding = self
             .fids
             .get(&fid)
@@ -162,19 +163,34 @@ impl FileTree for FrontTree {
         let mut qids = Vec::with_capacity(names.len());
         for name in names {
             let child = if name.as_slice() == b".." {
-                if current == binding.root {
-                    Some(current)
+                let state = self.front.lock()?;
+                Some(if current == binding.root {
+                    current
                 } else {
-                    Some(state.node(current)?.parent)
-                }
+                    state.node(current)?.parent
+                })
             } else {
-                match &state.node(current)?.body {
+                let state = self.front.lock()?;
+                let child = match &state.node(current)?.body {
                     Body::Dir(children) => children.get(name.as_slice()).copied(),
                     _ => None,
+                };
+                drop(state);
+                match child {
+                    Some(child) => Some(child),
+                    None => {
+                        match self.resolve_child_directory(&binding, fid, current, name.as_slice())
+                        {
+                            Ok(child) => child,
+                            Err(error) if qids.is_empty() => return Err(error),
+                            Err(_) => break,
+                        }
+                    }
                 }
             };
             match child {
                 Some(id) => {
+                    let state = self.front.lock()?;
                     qids.push(state.qid_for(id)?);
                     current = id;
                 }

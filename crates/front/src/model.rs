@@ -19,6 +19,13 @@ pub const DEFAULT_IOUNIT: u32 = 4096;
 pub(crate) struct DirectoryBody {
     pub(crate) children: BTreeMap<Vec<u8>, u64>,
     pub(crate) read_relay: Option<String>,
+    pub(crate) child_resolver: Option<ChildDirectoryResolver>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ChildDirectoryResolver {
+    pub(crate) resolution_prefix: String,
+    pub(crate) read_prefix: String,
 }
 
 impl Deref for DirectoryBody {
@@ -168,6 +175,20 @@ pub(crate) enum RequestReply {
     Rejected(String),
 }
 
+#[derive(Clone)]
+pub(crate) enum ChildDirectoryReply {
+    Accepted(PushedDirectoryMetadata),
+    Rejected(String),
+}
+
+pub(crate) struct ChildDirectoryResolution {
+    pub(crate) request_id: u64,
+    pub(crate) prefix: String,
+    pub(crate) read_prefix: String,
+    pub(crate) reply: Option<ChildDirectoryReply>,
+    pub(crate) waiters: usize,
+}
+
 pub(crate) enum RemoveRelayReply {
     Accepted,
     Rejected(String),
@@ -216,6 +237,8 @@ pub(crate) struct State {
     pub(crate) rpc_responses: BTreeMap<u64, Option<RequestReply>>,
     pub(crate) response_prefixes: BTreeMap<u64, String>,
     pub(crate) directory_response_requests: BTreeSet<u64>,
+    pub(crate) child_directory_resolutions: BTreeMap<(u64, Vec<u8>), ChildDirectoryResolution>,
+    pub(crate) child_directory_resolution_requests: BTreeMap<u64, (u64, Vec<u8>)>,
     pub(crate) create_relay_responses: BTreeMap<u64, Option<CreateRelayReply>>,
     pub(crate) write_relay_responses: BTreeMap<u64, Option<WriteRelayReply>>,
     pub(crate) remove_relay_responses: BTreeMap<u64, Option<RemoveRelayReply>>,
@@ -292,6 +315,8 @@ impl State {
             rpc_responses: BTreeMap::new(),
             response_prefixes: BTreeMap::new(),
             directory_response_requests: BTreeSet::new(),
+            child_directory_resolutions: BTreeMap::new(),
+            child_directory_resolution_requests: BTreeMap::new(),
             create_relay_responses: BTreeMap::new(),
             write_relay_responses: BTreeMap::new(),
             remove_relay_responses: BTreeMap::new(),
@@ -659,6 +684,66 @@ impl State {
         }
     }
 
+    pub(crate) fn insert_pushed_child_directory(
+        &mut self,
+        parent: u64,
+        name: &[u8],
+        metadata: PushedDirectoryMetadata,
+        read_prefix: String,
+    ) -> Result<u64> {
+        if metadata.length != 0 {
+            return Err(Error::from_static("pushed directory length must be zero"));
+        }
+        if let Body::Dir(directory) = &self.node(parent)?.body {
+            if let Some(existing) = directory.children.get(name).copied() {
+                return match self.node(existing)?.body {
+                    Body::Dir(_) => Ok(existing),
+                    _ => Err(Error::from_static(ENOTDIR)),
+                };
+            }
+        } else {
+            return Err(Error::from_static(ENOTDIR));
+        }
+        if self.qid_index.contains_key(&metadata.qid_path) {
+            return Err(Error::from_static("qid path already in use"));
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        self.nodes.insert(
+            id,
+            Node {
+                name: name.to_vec(),
+                parent,
+                qid_path: metadata.qid_path,
+                version: metadata.qid_version,
+                generation: metadata.generation,
+                pushed_mtime: Some(metadata.mtime),
+                pushed_length: Some(metadata.length),
+                visibility_class: Some(metadata.visibility_class),
+                freshness_ref: Some(metadata.freshness_ref),
+                wake_token: Some(metadata.wake_token),
+                create_relay: None,
+                write_relay: None,
+                remove_relay: None,
+                wstat_relay: None,
+                body: Body::Dir(DirectoryBody {
+                    children: BTreeMap::new(),
+                    read_relay: Some(read_prefix),
+                    child_resolver: None,
+                }),
+            },
+        );
+        self.qid_index.insert(metadata.qid_path, id);
+        if let Some(Node {
+            body: Body::Dir(directory),
+            ..
+        }) = self.nodes.get_mut(&parent)
+        {
+            directory.children.insert(name.to_vec(), id);
+        }
+        Ok(id)
+    }
+
     pub(crate) fn insert_created_relay_node(
         &mut self,
         parent_id: u64,
@@ -892,6 +977,24 @@ impl State {
         self.response_prefixes.remove(&request_id);
         self.directory_response_requests.remove(&request_id);
         self.remove_pending_request(request_id);
+    }
+
+    pub(crate) fn finish_child_directory_waiter(&mut self, key: &(u64, Vec<u8>)) {
+        let remove = match self.child_directory_resolutions.get_mut(key) {
+            Some(resolution) if resolution.waiters > 1 => {
+                resolution.waiters -= 1;
+                false
+            }
+            Some(_) => true,
+            None => false,
+        };
+        if remove {
+            if let Some(resolution) = self.child_directory_resolutions.remove(key) {
+                self.child_directory_resolution_requests
+                    .remove(&resolution.request_id);
+                self.remove_pending_request(resolution.request_id);
+            }
+        }
     }
 
     pub(crate) fn pop_pending_for_prefix(&mut self, prefix: &str) -> Option<IntakeRequest> {

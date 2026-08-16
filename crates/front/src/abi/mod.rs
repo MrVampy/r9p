@@ -21,7 +21,7 @@ pub use request::{
     r9p_front_reject_request, r9p_front_reject_write, r9p_front_reject_wstat,
     r9p_front_request_context_copy, r9p_front_request_copy, r9p_front_request_prefix_copy,
 };
-pub const ABI_VERSION: u32 = 22;
+pub const ABI_VERSION: u32 = 23;
 pub const CAPABILITY_PUSHED_NAMESPACE_METADATA: u64 = 1 << 0;
 pub const CAPABILITY_REQUEST_CONTEXT_V2: u64 = 1 << 1;
 pub const CAPABILITY_SYNTHETIC_READ_RELAY: u64 = 1 << 2;
@@ -32,6 +32,7 @@ pub const CAPABILITY_AUTHENTICATED_SERVE: u64 = 1 << 6;
 pub const CAPABILITY_CLIENT_SESSION_AUTHENTICATION: u64 = 1 << 7;
 pub const CAPABILITY_SNAPSHOT_READ_RELAY: u64 = 1 << 8;
 pub const CAPABILITY_RESTORED_LOG_OFFSET: u64 = 1 << 9;
+pub const CAPABILITY_PUSHED_STAT_METADATA: u64 = 1 << 10;
 pub const CAPABILITIES: u64 = CAPABILITY_PUSHED_NAMESPACE_METADATA
     | CAPABILITY_REQUEST_CONTEXT_V2
     | CAPABILITY_SYNTHETIC_READ_RELAY
@@ -41,7 +42,8 @@ pub const CAPABILITIES: u64 = CAPABILITY_PUSHED_NAMESPACE_METADATA
     | CAPABILITY_AUTHENTICATED_SERVE
     | CAPABILITY_CLIENT_SESSION_AUTHENTICATION
     | CAPABILITY_SNAPSHOT_READ_RELAY
-    | CAPABILITY_RESTORED_LOG_OFFSET;
+    | CAPABILITY_RESTORED_LOG_OFFSET
+    | CAPABILITY_PUSHED_STAT_METADATA;
 
 const OK: i32 = 0;
 const TIMEOUT: i32 = 1;
@@ -167,6 +169,8 @@ pub unsafe extern "C" fn r9p_front_set_pushed_file(
     qid_path: u64,
     qid_version: u32,
     generation: u64,
+    mtime: u32,
+    length: u64,
     visibility_class: *const c_char,
     visibility_class_len: usize,
     freshness_ref: *const c_char,
@@ -193,6 +197,8 @@ pub unsafe extern "C" fn r9p_front_set_pushed_file(
             qid_path,
             qid_version,
             generation,
+            mtime,
+            length,
             visibility_class: visibility_class.to_string(),
             freshness_ref: freshness_ref.to_string(),
             wake_token: wake_token.to_string(),
@@ -214,6 +220,8 @@ pub unsafe extern "C" fn r9p_front_set_pushed_directory(
     qid_path: u64,
     qid_version: u32,
     generation: u64,
+    mtime: u32,
+    length: u64,
     visibility_class: *const c_char,
     visibility_class_len: usize,
     freshness_ref: *const c_char,
@@ -238,6 +246,8 @@ pub unsafe extern "C" fn r9p_front_set_pushed_directory(
             qid_path,
             qid_version,
             generation,
+            mtime,
+            length,
             visibility_class: visibility_class.to_string(),
             freshness_ref: freshness_ref.to_string(),
             wake_token: wake_token.to_string(),

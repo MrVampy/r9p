@@ -146,6 +146,8 @@ pub struct PushedEntryMetadata {
     pub qid_path: u64,
     pub qid_version: u32,
     pub generation: u64,
+    pub mtime: u32,
+    pub length: u64,
     pub visibility_class: String,
     pub freshness_ref: String,
     pub wake_token: String,
@@ -191,6 +193,8 @@ pub(crate) struct Node {
     pub(crate) qid_path: u64,
     pub(crate) version: u32,
     pub(crate) generation: u64,
+    pub(crate) pushed_mtime: Option<u32>,
+    pub(crate) pushed_length: Option<u64>,
     pub(crate) visibility_class: Option<String>,
     pub(crate) freshness_ref: Option<String>,
     pub(crate) wake_token: Option<String>,
@@ -265,6 +269,8 @@ impl State {
                 qid_path: ROOT_ID,
                 version: 0,
                 generation: 0,
+                pushed_mtime: None,
+                pushed_length: None,
                 visibility_class: None,
                 freshness_ref: None,
                 wake_token: None,
@@ -349,6 +355,8 @@ impl State {
         if let Some(node) = self.nodes.get_mut(&id) {
             node.version = metadata.qid_version;
             node.generation = metadata.generation;
+            node.pushed_mtime = Some(metadata.mtime);
+            node.pushed_length = Some(metadata.length);
             node.visibility_class = Some(metadata.visibility_class.clone());
             node.freshness_ref = Some(metadata.freshness_ref.clone());
             node.wake_token = Some(metadata.wake_token.clone());
@@ -359,7 +367,7 @@ impl State {
     pub(crate) fn stat_for(&self, id: u64) -> Result<Stat> {
         let node = self.node(id)?;
         let qid = self.qid_for(id)?;
-        let (mode, length) = match &node.body {
+        let (mode, body_length) = match &node.body {
             Body::Dir(_) => (DMDIR | 0o555, 0u64),
             Body::File(bytes) => {
                 let mode = if node.write_relay.is_some() {
@@ -381,8 +389,8 @@ impl State {
             qid,
             mode,
             atime: 0,
-            mtime: node.version,
-            length,
+            mtime: node.pushed_mtime.unwrap_or(node.version),
+            length: node.pushed_length.unwrap_or(body_length),
             name: if id == ROOT_ID {
                 b".".to_vec()
             } else {
@@ -415,6 +423,8 @@ impl State {
                 qid_path: id,
                 version: 0,
                 generation: 0,
+                pushed_mtime: None,
+                pushed_length: None,
                 visibility_class: None,
                 freshness_ref: None,
                 wake_token: None,
@@ -489,6 +499,8 @@ impl State {
                         qid_path: id,
                         version: 0,
                         generation: 0,
+                        pushed_mtime: None,
+                        pushed_length: None,
                         visibility_class: None,
                         freshness_ref: None,
                         wake_token: None,
@@ -555,6 +567,8 @@ impl State {
                         qid_path: metadata.qid_path,
                         version: metadata.qid_version,
                         generation: metadata.generation,
+                        pushed_mtime: Some(metadata.mtime),
+                        pushed_length: Some(metadata.length),
                         visibility_class: Some(metadata.visibility_class),
                         freshness_ref: Some(metadata.freshness_ref),
                         wake_token: Some(metadata.wake_token),
@@ -583,6 +597,9 @@ impl State {
         path: &str,
         metadata: PushedDirectoryMetadata,
     ) -> Result<u64> {
+        if metadata.length != 0 {
+            return Err(Error::from_static("pushed directory length must be zero"));
+        }
         let segments = split_path(path)?;
         let (last, dirs) = segments
             .split_last()
@@ -617,6 +634,8 @@ impl State {
                         qid_path: metadata.qid_path,
                         version: metadata.qid_version,
                         generation: metadata.generation,
+                        pushed_mtime: Some(metadata.mtime),
+                        pushed_length: Some(metadata.length),
                         visibility_class: Some(metadata.visibility_class),
                         freshness_ref: Some(metadata.freshness_ref),
                         wake_token: Some(metadata.wake_token),
@@ -686,6 +705,8 @@ impl State {
                 qid_path: qid.path,
                 version: qid.version,
                 generation,
+                pushed_mtime: None,
+                pushed_length: None,
                 visibility_class: None,
                 freshness_ref: None,
                 wake_token: None,

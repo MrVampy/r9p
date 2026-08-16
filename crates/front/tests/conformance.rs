@@ -817,7 +817,7 @@ fn abi_door_rehearsal_principal_root_and_write_relay() {
 }
 
 #[test]
-fn abi_v11_pushed_metadata_aname_gate_and_request_context() {
+fn abi_pushed_metadata_aname_gate_and_request_context() {
     assert_front_contract();
     let handle = r9p_front_new();
     assert_eq!(
@@ -840,6 +840,8 @@ fn abi_v11_pushed_metadata_aname_gate_and_request_context() {
                 4141,
                 76,
                 122,
+                1_700_000_400,
+                0,
                 visibility,
                 visibility_len,
                 freshness,
@@ -861,6 +863,8 @@ fn abi_v11_pushed_metadata_aname_gate_and_request_context() {
                 4242,
                 77,
                 123,
+                1_700_000_401,
+                999,
                 visibility,
                 visibility_len,
                 freshness,
@@ -909,6 +913,9 @@ fn abi_v11_pushed_metadata_aname_gate_and_request_context() {
     assert_eq!(alice.root_qid().path, 4141);
     assert_eq!(alice.root_qid().version, 76);
     let status_fid = alice.walk_path("/status").expect("walk status");
+    let status_stat = alice.stat(status_fid).expect("stat status");
+    assert_eq!(status_stat.mtime, 1_700_000_401);
+    assert_eq!(status_stat.length, 999);
     let qid = alice.open(status_fid, 0).expect("open status");
     assert_eq!(qid.path, 4242);
     assert_eq!(qid.version, 77);

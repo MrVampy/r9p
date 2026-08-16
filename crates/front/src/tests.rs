@@ -76,6 +76,8 @@ fn pushed_file_uses_owner_qid_and_version() -> Result<()> {
             qid_path: 9001,
             qid_version: 44,
             generation: 100,
+            mtime: 1_700_000_000,
+            length: 5,
             visibility_class: "runtime-reader".to_string(),
             freshness_ref: "freshness:status".to_string(),
             wake_token: "wake:status".to_string(),
@@ -88,6 +90,8 @@ fn pushed_file_uses_owner_qid_and_version() -> Result<()> {
             qid_path: 9001,
             qid_version: 45,
             generation: 101,
+            mtime: 1_700_000_100,
+            length: 12,
             visibility_class: "runtime-reader".to_string(),
             freshness_ref: "freshness:status".to_string(),
             wake_token: "wake:status".to_string(),
@@ -101,6 +105,8 @@ fn pushed_file_uses_owner_qid_and_version() -> Result<()> {
     let stat = tree.stat(qids[1])?;
     assert_eq!(stat.qid.path, 9001);
     assert_eq!(stat.qid.version, 45);
+    assert_eq!(stat.mtime, 1_700_000_100);
+    assert_eq!(stat.length, 12);
     let data = tree.read(2, qids[1], 0, 4096)?;
     assert_eq!(data, ReadData::Bytes(b"second".to_vec()));
     Ok(())
@@ -115,6 +121,8 @@ fn pushed_directory_uses_owner_qid_and_version() -> Result<()> {
             qid_path: 8001,
             qid_version: 7,
             generation: 70,
+            mtime: 1_700_000_200,
+            length: 0,
             visibility_class: "runtime-reader".to_string(),
             freshness_ref: "freshness:core".to_string(),
             wake_token: "wake:core".to_string(),
@@ -127,6 +135,8 @@ fn pushed_directory_uses_owner_qid_and_version() -> Result<()> {
             qid_path: 9001,
             qid_version: 8,
             generation: 71,
+            mtime: 1_700_000_201,
+            length: 2,
             visibility_class: "runtime-reader".to_string(),
             freshness_ref: "freshness:core/status".to_string(),
             wake_token: "wake:core/status".to_string(),
@@ -142,6 +152,8 @@ fn pushed_directory_uses_owner_qid_and_version() -> Result<()> {
     let root_stat = tree.stat(root_qid)?;
     assert_eq!(root_stat.qid.path, 8001);
     assert_eq!(root_stat.qid.version, 7);
+    assert_eq!(root_stat.mtime, 1_700_000_200);
+    assert_eq!(root_stat.length, 0);
 
     let qids = walk_to(&mut tree, 1, 2, &["status"]);
     assert_eq!(qids[0].path, 9001);
@@ -153,6 +165,8 @@ fn pushed_directory_uses_owner_qid_and_version() -> Result<()> {
             qid_path: 8001,
             qid_version: 9,
             generation: 72,
+            mtime: 1_700_000_202,
+            length: 0,
             visibility_class: "runtime-reader".to_string(),
             freshness_ref: "freshness:core".to_string(),
             wake_token: "wake:core".to_string(),
@@ -162,6 +176,36 @@ fn pushed_directory_uses_owner_qid_and_version() -> Result<()> {
     let updated_root = updated.attach(1, b"alice", b"door-token")?;
     assert_eq!(updated_root.path, 8001);
     assert_eq!(updated_root.version, 9);
+    let updated_stat = updated.stat(updated_root)?;
+    assert_eq!(updated_stat.mtime, 1_700_000_202);
+    Ok(())
+}
+
+#[test]
+fn pushed_directory_rejects_nonzero_logical_length_without_mutation() -> Result<()> {
+    let front = Front::new();
+    let error = front
+        .set_pushed_directory(
+            "views/core",
+            PushedDirectoryMetadata {
+                qid_path: 8001,
+                qid_version: 7,
+                generation: 70,
+                mtime: 1_700_000_200,
+                length: 1,
+                visibility_class: "runtime-reader".to_string(),
+                freshness_ref: "freshness:core".to_string(),
+                wake_token: "wake:core".to_string(),
+            },
+        )
+        .expect_err("directories cannot advertise a byte length");
+    assert_eq!(error.to_string(), "pushed directory length must be zero");
+
+    let mut tree = front.tree();
+    tree.attach(1, b"claude", b"/")?;
+    assert!(tree
+        .walk(1, 2, Qid::new(QTDIR, 0, 0), &[b"views".to_vec()])
+        .is_err());
     Ok(())
 }
 
@@ -174,6 +218,8 @@ fn remove_subtree_releases_pushed_qids_and_children() -> Result<()> {
             qid_path: 8001,
             qid_version: 1,
             generation: 1,
+            mtime: 1,
+            length: 0,
             visibility_class: "runtime-reader".to_string(),
             freshness_ref: "freshness:core".to_string(),
             wake_token: "wake:core".to_string(),
@@ -185,6 +231,8 @@ fn remove_subtree_releases_pushed_qids_and_children() -> Result<()> {
             qid_path: 8002,
             qid_version: 1,
             generation: 1,
+            mtime: 1,
+            length: 0,
             visibility_class: "runtime-reader".to_string(),
             freshness_ref: "freshness:core/services".to_string(),
             wake_token: "wake:core/services".to_string(),
@@ -198,6 +246,8 @@ fn remove_subtree_releases_pushed_qids_and_children() -> Result<()> {
             qid_path: 8001,
             qid_version: 2,
             generation: 2,
+            mtime: 2,
+            length: 0,
             visibility_class: "runtime-reader".to_string(),
             freshness_ref: "freshness:core".to_string(),
             wake_token: "wake:core".to_string(),

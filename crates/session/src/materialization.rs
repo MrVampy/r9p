@@ -31,6 +31,8 @@ use local::LocalMaterialization;
 
 const CHANGE_FEED_CAPACITY: usize = 4096;
 const CHANGE_FEED_RECONNECT_DELAY: Duration = Duration::from_secs(1);
+const RESYNCHRONIZATION_RETRY_MIN: Duration = Duration::from_secs(1);
+const RESYNCHRONIZATION_RETRY_MAX: Duration = Duration::from_secs(60);
 const MAXIMUM_ENTRIES: u64 = 65_536;
 const MAXIMUM_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
 const MAXIMUM_FILE_BYTES: u64 = 64 * 1024 * 1024;
@@ -337,10 +339,10 @@ fn event_loop(
 ) {
     let mut resync = false;
     let mut resync_cursor = None;
+    let mut retry_delay = RESYNCHRONIZATION_RETRY_MIN;
     while !stop.load(Ordering::Acquire) {
         if resync {
             coherent.store(false, Ordering::Release);
-            let observed = wake.generation().unwrap_or(0);
             match synchronize(&cache, &session, &config)
                 .and_then(|()| {
                     if let Some(cursor) = resync_cursor.as_ref() {
@@ -354,6 +356,7 @@ fn event_loop(
                     coherent.store(true, Ordering::Release);
                     resync = false;
                     resync_cursor = None;
+                    retry_delay = RESYNCHRONIZATION_RETRY_MIN;
                     continue;
                 }
                 Err(error) => {
@@ -362,7 +365,11 @@ fn event_loop(
                         config.label,
                         error.message()
                     );
-                    if stop.load(Ordering::Acquire) || wake.wait_after(observed).is_err() {
+                    let delay = retry_delay;
+                    retry_delay = next_resynchronization_retry_delay(retry_delay);
+                    if stop.load(Ordering::Acquire)
+                        || wake.wait_until_closed_or_timeout(delay).is_err()
+                    {
                         break;
                     }
                     continue;
@@ -408,6 +415,10 @@ fn event_loop(
         }
     }
     coherent.store(false, Ordering::Release);
+}
+
+fn next_resynchronization_retry_delay(current: Duration) -> Duration {
+    current.saturating_mul(2).min(RESYNCHRONIZATION_RETRY_MAX)
 }
 
 fn drain_startup_events(
@@ -946,6 +957,15 @@ mod tests {
             limits: limits(),
         };
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn resynchronization_retry_delay_is_exponential_and_bounded() {
+        let mut delay = RESYNCHRONIZATION_RETRY_MIN;
+        for expected_seconds in [2, 4, 8, 16, 32, 60, 60] {
+            delay = next_resynchronization_retry_delay(delay);
+            assert_eq!(delay, Duration::from_secs(expected_seconds));
+        }
     }
 
     #[test]

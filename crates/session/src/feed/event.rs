@@ -285,6 +285,24 @@ impl FeedWake {
         }
     }
 
+    pub(crate) fn wait_until_closed_or_timeout(&self, timeout: Duration) -> R9pResult<()> {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| Error::new(libc::EIO, "namespace feed wake lock poisoned"))?;
+        let (state, _) = self
+            .inner
+            .changed
+            .wait_timeout_while(state, timeout, |state| !state.closed)
+            .map_err(|_| Error::new(libc::EIO, "namespace feed wake lock poisoned"))?;
+        if state.closed {
+            Err(Error::new(libc::ESHUTDOWN, "namespace feed wake is closed"))
+        } else {
+            Ok(())
+        }
+    }
+
     pub(crate) fn notify(&self) {
         if let Ok(mut state) = self.inner.state.lock() {
             state.generation = state.generation.wrapping_add(1);
@@ -315,6 +333,7 @@ mod tests {
             Arc,
         },
         thread,
+        time::{Duration, Instant},
     };
 
     #[test]
@@ -338,6 +357,42 @@ mod tests {
         let waiter = {
             let wake = wake.clone();
             thread::spawn(move || wake.wait_after(generation))
+        };
+
+        wake.close();
+
+        assert_eq!(
+            waiter.join().expect("waiter").expect_err("closed").errno,
+            libc::ESHUTDOWN
+        );
+    }
+
+    #[test]
+    fn retry_deadline_is_not_bypassed_by_change_notifications() {
+        let wake = FeedWake::new();
+        let waiter = {
+            let wake = wake.clone();
+            thread::spawn(move || {
+                let started = Instant::now();
+                wake.wait_until_closed_or_timeout(Duration::from_millis(50))
+                    .expect("deadline");
+                started.elapsed()
+            })
+        };
+
+        for _ in 0..10_000 {
+            wake.notify();
+        }
+
+        assert!(waiter.join().expect("waiter") >= Duration::from_millis(40));
+    }
+
+    #[test]
+    fn close_interrupts_a_retry_deadline() {
+        let wake = FeedWake::new();
+        let waiter = {
+            let wake = wake.clone();
+            thread::spawn(move || wake.wait_until_closed_or_timeout(Duration::from_secs(60)))
         };
 
         wake.close();

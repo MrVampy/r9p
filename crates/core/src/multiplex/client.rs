@@ -997,6 +997,51 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
             other => Err(unexpected("Rwstat", other)),
         }
     }
+
+    pub fn rename_at(
+        &self,
+        olddirfid: Fid,
+        oldname: &[u8],
+        newdirfid: Fid,
+        newname: &[u8],
+    ) -> Result<()> {
+        if !self.variant().supports_rename_at() {
+            return Err(Error::from("server did not negotiate atomic renameat"));
+        }
+        let op = {
+            let mut protocol = lock(&self.inner.protocol, "lock 9P protocol client")?;
+            protocol
+                .rename_at(olddirfid, oldname.to_vec(), newdirfid, newname.to_vec())
+                .map_err(protocol_error)?
+        };
+        match self.call_op(op)? {
+            Completion::RenameAt => Ok(()),
+            other => Err(unexpected("Rrenameat", other)),
+        }
+    }
+
+    pub fn rename_at_timeout(
+        &self,
+        olddirfid: Fid,
+        oldname: &[u8],
+        newdirfid: Fid,
+        newname: &[u8],
+        timeout: Duration,
+    ) -> Result<()> {
+        if !self.variant().supports_rename_at() {
+            return Err(Error::from("server did not negotiate atomic renameat"));
+        }
+        let op = {
+            let mut protocol = lock(&self.inner.protocol, "lock 9P protocol client")?;
+            protocol
+                .rename_at(olddirfid, oldname.to_vec(), newdirfid, newname.to_vec())
+                .map_err(protocol_error)?
+        };
+        match self.call_op_timeout(op, timeout)? {
+            Completion::RenameAt => Ok(()),
+            other => Err(unexpected("Rrenameat", other)),
+        }
+    }
 }
 
 fn bounded_flush_timeout(timeout: Duration) -> Duration {

@@ -307,6 +307,31 @@ pub(super) fn rename_path(path_fd: RawFd, new_name: &[u8]) -> Result<()> {
     rename_no_replace(&source, &target)
 }
 
+pub(super) fn rename_child_at(
+    old_parent_fd: RawFd,
+    old_name: &[u8],
+    new_parent_fd: RawFd,
+    new_name: &[u8],
+) -> Result<()> {
+    validate_rename_name(old_name)?;
+    validate_rename_name(new_name)?;
+    let old_name = CString::new(old_name).map_err(|_| Error::from_static(ENOENT))?;
+    let new_name = CString::new(new_name).map_err(|_| Error::from_static(ENOENT))?;
+    let status = unsafe {
+        libc::renameat(
+            old_parent_fd,
+            old_name.as_ptr(),
+            new_parent_fd,
+            new_name.as_ptr(),
+        )
+    };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(map_io("renameat", std::io::Error::last_os_error()))
+    }
+}
+
 pub(super) fn validate_rename_name(new_name: &[u8]) -> Result<()> {
     if new_name.is_empty()
         || new_name == b"."

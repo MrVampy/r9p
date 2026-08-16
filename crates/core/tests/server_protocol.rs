@@ -23,6 +23,7 @@ struct ProtocolTree {
     file: Qid,
     write_count: Option<u32>,
     wstat_count: usize,
+    rename_at: Option<(Fid, Vec<u8>, Fid, Vec<u8>)>,
     iounit: u32,
 }
 
@@ -33,6 +34,7 @@ impl ProtocolTree {
             file: Qid::file(2),
             write_count: None,
             wstat_count: 0,
+            rename_at: None,
             iounit: 0,
         }
     }
@@ -50,7 +52,14 @@ impl FileTree for ProtocolTree {
         _start: Qid,
         names: &[Vec<u8>],
     ) -> Result<Vec<Qid>> {
-        Ok(names.iter().map(|_| self.file).collect())
+        Ok(names
+            .iter()
+            .map(|name| match name.as_slice() {
+                b"old" => Qid::dir(3),
+                b"new" => Qid::dir(4),
+                _ => self.file,
+            })
+            .collect())
     }
 
     fn open(&mut self, _fid: Fid, qid: Qid, _mode: u8) -> Result<OpenFile> {
@@ -87,6 +96,19 @@ impl FileTree for ProtocolTree {
 
     fn wstat(&mut self, _fid: Fid, _qid: Qid, _stat: &Stat) -> Result<()> {
         self.wstat_count += 1;
+        Ok(())
+    }
+
+    fn rename_at(
+        &mut self,
+        olddirfid: Fid,
+        _olddir_qid: Qid,
+        oldname: &[u8],
+        newdirfid: Fid,
+        _newdir_qid: Qid,
+        newname: &[u8],
+    ) -> Result<()> {
+        self.rename_at = Some((olddirfid, oldname.to_vec(), newdirfid, newname.to_vec()));
         Ok(())
     }
 
@@ -267,6 +289,76 @@ fn referrals_are_protocol_mechanism_and_require_the_r_dialect() {
         RMessage::Referrals { referrals, .. }
             if referrals.len() == 1 && referrals[0].mount_path == b"/sources/x"
     ));
+}
+
+#[test]
+fn rename_at_is_one_r_dialect_owner_operation() {
+    let request = |tag| TMessage::RenameAt {
+        tag,
+        olddirfid: 2,
+        oldname: b"item".to_vec(),
+        newdirfid: 3,
+        newname: b"moved".to_vec(),
+    };
+
+    let mut plain = Server::new(ProtocolTree::new());
+    negotiate(&mut plain);
+    attach(&mut plain, 1);
+    assert_error(
+        plain.handle(request(4)),
+        "renameat requires negotiated 9P2000.R",
+    );
+
+    let mut composed = Server::with_config(
+        ProtocolTree::new(),
+        ServerConfig {
+            variant: Variant::R,
+            ..ServerConfig::default()
+        },
+    );
+    assert!(matches!(
+        composed.handle(TMessage::Version {
+            tag: NOTAG,
+            msize: 8192,
+            version: b"9P2000.R".to_vec(),
+        }),
+        RMessage::Version { .. }
+    ));
+    attach(&mut composed, 1);
+    assert!(matches!(
+        composed.handle(TMessage::Walk {
+            tag: 2,
+            fid: 1,
+            newfid: 2,
+            wnames: vec![b"old".to_vec()],
+        }),
+        RMessage::Walk { .. }
+    ));
+    assert!(matches!(
+        composed.handle(TMessage::Walk {
+            tag: 3,
+            fid: 1,
+            newfid: 3,
+            wnames: vec![b"new".to_vec()],
+        }),
+        RMessage::Walk { .. }
+    ));
+    assert_eq!(composed.handle(request(4)), RMessage::RenameAt { tag: 4 });
+    assert_eq!(
+        composed.tree_mut().rename_at,
+        Some((2, b"item".to_vec(), 3, b"moved".to_vec()))
+    );
+
+    assert_error(
+        composed.handle(TMessage::RenameAt {
+            tag: 5,
+            olddirfid: 2,
+            oldname: b"bad/name".to_vec(),
+            newdirfid: 3,
+            newname: b"moved".to_vec(),
+        }),
+        r9p::error::EBADWNAME,
+    );
 }
 
 #[test]

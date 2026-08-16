@@ -362,6 +362,27 @@ fn perform_request(
             tree.wstat(*fid, *qid, stat)
                 .map(|()| ServerCompletion::Wstat)
         }
+        ServerRequestKind::RenameAt {
+            olddirfid,
+            olddir_qid,
+            oldname,
+            newdirfid,
+            newdir_qid,
+            newname,
+        } => {
+            let mut tree = tree
+                .lock()
+                .map_err(|_| Error::from_static("front tree poisoned"))?;
+            tree.rename_at(
+                *olddirfid,
+                *olddir_qid,
+                oldname,
+                *newdirfid,
+                *newdir_qid,
+                newname,
+            )
+            .map(|()| ServerCompletion::RenameAt)
+        }
         ServerRequestKind::Referrals { fid, qid } => {
             let mut tree = tree
                 .lock()

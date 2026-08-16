@@ -18,8 +18,8 @@ mod unix_io;
 use unix_io::{
     create_file_fd, duplicate_fd, fstat, is_read_only_mode, is_symlink, mkdir_child, node_from_fd,
     open_child, open_file_fd, open_read_fd, open_root, pread_file, pwrite_file, read_dir,
-    read_link, remove_path, rename_path, stat_from_libc, truncate_fd, validate_rename_name,
-    validate_truncate_length, Node,
+    read_link, remove_path, rename_child_at, rename_path, stat_from_libc, truncate_fd,
+    validate_rename_name, validate_truncate_length, Node,
 };
 
 #[derive(Clone)]
@@ -350,6 +350,58 @@ impl FileTree for LocalTree {
         let refreshed = stat_from_libc(&fstat(fd)?, name);
         if let Some(node) = inner.fids.get_mut(&fid) {
             node.stat = refreshed.clone();
+        }
+        inner.remember(&refreshed);
+        Ok(())
+    }
+
+    fn rename_at(
+        &mut self,
+        olddirfid: Fid,
+        olddir_qid: Qid,
+        oldname: &[u8],
+        newdirfid: Fid,
+        newdir_qid: Qid,
+        newname: &[u8],
+    ) -> Result<()> {
+        let mut inner = self.lock()?;
+        if !inner.writable {
+            return Err(Error::from_static(EPERM));
+        }
+        let (old_parent_fd, new_parent_fd) = {
+            let old_parent = inner
+                .fids
+                .get(&olddirfid)
+                .ok_or_else(|| Error::from_static(r9p::error::EBADFID))?;
+            let new_parent = inner
+                .fids
+                .get(&newdirfid)
+                .ok_or_else(|| Error::from_static(r9p::error::EBADFID))?;
+            if old_parent.stat.qid != olddir_qid
+                || new_parent.stat.qid != newdir_qid
+                || !olddir_qid.is_dir()
+                || !newdir_qid.is_dir()
+            {
+                return Err(Error::from_static(r9p::error::EBADFID));
+            }
+            (old_parent.fd.as_raw_fd(), new_parent.fd.as_raw_fd())
+        };
+        let source = open_child(old_parent_fd, oldname)?;
+        let replaced = match open_child(new_parent_fd, newname) {
+            Ok(node) => Some(node.stat.qid),
+            Err(error) if error.message() == ENOENT.as_bytes() => None,
+            Err(error) => return Err(error),
+        };
+        rename_child_at(old_parent_fd, oldname, new_parent_fd, newname)?;
+
+        let refreshed = stat_from_libc(&fstat(source.fd.as_raw_fd())?, newname.to_vec());
+        for node in inner.fids.values_mut() {
+            if node.stat.qid.path == source.stat.qid.path {
+                node.stat = refreshed.clone();
+            }
+        }
+        if let Some(replaced) = replaced.filter(|qid| qid.path != refreshed.qid.path) {
+            inner.stats.remove(&replaced.path);
         }
         inner.remember(&refreshed);
         Ok(())

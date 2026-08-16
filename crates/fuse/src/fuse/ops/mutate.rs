@@ -1,30 +1,33 @@
 //! `unlink` / `rmdir` / `rename` op handlers.
 //!
-//! Rename in particular emulates file-over-file overwrite so editor temp-file
-//! save flows work over 9P, where the wire protocol has no native rename atom.
+//! Same-parent rename retains the 9P2000 `Twstat` path used by editor save
+//! flows. Cross-parent rename uses the owner-atomic `Trenameat` operation
+//! negotiated by 9P2000.R.
 
 use crate::{
     error::{Error, Result},
     fuse::{
-        reply::{c_string, next_c_string, read_struct, reply_empty, reply_error},
+        reply::{c_string, next_c_string, read_struct, reply_empty},
         util::{is_namespace_shape_error, is_transport_error},
         wire::{FuseInHeader, FuseRenameIn},
         R9pFuse,
     },
     node::is_dir,
 };
-use r9p::{fid::Fid, qid::Qid, stat::Stat};
+use r9p::{fid::Fid, stat::Stat};
 use session::Client;
 use std::{fs::File, mem::size_of};
 
 struct RenamePlan {
     client: Client,
-    parent_fid: Fid,
+    old_parent_fid: Fid,
+    new_parent_fid: Fid,
     fid: Fid,
     before: Stat,
     old_path: Vec<Vec<u8>>,
-    replaced_qid: Option<Qid>,
+    replaced: Option<Stat>,
     new_path: Vec<Vec<u8>>,
+    cross_parent: bool,
 }
 
 impl R9pFuse {
@@ -64,27 +67,27 @@ impl R9pFuse {
         payload: &[u8],
     ) -> Result<()> {
         let input = read_struct::<FuseRenameIn>(payload)?;
-        if input.newdir != header.nodeid {
-            return reply_error(file, header.unique, libc::EXDEV);
-        }
         let names = payload
             .get(size_of::<FuseRenameIn>()..)
             .ok_or_else(|| Error::new(libc::EINVAL, "missing rename names"))?;
         let (old_name, rest) = next_c_string(names)?;
         let (new_name, _rest) = next_c_string(rest)?;
-        let plan = match self.prepare_rename(header.nodeid, old_name, new_name) {
+        let plan = match self.prepare_rename(header.nodeid, input.newdir, old_name, new_name) {
             Ok(plan) => plan,
             Err(error) if is_transport_error(&error) => {
                 self.reconnect()?;
-                self.prepare_rename(header.nodeid, old_name, new_name)?
+                self.prepare_rename(header.nodeid, input.newdir, old_name, new_name)?
             }
             Err(error) if is_namespace_shape_error(&error) => {
                 self.recover_namespace_shape(header.nodeid)?;
-                self.prepare_rename(header.nodeid, old_name, new_name)?
+                if input.newdir != header.nodeid {
+                    self.recover_namespace_shape(input.newdir)?;
+                }
+                self.prepare_rename(header.nodeid, input.newdir, old_name, new_name)?
             }
             Err(error) => return Err(error),
         };
-        self.rename_prepared(file, header.unique, new_name, plan)
+        self.rename_prepared(file, header.unique, old_name, new_name, plan)
     }
 
     fn walk_child_for_mutation(
@@ -99,17 +102,26 @@ impl R9pFuse {
 
     fn prepare_rename(
         &mut self,
-        parent_nodeid: u64,
+        old_parent_nodeid: u64,
+        new_parent_nodeid: u64,
         old_name: &[u8],
         new_name: &[u8],
     ) -> Result<RenamePlan> {
-        let old_path = self.nodes()?.child_path(parent_nodeid, old_name)?;
-        let new_path = self.nodes()?.child_path(parent_nodeid, new_name)?;
-        let (client, parent_fid) = self.bound_node_fid(parent_nodeid)?;
-        let fid = client.walk_one_timeout(parent_fid, old_name, self.mutation_timeout())?;
+        let old_path = self.nodes()?.child_path(old_parent_nodeid, old_name)?;
+        let new_path = self.nodes()?.child_path(new_parent_nodeid, new_name)?;
+        let (client, old_parent_fid) = self.bound_node_fid(old_parent_nodeid)?;
+        let (_, new_parent_fid) = if new_parent_nodeid == old_parent_nodeid {
+            (client.clone(), old_parent_fid)
+        } else {
+            self.bound_node_fid(new_parent_nodeid)?
+        };
+        let cross_parent = new_parent_nodeid != old_parent_nodeid;
+        let fid = client.walk_one_timeout(old_parent_fid, old_name, self.mutation_timeout())?;
         let before = client.stat_timeout(fid, self.lookup_timeout())?;
-        let mut replaced_qid = None;
-        if let Ok(existing) = client.walk_one_timeout(parent_fid, new_name, self.lookup_timeout()) {
+        let mut replaced = None;
+        if let Ok(existing) =
+            client.walk_one_timeout(new_parent_fid, new_name, self.lookup_timeout())
+        {
             let existing_stat = match client.stat_timeout(existing, self.lookup_timeout()) {
                 Ok(stat) => stat,
                 Err(error) => {
@@ -118,7 +130,7 @@ impl R9pFuse {
                     return Err(error.into());
                 }
             };
-            if is_dir(&existing_stat) {
+            if !cross_parent && is_dir(&existing_stat) {
                 let _ = client.clunk_timeout(existing, self.control_timeout());
                 let _ = client.clunk_timeout(fid, self.control_timeout());
                 return Err(Error::new(
@@ -126,17 +138,19 @@ impl R9pFuse {
                     "cannot rename a file over a directory",
                 ));
             }
-            replaced_qid = Some(existing_stat.qid);
+            replaced = Some(existing_stat);
             let _ = client.clunk_timeout(existing, self.control_timeout());
         }
         Ok(RenamePlan {
             client,
-            parent_fid,
+            old_parent_fid,
+            new_parent_fid,
             fid,
             before,
             old_path,
-            replaced_qid,
+            replaced,
             new_path,
+            cross_parent,
         })
     }
 
@@ -144,22 +158,42 @@ impl R9pFuse {
         &mut self,
         file: &mut File,
         unique: u64,
+        old_name: &[u8],
         new_name: &[u8],
         plan: RenamePlan,
     ) -> Result<()> {
         let RenamePlan {
             client,
-            parent_fid,
+            old_parent_fid,
+            new_parent_fid,
             fid,
             before,
             old_path,
-            mut replaced_qid,
+            mut replaced,
             new_path,
+            cross_parent,
         } = plan;
-        if let Err(error) = self.rename_fid(&client, fid, new_name) {
+        let rename_result = if cross_parent {
+            client
+                .rename_at_timeout(
+                    old_parent_fid,
+                    old_name,
+                    new_parent_fid,
+                    new_name,
+                    self.mutation_timeout(),
+                )
+                .map_err(Error::from)
+        } else {
+            self.rename_fid(&client, fid, new_name)
+        };
+        if let Err(error) = rename_result {
+            if cross_parent {
+                let _ = client.clunk_timeout(fid, self.control_timeout());
+                return Err(error);
+            }
             if error.errno == libc::EEXIST {
                 if let Ok(existing) =
-                    client.walk_one_timeout(parent_fid, new_name, self.lookup_timeout())
+                    client.walk_one_timeout(old_parent_fid, new_name, self.lookup_timeout())
                 {
                     let existing_stat = match client.stat_timeout(existing, self.lookup_timeout()) {
                         Ok(stat) => stat,
@@ -177,7 +211,7 @@ impl R9pFuse {
                             "cannot rename a file over a directory",
                         ));
                     }
-                    replaced_qid = Some(existing_stat.qid);
+                    replaced = Some(existing_stat);
                     let _ = client.remove_timeout(existing, self.mutation_timeout());
                 }
                 self.rename_fid(&client, fid, new_name)?;
@@ -186,8 +220,20 @@ impl R9pFuse {
                 return Err(error);
             }
         }
-        let (fid, after) = self.stat_renamed_fid(&client, parent_fid, fid, new_name)?;
-        self.nodes()?.move_path_prefix(&old_path, &new_path);
+        let (fid, after) = self.stat_renamed_fid(&client, new_parent_fid, fid, new_name)?;
+        if replaced.as_ref().is_some_and(is_dir) {
+            let stale_fids = self.nodes()?.remove_path_subtree(&new_path);
+            for stale_fid in stale_fids {
+                let _ = client.clunk_timeout(stale_fid, self.control_timeout());
+            }
+            replaced = None;
+        }
+        {
+            let mut nodes = self.nodes()?;
+            let _ = nodes.mark_parent_directory_cache_stale(&old_path);
+            let _ = nodes.mark_parent_directory_cache_stale(&new_path);
+            nodes.move_path_prefix(&old_path, &new_path);
+        }
         let source_rebound = match self.nodes()?.replace_first_qid(
             before.qid,
             fid,
@@ -200,12 +246,12 @@ impl R9pFuse {
             }
             None => false,
         };
-        if let Some(qid) = replaced_qid {
+        if let Some(replaced) = replaced {
             if let Ok(replacement) =
-                client.walk_one_timeout(parent_fid, new_name, self.lookup_timeout())
+                client.walk_one_timeout(new_parent_fid, new_name, self.lookup_timeout())
             {
                 if let Some(old_fid) = self.nodes()?.replace_first_qid(
-                    qid,
+                    replaced.qid,
                     replacement,
                     after.clone(),
                     Some(new_path.clone()),

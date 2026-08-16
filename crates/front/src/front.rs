@@ -14,6 +14,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 mod child_directory_resolution;
+mod rename;
 
 #[derive(Clone)]
 pub struct Front {

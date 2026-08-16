@@ -356,6 +356,26 @@ impl<S: Read + Write> Client<S> {
         }
     }
 
+    pub fn rename_at(
+        &mut self,
+        olddirfid: Fid,
+        oldname: &[u8],
+        newdirfid: Fid,
+        newname: &[u8],
+    ) -> Result<()> {
+        if !self.variant().supports_rename_at() {
+            return Err(Error::from("server did not negotiate atomic renameat"));
+        }
+        let op = self
+            .protocol
+            .rename_at(olddirfid, oldname.to_vec(), newdirfid, newname.to_vec())
+            .map_err(protocol_error)?;
+        match self.call_op(op)? {
+            Completion::RenameAt => Ok(()),
+            other => Err(unexpected("Rrenameat", other)),
+        }
+    }
+
     pub fn stat_path(&mut self, path: &str) -> Result<Stat> {
         let fid = self.walk_path(path)?;
         let result = self.stat(fid);

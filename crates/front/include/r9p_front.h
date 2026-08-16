@@ -2,7 +2,7 @@
 #define R9P_FRONT_H
 
 /*
- * r9p front C ABI, generation 22.
+ * r9p front C ABI, generation 23.
  *
  * Contract rules:
  * - Call r9p_front_abi_version() first and require
@@ -45,8 +45,9 @@
  *   bytes, so copy prefix and context first.
  * - r9p_front_set_pushed_file is the v10 public-door file push path. It
  *   installs file bytes with owner-provided qid path, qid version, generation,
- *   visibility class, freshness reference, and wake token. The front must
- *   serve those qid fields exactly; it does not increment them locally.
+ *   modification time, logical length, visibility class, freshness reference,
+ *   and wake token. The front must serve those metadata fields exactly; qid
+ *   version remains content version and is independent from modification time.
  * - r9p_front_set_pushed_directory is the v11 public-door directory push
  *   path. It installs a visible directory with the same owner-provided metadata
  *   contract as pushed files. Use it for admitted roots and visible
@@ -142,7 +143,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define R9P_FRONT_ABI_VERSION UINT32_C(22)
+#define R9P_FRONT_ABI_VERSION UINT32_C(23)
 #define R9P_FRONT_CAP_PUSHED_NAMESPACE_METADATA (UINT64_C(1) << 0)
 #define R9P_FRONT_CAP_REQUEST_CONTEXT_V2 (UINT64_C(1) << 1)
 #define R9P_FRONT_CAP_SYNTHETIC_READ_RELAY (UINT64_C(1) << 2)
@@ -153,6 +154,7 @@
 #define R9P_FRONT_CAP_CLIENT_SESSION_AUTHENTICATION (UINT64_C(1) << 7)
 #define R9P_FRONT_CAP_SNAPSHOT_READ_RELAY (UINT64_C(1) << 8)
 #define R9P_FRONT_CAP_RESTORED_LOG_OFFSET (UINT64_C(1) << 9)
+#define R9P_FRONT_CAP_PUSHED_STAT_METADATA (UINT64_C(1) << 10)
 
 typedef struct r9p_front r9p_front;
 
@@ -170,12 +172,14 @@ int32_t r9p_front_set(r9p_front *front, const char *path, size_t path_len,
 int32_t r9p_front_set_pushed_file(
     r9p_front *front, const char *path, size_t path_len, const uint8_t *bytes,
     size_t bytes_len, uint64_t qid_path, uint32_t qid_version,
-    uint64_t generation, const char *visibility_class,
+    uint64_t generation, uint32_t mtime, uint64_t length,
+    const char *visibility_class,
     size_t visibility_class_len, const char *freshness_ref,
     size_t freshness_ref_len, const char *wake_token, size_t wake_token_len);
 int32_t r9p_front_set_pushed_directory(
     r9p_front *front, const char *path, size_t path_len, uint64_t qid_path,
-    uint32_t qid_version, uint64_t generation, const char *visibility_class,
+    uint32_t qid_version, uint64_t generation, uint32_t mtime, uint64_t length,
+    const char *visibility_class,
     size_t visibility_class_len, const char *freshness_ref,
     size_t freshness_ref_len, const char *wake_token, size_t wake_token_len);
 int32_t r9p_front_append_event(r9p_front *front, const char *path,

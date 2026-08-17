@@ -128,7 +128,7 @@ enum Command {
     /// Host or inspect a reusable client session.
     Session(SessionArgs),
     /// Mount a 9P namespace through FUSE or supervise a declared mount.
-    Mount(MountArgs),
+    Mount(Box<MountArgs>),
     /// Serve a local filesystem over a local 9P endpoint.
     Serve(ServeArgs),
     /// Export a local filesystem with an optional authenticated boundary.
@@ -422,7 +422,7 @@ struct SessionArgs {
 #[derive(Debug, Subcommand)]
 enum SessionCommand {
     /// Host one renewable namespace client behind a local control socket.
-    Serve(SessionServeArgs),
+    Serve(Box<SessionServeArgs>),
     /// Read the current client-session status.
     Status(SessionSocketArgs),
     /// Materialize a bounded namespace snapshot through the hosted session.

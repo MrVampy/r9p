@@ -15,6 +15,7 @@ path = "src/main.rs"
 doc = false
 
 [dependencies]
+clap.workspace = true
 fuse.workspace = true
 fs.workspace = true
 libc.workspace = true

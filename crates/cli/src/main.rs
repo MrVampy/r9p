@@ -1,34 +1,10 @@
-use std::{env, time::Duration};
-
+mod args;
 mod commands;
 mod errors;
 mod format;
 mod io;
 mod target;
 mod transport;
-
-use commands::{
-    auth_keygen::auth_keygen_cmd,
-    cert::cert_cmd,
-    con::con_cmd,
-    ls::ls_cmd,
-    machine::{machine_list_cmd, machine_remove_cmd, machine_rpc_hex_cmd},
-    mount::mount_cmd,
-    mutate::{create_cmd, mkdir_cmd, rm_cmd},
-    read_write::{
-        create_write_from_cmd, read_cmd, read_to_cmd, rpc_cmd, write_at_cmd, write_cmd,
-        write_from_cmd, write_from_trunc_cmd, ReadMode, WriteMode,
-    },
-    reverse::{reverse_broker_cmd, reverse_export_cmd, session_proxy_cmd},
-    script::machine_script_cmd,
-    serve::{export_cmd, serve_cmd},
-    session::session_cmd,
-    stat_rdwr::{rdwr_cmd, stat_cmd},
-    stream::stream_cmd,
-    version_attach::{attach_cmd, version_cmd},
-};
-use errors::{cli_error, CliResult};
-use target::Config;
 
 pub(crate) const DEFAULT_MSIZE: u32 = r9p::codec::MAX_MSIZE;
 pub(crate) const READ_CHUNK: u32 = r9p::codec::MAX_MSIZE;
@@ -41,254 +17,18 @@ pub(crate) const DMNAMEDPIPE: u32 = 0x0020_0000;
 pub(crate) const DMSOCKET: u32 = 0x0010_0000;
 
 fn main() {
-    if let Err(error) = run() {
+    if let Err(error) = args::run() {
         eprintln!("r9p: {error}");
         std::process::exit(1);
     }
 }
 
-fn run() -> CliResult<()> {
-    let mut args = env::args().skip(1).collect::<Vec<_>>();
-    let config = parse_global_options(&mut args)?;
-    if args.is_empty() {
-        usage();
-    }
-    let command = args.remove(0);
-    match command.as_str() {
-        "auth-keygen" => auth_keygen_cmd(config, args),
-        "cert" => cert_cmd(config, args),
-        "version" => version_cmd(config, args),
-        "attach" => attach_cmd(config, args),
-        "read" | "cat" => read_cmd(config, args, ReadMode::Read),
-        "readfd" => read_cmd(config, args, ReadMode::ReadFd),
-        "read-to" if config.machine => read_to_cmd(config, args),
-        "write" => write_cmd(config, args, WriteMode::Write),
-        "write-at" => write_at_cmd(config, args),
-        "writefd" => write_cmd(config, args, WriteMode::WriteFd),
-        "write-from" if config.machine => write_from_cmd(config, args),
-        "write-from-trunc" if config.machine => write_from_trunc_cmd(config, args),
-        "create-write-from" if config.machine => create_write_from_cmd(config, args),
-        "script" if config.machine => machine_script_cmd(config, args),
-        "rpc-hex" if config.machine => machine_rpc_hex_cmd(config, args),
-        "session" => session_cmd(config, args),
-        "mount" => mount_cmd(config, args),
-        "serve" => serve_cmd(config, args),
-        "export" => export_cmd(config, args),
-        "reverse-broker" => reverse_broker_cmd(config, args),
-        "reverse-export" => reverse_export_cmd(config, args),
-        "session-proxy" => session_proxy_cmd(config, args),
-        "stat" => stat_cmd(config, args),
-        "rdwr" => rdwr_cmd(config, args),
-        "rpc" => rpc_cmd(config, args),
-        "ls" => ls_cmd(config, args),
-        "list" if config.machine => machine_list_cmd(config, args),
-        "rm" => rm_cmd(config, args),
-        "remove" if config.machine => machine_remove_cmd(config, args),
-        "create" => create_cmd(config, args),
-        "mkdir" => mkdir_cmd(config, args),
-        "con" => con_cmd(config, args),
-        "stream" => stream_cmd(config, args),
-        _ => {
-            usage();
-        }
-    }
-}
-
-pub(crate) fn parse_global_options(args: &mut Vec<String>) -> CliResult<Config> {
-    let mut config = Config {
-        auth_domain: None,
-        address: None,
-        auth_config: None,
-        aname: String::new(),
-        uname: env::var("USER").unwrap_or_else(|_| "none".to_string()),
-        msize: DEFAULT_MSIZE,
-        msize_set: false,
-        machine: false,
-        request_timeout: Some(Duration::from_secs(30)),
-        control_timeout: Some(Duration::from_secs(600)),
-    };
-    let mut rest = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        let arg = &args[i];
-        if arg == "--" {
-            rest.extend(args[i + 1..].iter().cloned());
-            break;
-        }
-        if !arg.starts_with('-') || arg == "-" {
-            rest.extend(args[i..].iter().cloned());
-            break;
-        }
-        if arg == "-n" || arg == "-D" {
-            i += 1;
-            continue;
-        }
-        if arg == "--machine" {
-            config.machine = true;
-            i += 1;
-            continue;
-        }
-        if arg[1..].chars().all(|flag| matches!(flag, 'n' | 'D')) {
-            i += 1;
-            continue;
-        }
-        if arg == "-a"
-            || arg == "--bind"
-            || arg == "-A"
-            || arg == "-u"
-            || arg == "-m"
-            || arg == "--request-timeout"
-            || arg == "--control-timeout"
-            || arg == "--auth-config"
-            || arg == "--auth-domain"
-        {
-            let value = args
-                .get(i + 1)
-                .ok_or_else(|| cli_error(format!("missing value for {arg}")))?
-                .clone();
-            set_global_option(&mut config, arg, value)?;
-            i += 2;
-            continue;
-        }
-        if let Some(value) = arg.strip_prefix("--bind=") {
-            set_global_option(&mut config, "--bind", value.to_string())?;
-            i += 1;
-            continue;
-        }
-        if let Some(value) = arg.strip_prefix("-a") {
-            set_global_option(&mut config, "-a", value.to_string())?;
-            i += 1;
-            continue;
-        }
-        if let Some(value) = arg.strip_prefix("-A") {
-            set_global_option(&mut config, "-A", value.to_string())?;
-            i += 1;
-            continue;
-        }
-        if let Some(value) = arg.strip_prefix("-u") {
-            set_global_option(&mut config, "-u", value.to_string())?;
-            i += 1;
-            continue;
-        }
-        if let Some(value) = arg.strip_prefix("-m") {
-            set_global_option(&mut config, "-m", value.to_string())?;
-            i += 1;
-            continue;
-        }
-        return Err(cli_error(format!("unknown option {arg}")));
-    }
-    *args = rest;
-    Ok(config)
-}
-
-fn set_global_option(config: &mut Config, option: &str, value: String) -> CliResult<()> {
-    match option {
-        "-a" | "--bind" => config.address = Some(value),
-        "--auth-config" => config.auth_config = Some(value.into()),
-        "--auth-domain" => config.auth_domain = Some(value.to_string()),
-        "-A" => config.aname = value,
-        "-u" => config.uname = value,
-        "-m" => {
-            config.msize = value
-                .parse()
-                .map_err(|_| cli_error(format!("invalid msize {value}")))?;
-            config.msize_set = true;
-        }
-        "--request-timeout" => {
-            config.request_timeout = parse_request_timeout(&value)?;
-        }
-        "--control-timeout" => {
-            config.control_timeout = parse_request_timeout(&value)?;
-        }
-        _ => return Err(cli_error(format!("unknown option {option}"))),
-    }
-    Ok(())
-}
-
-fn parse_request_timeout(value: &str) -> CliResult<Option<Duration>> {
-    let seconds = value
-        .parse::<f64>()
-        .map_err(|_| cli_error(format!("invalid request timeout {value}")))?;
-    if !seconds.is_finite() || seconds < 0.0 {
-        return Err(cli_error(format!("invalid request timeout {value}")));
-    }
-    if seconds == 0.0 {
-        Ok(None)
-    } else {
-        Ok(Some(Duration::from_secs_f64(seconds)))
-    }
-}
-
 pub(crate) fn usage() -> ! {
-    eprintln!(
-        "usage: r9p [-n] [--machine] [-a|--bind address] [-A aname] [-u uname] [-m msize] [--auth-config path] [--auth-domain name] [--request-timeout seconds] [--control-timeout seconds] cmd args..."
-    );
-    eprintln!("possible cmds:");
-    eprintln!(
-        "  auth-keygen --private path --public path [--private-access owner-only|owner-group-read]"
-    );
-    eprintln!("  cert root|sign|print|verify ...");
-    eprintln!("  version [service]");
-    eprintln!("  attach [service]");
-    eprintln!("  read name");
-    eprintln!("  cat name                 alias for read name");
-    eprintln!("  readfd name");
-    eprintln!("  write [-l] name");
-    eprintln!("  write-at name offset");
-    eprintln!("  writefd name");
-    eprintln!("  stat name");
-    eprintln!("  rdwr name");
-    eprintln!("  rpc name [request]       write request, read response on the same fid");
-    eprintln!("                           request omitted: empty at a terminal, else stdin");
-    eprintln!("  ls [-ldnt] name...");
-    eprintln!("  list name                machine mode");
-    eprintln!("  read-to name local       machine mode");
-    eprintln!("  rm name...");
-    eprintln!("  remove name              machine mode");
-    eprintln!("  write-from name offset local  machine mode");
-    eprintln!("  write-from-trunc name local  machine mode");
-    eprintln!("  create-write-from name perm mode offset local  machine mode");
-    eprintln!("  rpc-hex name request_hex  machine mode");
-    eprintln!("  script file              machine mode");
-    eprintln!("  script service file      machine mode without -a");
-    eprintln!(
-        "  session serve --socket path [--mount mountpoint] [--mount-source namespace-path] [--mount-attr-timeout seconds] [--mount-entry-timeout seconds] [--mount-negative-timeout seconds] [--change-feed namespace-path --change-feed-stream namespace-path] [--change-feed-cursor-template path-with-{{event_id}}] [--change-feed-reconnect-delay seconds] [endpoint]"
-    );
-    eprintln!("  session status --socket path");
-    eprintln!("  session snapshot --socket path [--depth n] [namespace-path]");
-    eprintln!("  session stat --socket path [namespace-path]");
-    eprintln!("  session list --socket path [namespace-path]");
-    eprintln!("  session read --socket path namespace-path");
-    eprintln!(
-        "  mount [--source namespace-path] [--aname aname] [--uname uname] endpoint mountpoint"
-    );
-    eprintln!(
-        "  mount ensure|status|stop --mountpoint path [--unit name --unit-scope user|system]"
-    );
-    eprintln!("  serve [--bind address] [--max-fids count] [--writable] root");
-    eprintln!(
-        "  export [--bind address] [--max-fids count] [--writable] [--descriptor machine] root"
-    );
-    eprintln!(
-        "  reverse-broker --reverse-bind address [--proxy-bind address|unix!/path] [--proxy-exposure local|authenticated-network] --principal name --auth-config path [--pool count]"
-    );
-    eprintln!(
-        "  reverse-export --connect address --principal name --auth-config path [--pool count] [--reconnect-min-delay seconds] [--reconnect-max-delay seconds] [--writable] root"
-    );
-    eprintln!(
-        "  session-proxy --bind loopback-address|unix!/path --connect address --principal name --auth-config path [--max-sessions count]"
-    );
-    eprintln!("  create name...");
-    eprintln!("  mkdir name...");
-    eprintln!("  con [--resume] [-r] name");
-    eprintln!("  stream name              byte-transparent full-duplex stdio");
-    eprintln!("without -a/--bind, name elem/path means /path on server unix!$NAMESPACE/elem");
-    std::process::exit(2);
+    args::usage()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_global_options;
     use crate::commands::mutate::split_parent;
     use crate::format::{
         format_attach, format_stat, format_version, hex_decode, hex_encode, mode_string,
@@ -297,73 +37,6 @@ mod tests {
     use crate::target::split_namespace_path;
     use r9p::qid::DMDIR;
     use r9p::{qid::Qid, stat::Stat};
-    use std::time::Duration;
-
-    #[test]
-    fn global_options_accept_plan9port_flags_and_extensions() {
-        let mut args = vec![
-            "-nD".to_string(),
-            "--machine".to_string(),
-            "-a".to_string(),
-            "tcp!127.0.0.1!9564".to_string(),
-            "-A/".to_string(),
-            "-ucodex".to_string(),
-            "-m65536".to_string(),
-            "--request-timeout".to_string(),
-            "0.25".to_string(),
-            "--control-timeout".to_string(),
-            "12.5".to_string(),
-            "ls".to_string(),
-            "/".to_string(),
-        ];
-        let config = parse_global_options(&mut args).expect("options should parse");
-        assert_eq!(config.address.as_deref(), Some("tcp!127.0.0.1!9564"));
-        assert_eq!(config.aname, "/");
-        assert_eq!(config.uname, "codex");
-        assert_eq!(config.msize, 65_536);
-        assert!(config.machine);
-        assert_eq!(config.request_timeout, Some(Duration::from_millis(250)));
-        assert_eq!(config.control_timeout, Some(Duration::from_millis(12500)));
-        assert_eq!(args, ["ls".to_string(), "/".to_string()]);
-    }
-
-    #[test]
-    fn request_timeout_zero_disables_socket_timeouts() {
-        let mut args = vec![
-            "--request-timeout".to_string(),
-            "0".to_string(),
-            "read".to_string(),
-            "/events/stream".to_string(),
-        ];
-        let config = parse_global_options(&mut args).expect("options should parse");
-        assert_eq!(config.request_timeout, None);
-        assert_eq!(args, ["read".to_string(), "/events/stream".to_string()]);
-    }
-
-    #[test]
-    fn global_bind_alias_sets_read_endpoint() {
-        let mut args = vec![
-            "--bind".to_string(),
-            "192.168.0.30:9564".to_string(),
-            "read".to_string(),
-            "/status".to_string(),
-        ];
-        let config = parse_global_options(&mut args).expect("options should parse");
-        assert_eq!(config.address.as_deref(), Some("192.168.0.30:9564"));
-        assert_eq!(args, ["read".to_string(), "/status".to_string()]);
-    }
-
-    #[test]
-    fn global_bind_equals_alias_sets_read_endpoint() {
-        let mut args = vec![
-            "--bind=192.168.0.30:9564".to_string(),
-            "cat".to_string(),
-            "/status".to_string(),
-        ];
-        let config = parse_global_options(&mut args).expect("options should parse");
-        assert_eq!(config.address.as_deref(), Some("192.168.0.30:9564"));
-        assert_eq!(args, ["cat".to_string(), "/status".to_string()]);
-    }
 
     #[test]
     fn namespace_paths_split_like_plan9port_service_paths() {

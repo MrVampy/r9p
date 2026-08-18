@@ -48,6 +48,7 @@
             version = "0.1.0";
             src = self;
             cargoLock.lockFile = ./Cargo.lock;
+            requiredSystemFeatures = [ "cloud-burst" ];
             nativeBuildInputs = with pkgs; [
               clang
               mold
@@ -64,6 +65,7 @@
             version = "0.1.0-abi23";
             src = self;
             cargoLock.lockFile = ./Cargo.lock;
+            requiredSystemFeatures = [ "cloud-burst" ];
             cargoBuildFlags = [ "-p" "front" ];
             doCheck = false;
             nativeBuildInputs = with pkgs; [
@@ -91,6 +93,7 @@
             version = "0.1.0";
             src = self;
             cargoLock.lockFile = ./Cargo.lock;
+            requiredSystemFeatures = [ "cloud-burst" ];
             cargoBuildFlags = [ "-p" "beam-port" ];
             doCheck = false;
             nativeBuildInputs = with pkgs; [
@@ -122,6 +125,7 @@
             version = "0.1.0";
             src = self;
             cargoLock.lockFile = ./Cargo.lock;
+            requiredSystemFeatures = [ "cloud-burst" ];
             cargoBuildFlags = [ "-p" "front" "-p" "beam-port" ];
             cargoTestFlags = [ "-p" "front" "-p" "beam-port" ];
             nativeBuildInputs = with pkgs; [

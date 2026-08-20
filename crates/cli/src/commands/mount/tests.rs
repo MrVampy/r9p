@@ -80,6 +80,8 @@ fn parses_final_mount_options() {
             "--allow-other".to_string(),
             "--source".to_string(),
             "/hosts/tuxedo/projects".to_string(),
+            "--fallback-endpoint".to_string(),
+            "nucbox.mesh:9564".to_string(),
             "--msize".to_string(),
             "8192".to_string(),
             "127.0.0.1:564".to_string(),
@@ -91,6 +93,7 @@ fn parses_final_mount_options() {
     assert_eq!(config.uname, "glenda");
     assert_eq!(config.aname, "/");
     assert_eq!(config.address, "127.0.0.1:564");
+    assert_eq!(config.fallback_addresses, ["nucbox.mesh:9564"]);
     assert_eq!(config.source_path, "/hosts/tuxedo/projects");
     assert_eq!(config.mountpoint, "/tmp/r9p-mount");
     assert_eq!(config.request_timeout, Duration::from_millis(250));
@@ -164,6 +167,7 @@ fn mount_defaults_use_short_positive_kernel_cache() {
     assert_eq!(config.entry_timeout, fuse::DEFAULT_ENTRY_TIMEOUT);
     assert_eq!(config.connect_timeout, Duration::from_secs(30));
     assert_eq!(config.source_path, "/");
+    assert!(config.fallback_addresses.is_empty());
     assert!(!config.allow_other);
 }
 

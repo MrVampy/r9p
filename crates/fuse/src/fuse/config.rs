@@ -20,6 +20,7 @@ pub fn default_congestion_threshold(max_background: u16) -> u16 {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub address: String,
+    pub fallback_addresses: Vec<String>,
     pub authentication: session::ConnectionAuthentication,
     pub source_path: String,
     pub mountpoint: String,
@@ -56,14 +57,18 @@ pub struct Config {
 }
 
 impl Config {
-    pub(super) fn connection(&self) -> session::ConnectionConfig {
-        session::ConnectionConfig {
-            address: self.address.clone(),
+    pub(super) fn connections(&self) -> Result<session::ConnectionSet> {
+        let connection = |address: String| session::ConnectionConfig {
+            address,
             uname: self.uname.clone(),
             aname: self.aname.clone(),
             msize: self.msize,
             authentication: self.authentication.clone(),
-        }
+        };
+        let mut candidates = Vec::with_capacity(1 + self.fallback_addresses.len());
+        candidates.push(connection(self.address.clone()));
+        candidates.extend(self.fallback_addresses.iter().cloned().map(connection));
+        session::ConnectionSet::new(candidates).map_err(Error::from)
     }
 }
 

@@ -8,9 +8,10 @@ editor, coordinator, FUSE, socket, async runtime, or transport policy.
 Current surfaces and consumers:
 
 - `r9p`, a plan9port `9p`-shaped client CLI for one-shot reads, writes,
-  stats, listings, creates, removes, console-style interaction, and stable
-  tab/hex machine-readable output.
-- `r9p mount`, the Linux FUSE-to-9P bridge.
+  stats, listings, creates, removes, console-style interaction, stable tab/hex
+  machine-readable output, and renewable root sessions.
+- `r9p mount`, the Linux FUSE-to-9P bridge, with ordered equivalent root
+  endpoints for transport failover.
 - `r9p serve`, a local filesystem-backed 9P server that is read-only by
   default and explicitly writable with `--writable`.
 - `r9p export`, `serve` plus a machine-readable `r9p-export.v1` descriptor.

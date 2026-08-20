@@ -152,6 +152,9 @@ This map defines the local sources agents should inspect before making source-sp
 - `notes/source-reading/2026-08-06-native-dns-endpoints.md`
   - Source-backed boundary between concrete listener binds and DNS-preserving
     dial or referral endpoints.
+- `notes/source-reading/2026-08-20-renewable-endpoint-failover.md`
+  - Source-backed boundary for ordered equivalent root endpoints, transient-only
+    candidate rotation, and FUSE transport observability.
 - `notes/source-reading/2026-08-08-auth-agent-and-certificate-lifecycle.md`
   - Source-backed reason to defer a full auth agent, the actual Snow transport
     handoff constraint, and the lifecycle responsibilities that precede it.

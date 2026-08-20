@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
 
 use crate::{Error, Result};
 
@@ -109,6 +112,74 @@ pub struct ConnectionConfig {
     pub authentication: ConnectionAuthentication,
 }
 
+pub const MAX_CONNECTION_CANDIDATES: usize = 16;
+
+/// One ordered set of equivalent ways to attach to the same logical root.
+///
+/// Candidates may differ only by transport address. Authentication, attach
+/// identity, namespace root, and message size stay identical so failover can
+/// never change what namespace the caller asked to enter.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConnectionSet {
+    candidates: Vec<ConnectionConfig>,
+}
+
+impl ConnectionSet {
+    pub fn new(candidates: Vec<ConnectionConfig>) -> Result<Self> {
+        if candidates.is_empty() {
+            return Err(Error::new(
+                libc::EINVAL,
+                "a 9P connection set needs at least one candidate",
+            ));
+        }
+        if candidates.len() > MAX_CONNECTION_CANDIDATES {
+            return Err(Error::new(
+                libc::E2BIG,
+                format!(
+                    "a 9P connection set supports at most {MAX_CONNECTION_CANDIDATES} candidates"
+                ),
+            ));
+        }
+
+        let primary = &candidates[0];
+        let mut addresses = BTreeSet::new();
+        for candidate in &candidates {
+            if candidate.uname != primary.uname
+                || candidate.aname != primary.aname
+                || candidate.msize != primary.msize
+                || candidate.authentication != primary.authentication
+            {
+                return Err(Error::new(
+                    libc::EINVAL,
+                    "9P connection candidates must share one attach and authentication contract",
+                ));
+            }
+            if !addresses.insert(candidate.address.as_str()) {
+                return Err(Error::new(
+                    libc::EEXIST,
+                    format!("duplicate 9P connection candidate {}", candidate.address),
+                ));
+            }
+        }
+
+        Ok(Self { candidates })
+    }
+
+    pub fn single(candidate: ConnectionConfig) -> Self {
+        Self {
+            candidates: vec![candidate],
+        }
+    }
+
+    pub fn candidates(&self) -> &[ConnectionConfig] {
+        &self.candidates
+    }
+
+    pub fn candidate_count(&self) -> usize {
+        self.candidates.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,5 +217,37 @@ mod tests {
             session.responder().map(ResponderName::as_str),
             Some("coordinator")
         );
+    }
+
+    fn connection(address: &str) -> ConnectionConfig {
+        ConnectionConfig {
+            address: address.to_string(),
+            uname: "interface.test".to_string(),
+            aname: "/".to_string(),
+            msize: 8192,
+            authentication: ConnectionAuthentication::Unauthenticated,
+        }
+    }
+
+    #[test]
+    fn a_connection_set_keeps_one_logical_attach_contract() {
+        let set = ConnectionSet::new(vec![
+            connection("m7.mesh:9564"),
+            connection("nucbox.mesh:9564"),
+        ])
+        .expect("equivalent candidates");
+        assert_eq!(set.candidate_count(), 2);
+        assert_eq!(set.candidates()[0].address, "m7.mesh:9564");
+        assert_eq!(set.candidates()[1].address, "nucbox.mesh:9564");
+
+        assert!(ConnectionSet::new(Vec::new()).is_err());
+        assert!(
+            ConnectionSet::new(vec![connection("m7.mesh:9564"), connection("m7.mesh:9564"),])
+                .is_err()
+        );
+
+        let mut different_identity = connection("nucbox.mesh:9564");
+        different_identity.uname = "another.interface".to_string();
+        assert!(ConnectionSet::new(vec![connection("m7.mesh:9564"), different_identity,]).is_err());
     }
 }

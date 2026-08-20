@@ -26,6 +26,7 @@ use crate::{
         session::session_cmd,
         stat_rdwr::{rdwr_cmd, stat_cmd},
         stream::stream_cmd,
+        stream_export::stream_export_cmd,
         version_attach::{attach_cmd, version_cmd},
     },
     errors::CliResult,
@@ -133,6 +134,8 @@ enum Command {
     Serve(ServeArgs),
     /// Export a local filesystem with an optional authenticated boundary.
     Export(ExportArgs),
+    /// Export one fixed process as an authenticated full-duplex 9P stream.
+    StreamExport(StreamExportArgs),
     /// Accept reverse exporters and publish a local or authenticated proxy.
     ReverseBroker(ReverseBrokerArgs),
     /// Export a filesystem through a reverse broker.
@@ -643,6 +646,24 @@ struct ExportArgs {
 }
 
 #[derive(Debug, ClapArgs)]
+struct StreamExportArgs {
+    #[arg(long, value_name = "ADDRESS")]
+    bind: String,
+    #[arg(long, value_name = "PATH")]
+    auth_config: String,
+    #[arg(long, value_name = "NAME", action = ArgAction::Append, required = true)]
+    allow_principal: Vec<String>,
+    #[arg(long, value_name = "COUNT")]
+    max_sessions: Option<usize>,
+    #[arg(long, value_name = "BYTES")]
+    max_buffer_bytes: Option<usize>,
+    #[arg(long, value_name = "PATH")]
+    descriptor_file: Option<String>,
+    #[arg(last = true, num_args = 1.., value_name = "COMMAND")]
+    command: Vec<String>,
+}
+
+#[derive(Debug, ClapArgs)]
 struct ReverseBrokerArgs {
     #[arg(long, value_name = "ADDRESS")]
     reverse_bind: String,
@@ -759,6 +780,7 @@ pub(crate) fn run() -> CliResult<()> {
         Command::Mount(args) => mount_cmd(config, args.into_args()),
         Command::Serve(args) => serve_cmd(config, args.into_args()),
         Command::Export(args) => export_cmd(config, args.into_args()),
+        Command::StreamExport(args) => stream_export_cmd(config, args.into_args()),
         Command::ReverseBroker(args) => reverse_broker_cmd(config, args.into_args()),
         Command::ReverseExport(args) => reverse_export_cmd(config, args.into_args()),
         Command::SessionProxy(args) => session_proxy_cmd(config, args.into_args()),
@@ -1185,6 +1207,22 @@ impl ExportArgs {
     }
 }
 
+impl StreamExportArgs {
+    fn into_args(self) -> Vec<String> {
+        let mut args = vec!["--bind".to_string(), self.bind];
+        args.extend(["--auth-config".to_string(), self.auth_config]);
+        for principal in self.allow_principal {
+            args.extend(["--allow-principal".to_string(), principal]);
+        }
+        push_option(&mut args, "--max-sessions", self.max_sessions);
+        push_option(&mut args, "--max-buffer-bytes", self.max_buffer_bytes);
+        push_option(&mut args, "--descriptor-file", self.descriptor_file);
+        args.push("--".to_string());
+        args.extend(self.command);
+        args
+    }
+}
+
 impl ReverseBrokerArgs {
     fn into_args(self) -> Vec<String> {
         let mut args = vec!["--reverse-bind".to_string(), self.reverse_bind];
@@ -1301,6 +1339,7 @@ mod tests {
         assert!(top.contains("Operate on 9P services"));
         assert!(top.contains("auth-keygen"));
         assert!(top.contains("mount"));
+        assert!(top.contains("stream-export"));
 
         let cert = Cli::try_parse_from(["r9p", "help", "cert", "sign"])
             .expect_err("nested help exits before dispatch")

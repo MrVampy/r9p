@@ -22,4 +22,5 @@ libc.workspace = true
 r9p.workspace = true
 r9p-auth.workspace = true
 r9p-reverse.workspace = true
+rustix.workspace = true
 session.workspace = true

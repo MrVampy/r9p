@@ -23,8 +23,8 @@ pub use cache::{
 pub use client::Client;
 pub use client_session::{ClientSession, PreparedClientSession};
 pub use connection_config::{
-    ClientCredential, ConnectionAuthentication, ConnectionConfig, ResponderName,
-    SessionAuthentication,
+    ClientCredential, ConnectionAuthentication, ConnectionConfig, ConnectionSet, ResponderName,
+    SessionAuthentication, MAX_CONNECTION_CANDIDATES,
 };
 pub use epoch::SessionEpoch;
 pub use error::{errno_for_9p_error, p9_error, Error, Result, WriteThenReadError};

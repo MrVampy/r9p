@@ -152,7 +152,8 @@ impl R9pFuse {
     pub fn mount(mut config: Config) -> Result<()> {
         block_termination_signals();
         normalize_config(&mut config)?;
-        let client = ClientSession::connect(&config.connection(), config.connect_timeout)?;
+        let connections = config.connections()?;
+        let client = ClientSession::connect_set(&connections, config.connect_timeout)?;
         Self::mount_prepared(config, client, None)
     }
 
@@ -173,7 +174,8 @@ impl R9pFuse {
         ready: mpsc::SyncSender<std::result::Result<(), (i32, String)>>,
     ) -> Result<()> {
         drop_managed_mount_thread_capabilities()?;
-        let client = ClientSession::connect(&config.connection(), config.connect_timeout)?;
+        let connections = config.connections()?;
+        let client = ClientSession::connect_set(&connections, config.connect_timeout)?;
         let fs = Self::prepare(config, client)?;
         let _ = ready.send(Ok(()));
         let cleanup = mount.cleanup_handle();
@@ -200,7 +202,12 @@ impl R9pFuse {
         let source_path = parse_source_path(&config.source_path)?;
         let diagnostics =
             Diagnostics::new(config.diagnostics_capacity, config.diagnostics_path.clone());
-        let status = MountStatus::new(config.status_path.clone(), config.source_path.clone());
+        let status = MountStatus::new(
+            config.status_path.clone(),
+            config.source_path.clone(),
+            client.active_address(),
+            client.candidate_addresses(),
+        );
         let client_snapshot = client.snapshot()?;
         let _ = diagnostics.record(
             "mount_attached",
@@ -209,8 +216,10 @@ impl R9pFuse {
             0,
             0,
             format!(
-                "source={} msize={} max_write_payload={} fuse_max_write={}",
+                "source={} endpoint={} candidates={} msize={} max_write_payload={} fuse_max_write={}",
                 config.source_path,
+                client.active_address(),
+                client.candidate_addresses().join(","),
                 client_snapshot.msize(),
                 client_snapshot.max_write_payload(),
                 wire::DEFAULT_MAX_WRITE

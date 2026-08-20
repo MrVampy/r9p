@@ -282,9 +282,14 @@ impl R9pFuse {
             .lock()
             .map_err(|_| Error::new(libc::EIO, "reconnect lock poisoned"))?;
         if self.config.debug {
-            eprintln!("r9p mount: reconnecting to {}", self.config.address);
+            eprintln!(
+                "r9p mount: reconnecting from {} across {} candidate(s)",
+                self.client.active_address(),
+                self.client.candidate_addresses().len()
+            );
         }
         let client = self.client.reconnect()?;
+        self.status.set_transport(self.client.active_address());
         let (root_fid, root_stat) = self.source_binding(&client, self.config.lookup_timeout)?;
         let lazy_rebind_count = {
             let mut nodes = self.nodes()?;
@@ -300,14 +305,20 @@ impl R9pFuse {
         self.record_mount_diagnostic(
             "transport_reconnected",
             0,
-            format!("lazy_rebind_count={lazy_rebind_count}"),
+            format!(
+                "endpoint={} lazy_rebind_count={lazy_rebind_count}",
+                self.client.active_address()
+            ),
         );
         if self.config.debug {
             eprintln!(
                 "r9p mount: reconnect marked {} node bindings for lazy rebind",
                 lazy_rebind_count
             );
-            eprintln!("r9p mount: reconnect complete");
+            eprintln!(
+                "r9p mount: reconnect complete on {}",
+                self.client.active_address()
+            );
         }
         Ok(())
     }

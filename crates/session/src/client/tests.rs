@@ -1,5 +1,5 @@
 use super::Client;
-use crate::{ConnectionAuthentication, ConnectionConfig};
+use crate::{ConnectionAuthentication, ConnectionConfig, ConnectionSet};
 use r9p::{
     codec::{self, Variant},
     error::{Error as P9Error, Result as P9Result},
@@ -277,6 +277,80 @@ fn client_session_reconnects_once_and_bumps_its_epoch() {
     drop(first);
     drop(session);
     server.join().expect("server should not panic");
+}
+
+#[test]
+fn client_session_moves_to_the_next_endpoint_after_transport_failure() {
+    let primary_listener = TcpListener::bind("127.0.0.1:0").expect("primary listener");
+    let primary_address = primary_listener.local_addr().expect("primary address");
+    let primary = thread::spawn(move || {
+        let (stream, _) = primary_listener.accept().expect("primary accept");
+        handle_connection(stream).expect("primary connection");
+    });
+
+    let fallback_listener = TcpListener::bind("127.0.0.1:0").expect("fallback listener");
+    let fallback_address = fallback_listener.local_addr().expect("fallback address");
+    let fallback = thread::spawn(move || {
+        let (stream, _) = fallback_listener.accept().expect("fallback accept");
+        handle_connection(stream).expect("fallback connection");
+    });
+
+    let connections = ConnectionSet::new(vec![
+        connection(primary_address.to_string()),
+        connection(fallback_address.to_string()),
+    ])
+    .expect("equivalent endpoint set");
+    let session = crate::ClientSession::connect_set(&connections, Duration::from_millis(250))
+        .expect("primary should connect");
+    assert_eq!(session.active_address(), primary_address.to_string());
+    assert_eq!(
+        session.candidate_addresses(),
+        vec![primary_address.to_string(), fallback_address.to_string()]
+    );
+
+    let first = session.snapshot().expect("primary attachment");
+    let replacement = session
+        .reconnect_after(&first)
+        .expect("failed primary should move to fallback");
+    assert_eq!(session.active_address(), fallback_address.to_string());
+    replacement
+        .stat_timeout(replacement.root_fid(), Duration::from_secs(1))
+        .expect("fallback attachment should serve the namespace");
+
+    session.shutdown().expect("fallback should shut down");
+    first.shutdown().expect("primary should shut down");
+    drop(replacement);
+    drop(first);
+    drop(session);
+    primary.join().expect("primary server should not panic");
+    fallback.join().expect("fallback server should not panic");
+}
+
+#[test]
+fn client_session_uses_a_fallback_when_the_primary_is_unreachable() {
+    let reservation = TcpListener::bind("127.0.0.1:0").expect("reserve primary address");
+    let primary_address = reservation.local_addr().expect("primary address");
+    drop(reservation);
+
+    let fallback_listener = TcpListener::bind("127.0.0.1:0").expect("fallback listener");
+    let fallback_address = fallback_listener.local_addr().expect("fallback address");
+    let fallback = thread::spawn(move || {
+        let (stream, _) = fallback_listener.accept().expect("fallback accept");
+        handle_connection(stream).expect("fallback connection");
+    });
+
+    let connections = ConnectionSet::new(vec![
+        connection(primary_address.to_string()),
+        connection(fallback_address.to_string()),
+    ])
+    .expect("equivalent endpoint set");
+    let session = crate::ClientSession::connect_set(&connections, Duration::from_millis(100))
+        .expect("fallback should connect");
+    assert_eq!(session.active_address(), fallback_address.to_string());
+
+    session.shutdown().expect("fallback should shut down");
+    drop(session);
+    fallback.join().expect("fallback server should not panic");
 }
 
 #[test]

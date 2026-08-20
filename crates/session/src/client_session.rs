@@ -1,12 +1,12 @@
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex, RwLock,
     },
     time::Duration,
 };
 
-use crate::{Client, ConnectionConfig, Error, Result, SessionEpoch};
+use crate::{Client, ConnectionConfig, ConnectionSet, Error, RequestTracker, Result, SessionEpoch};
 
 /// One established namespace attachment that can perform an initial operation
 /// before becoming a renewable [`ClientSession`].
@@ -14,16 +14,23 @@ use crate::{Client, ConnectionConfig, Error, Result, SessionEpoch};
 /// Keeping preparation and adoption in one type prevents callers from pairing
 /// an arbitrary connected client with unrelated reconnect configuration.
 pub struct PreparedClientSession {
-    config: ConnectionConfig,
+    connections: ConnectionSet,
+    active_candidate: usize,
     connect_timeout: Duration,
     client: Client,
 }
 
 impl PreparedClientSession {
     pub fn connect(config: &ConnectionConfig, connect_timeout: Duration) -> Result<Self> {
-        let client = Client::connect_with_timeout(config, connect_timeout)?;
+        Self::connect_set(&ConnectionSet::single(config.clone()), connect_timeout)
+    }
+
+    pub fn connect_set(connections: &ConnectionSet, connect_timeout: Duration) -> Result<Self> {
+        let (active_candidate, client) =
+            connect_from(connections, RequestTracker::default(), connect_timeout, 0)?;
         Ok(Self {
-            config: config.clone(),
+            connections: connections.clone(),
+            active_candidate,
             connect_timeout,
             client,
         })
@@ -36,7 +43,12 @@ impl PreparedClientSession {
 
     /// Transfers the same authenticated attachment into renewable ownership.
     pub fn into_session(self) -> ClientSession {
-        ClientSession::from_connected(self.config, self.connect_timeout, self.client)
+        ClientSession::from_connected(
+            self.connections,
+            self.active_candidate,
+            self.connect_timeout,
+            self.client,
+        )
     }
 }
 
@@ -49,7 +61,8 @@ impl PreparedClientSession {
 /// replacement.
 #[derive(Clone)]
 pub struct ClientSession {
-    config: Arc<ConnectionConfig>,
+    connections: Arc<ConnectionSet>,
+    active_candidate: Arc<AtomicUsize>,
     connect_timeout: Duration,
     current: Arc<RwLock<Client>>,
     epoch: SessionEpoch,
@@ -59,17 +72,29 @@ pub struct ClientSession {
 
 impl ClientSession {
     pub fn connect(config: &ConnectionConfig, connect_timeout: Duration) -> Result<Self> {
-        let client = Client::connect_with_timeout(config, connect_timeout)?;
+        Self::connect_set(&ConnectionSet::single(config.clone()), connect_timeout)
+    }
+
+    pub fn connect_set(connections: &ConnectionSet, connect_timeout: Duration) -> Result<Self> {
+        let (active_candidate, client) =
+            connect_from(connections, RequestTracker::default(), connect_timeout, 0)?;
         Ok(Self::from_connected(
-            config.clone(),
+            connections.clone(),
+            active_candidate,
             connect_timeout,
             client,
         ))
     }
 
-    fn from_connected(config: ConnectionConfig, connect_timeout: Duration, client: Client) -> Self {
+    fn from_connected(
+        connections: ConnectionSet,
+        active_candidate: usize,
+        connect_timeout: Duration,
+        client: Client,
+    ) -> Self {
         Self {
-            config: Arc::new(config),
+            connections: Arc::new(connections),
+            active_candidate: Arc::new(AtomicUsize::new(active_candidate)),
             connect_timeout,
             current: Arc::new(RwLock::new(client)),
             epoch: SessionEpoch::new(),
@@ -98,7 +123,7 @@ impl ClientSession {
             .lock()
             .map_err(|_| Error::new(libc::EIO, "9P client reconnect lock poisoned"))?;
         let current = self.snapshot()?;
-        self.replace_from(&current)
+        self.replace_from(&current, self.active_candidate.load(Ordering::Acquire))
     }
 
     /// Reconnects only when `failed` is still the current attachment.
@@ -114,7 +139,8 @@ impl ClientSession {
         if !current.same_session(failed) {
             return Ok(current);
         }
-        self.replace_from(&current)
+        let active = self.active_candidate.load(Ordering::Acquire);
+        self.replace_from(&current, (active + 1) % self.connections.candidate_count())
     }
 
     pub fn session_epoch(&self) -> Result<String> {
@@ -123,6 +149,20 @@ impl ClientSession {
 
     pub fn epoch(&self) -> SessionEpoch {
         self.epoch.clone()
+    }
+
+    pub fn active_address(&self) -> String {
+        self.connections.candidates()[self.active_candidate.load(Ordering::Acquire)]
+            .address
+            .clone()
+    }
+
+    pub fn candidate_addresses(&self) -> Vec<String> {
+        self.connections
+            .candidates()
+            .iter()
+            .map(|candidate| candidate.address.clone())
+            .collect()
     }
 
     /// Permanently closes this session and interrupts calls on its current
@@ -137,14 +177,15 @@ impl ClientSession {
         client.shutdown()
     }
 
-    fn replace_from(&self, current: &Client) -> Result<Client> {
+    fn replace_from(&self, current: &Client, start_candidate: usize) -> Result<Client> {
         if self.closed.load(Ordering::Acquire) {
             return Err(Error::new(libc::ESHUTDOWN, "9P client session is closed"));
         }
-        let replacement = Client::connect_with_tracker_timeout(
-            &self.config,
+        let (active_candidate, replacement) = connect_from(
+            &self.connections,
             current.tracker(),
             self.connect_timeout,
+            start_candidate,
         )?;
         if self.closed.load(Ordering::Acquire) {
             let _ = replacement.shutdown();
@@ -157,7 +198,50 @@ impl ClientSession {
                 .map_err(|_| Error::new(libc::EIO, "9P client session lock poisoned"))?;
             *client = replacement.clone();
         }
+        self.active_candidate
+            .store(active_candidate, Ordering::Release);
         self.epoch.bump()?;
         Ok(replacement)
     }
+}
+
+fn connect_from(
+    connections: &ConnectionSet,
+    tracker: RequestTracker,
+    connect_timeout: Duration,
+    start_candidate: usize,
+) -> Result<(usize, Client)> {
+    let candidates = connections.candidates();
+    let mut failures = Vec::new();
+    let mut last_errno = libc::EHOSTUNREACH;
+
+    for offset in 0..candidates.len() {
+        let index = (start_candidate + offset) % candidates.len();
+        let candidate = &candidates[index];
+        match Client::connect_with_tracker_timeout(candidate, tracker.clone(), connect_timeout) {
+            Ok(client) => return Ok((index, client)),
+            Err(error) if error.is_transient_connection_failure() => {
+                last_errno = error.errno;
+                failures.push(format!("{}: {}", candidate.address, error.message()));
+            }
+            Err(error) => {
+                return Err(Error::new(
+                    error.errno,
+                    format!(
+                        "9P connection candidate {} failed closed: {}",
+                        candidate.address,
+                        error.message()
+                    ),
+                ));
+            }
+        }
+    }
+
+    Err(Error::new(
+        last_errno,
+        format!(
+            "all 9P connection candidates failed: {}",
+            failures.join("; ")
+        ),
+    ))
 }

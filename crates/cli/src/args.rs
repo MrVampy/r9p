@@ -522,6 +522,10 @@ struct MountArgs {
     #[arg(value_name = "MOUNTPOINT")]
     direct_mountpoint: Option<String>,
 
+    /// Ordered endpoints tried after the primary endpoint is unavailable.
+    #[arg(long, value_name = "ENDPOINT")]
+    fallback_endpoint: Vec<String>,
+
     /// Namespace subtree mounted in direct mode.
     #[arg(long, value_name = "NAMESPACE_PATH")]
     source: Option<String>,
@@ -1053,6 +1057,10 @@ impl MountArgs {
             "ensure" | "status" | "stop"
         );
         let mut options = Vec::new();
+        for endpoint in self.fallback_endpoint {
+            options.push("--fallback-endpoint".to_string());
+            options.push(endpoint);
+        }
         push_option(&mut options, "--source", self.source);
         push_option(&mut options, "--aname", self.aname);
         push_option(&mut options, "--uname", self.uname);
@@ -1358,5 +1366,27 @@ mod tests {
         let normalized = mount.into_args();
         assert_eq!(normalized.first().map(String::as_str), Some("ensure"));
         assert!(normalized.contains(&"--mountpoint".to_string()));
+
+        let direct_mount = Cli::try_parse_from([
+            "r9p",
+            "mount",
+            "--fallback-endpoint",
+            "nucbox.mesh:9564",
+            "m7.mesh:9564",
+            "/mnt/namespace",
+        ])
+        .expect("direct mount with fallback");
+        let Command::Mount(direct_mount) = direct_mount.command else {
+            panic!("expected mount command");
+        };
+        assert_eq!(
+            direct_mount.into_args(),
+            [
+                "--fallback-endpoint",
+                "nucbox.mesh:9564",
+                "m7.mesh:9564",
+                "/mnt/namespace",
+            ]
+        );
     }
 }

@@ -85,6 +85,7 @@ fn mount_config(
 ) -> MountConfig {
     MountConfig {
         address: control.address.clone(),
+        fallback_addresses: Vec::new(),
         authentication: control.authentication.clone(),
         source_path: mount.source_path.clone(),
         mountpoint: mountpoint.to_string_lossy().into_owned(),

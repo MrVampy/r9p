@@ -67,8 +67,12 @@ Add `r9p stream-export` as the generic server-side counterpart to `r9p stream`.
 It exports `/stream` and runs one fixed process per admitted authenticated
 session. It remains ignorant of Git.
 
-A Git-owning application can run `git daemon --inetd` behind that stream and
-use Git's built-in `ext::r9p ... stream /stream %G<repository>` URL on the
-consumer. The application owns repository path admission, head publication,
-fetch verification, and promotion policy. Coordinator remains a coordination
-plane and does not relay the Git pack bytes.
+A Git-owning application with one fixed repository can run
+`git upload-pack --strict <repository>` behind that stream and use Git's
+built-in `ext::r9p ... stream /stream` URL on the consumer. This keeps the
+host-local repository path entirely at the owner. A multi-repository owner can
+instead run `git daemon --inetd` and use `%G<repository>` for the standard
+git-daemon request. In both forms, the application owns repository path
+admission, head publication, fetch verification, and promotion policy.
+Coordinator remains a coordination plane and does not relay the Git pack
+bytes.

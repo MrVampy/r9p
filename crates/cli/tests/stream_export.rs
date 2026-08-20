@@ -139,6 +139,96 @@ fn authenticated_stream_export_is_byte_transparent_and_principal_bounded() -> Te
     Ok(())
 }
 
+#[test]
+fn git_fetch_uses_the_authenticated_stream_without_a_git_specific_adapter() -> TestResult<()> {
+    let root = TestRoot::new()?;
+    let signing_root = r9p_auth::generate_root_key_pair()?;
+    let server_config = write_server_config(&root.path, &signing_root)?;
+    let client_config = write_client_config(&root.path, &signing_root, ALLOWED_PRINCIPAL)?;
+    let descriptor_file = root.path.join("git-stream.descriptor");
+    let git = find_executable("git")?;
+    let authority = root.path.join("authority");
+    let standby = root.path.join("standby");
+    fs::create_dir(&authority)?;
+    fs::create_dir(&standby)?;
+
+    run_git(&git, &authority, &["init", "-b", "main"])?;
+    run_git(&git, &authority, &["config", "user.name", "Coordinator"])?;
+    run_git(
+        &git,
+        &authority,
+        &["config", "user.email", "coordinator@example.invalid"],
+    )?;
+    fs::write(authority.join("state"), "generation one\n")?;
+    run_git(&git, &authority, &["add", "--", "state"])?;
+    run_git(&git, &authority, &["commit", "-m", "Record generation one"])?;
+    let first_head = git_output(&git, &authority, &["rev-parse", "HEAD"])?;
+
+    let server = Command::new(env!("CARGO_BIN_EXE_r9p"))
+        .args([
+            "stream-export",
+            "--bind",
+            "127.0.0.1:0",
+            "--auth-config",
+            &server_config.to_string_lossy(),
+            "--allow-principal",
+            ALLOWED_PRINCIPAL,
+            "--descriptor-file",
+            &descriptor_file.to_string_lossy(),
+            "--",
+            &git.to_string_lossy(),
+            "upload-pack",
+            "--strict",
+            &authority.to_string_lossy(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let _server = ServerProcess(server);
+    let descriptor = wait_for_descriptor(&descriptor_file)?;
+    let remote = format!(
+        "ext::{} --auth-config {} --auth-domain {} --bind {} -u {} -A / stream /stream",
+        env!("CARGO_BIN_EXE_r9p"),
+        client_config.display(),
+        SERVER_DOMAIN,
+        descriptor.endpoint_bind,
+        ALLOWED_PRINCIPAL,
+    );
+
+    run_git(&git, &standby, &["init", "-b", "main"])?;
+    fetch_replica(&git, &standby, &remote)?;
+    assert_eq!(
+        git_output(
+            &git,
+            &standby,
+            &["rev-parse", "refs/coordinator-replica/fetched"],
+        )?,
+        first_head,
+    );
+
+    fs::write(authority.join("state"), "generation two\n")?;
+    run_git(&git, &authority, &["add", "--", "state"])?;
+    run_git(&git, &authority, &["commit", "-m", "Record generation two"])?;
+    let second_head = git_output(&git, &authority, &["rev-parse", "HEAD"])?;
+    fetch_replica(&git, &standby, &remote)?;
+    assert_ne!(first_head, second_head);
+    assert_eq!(
+        git_output(
+            &git,
+            &standby,
+            &["rev-parse", "refs/coordinator-replica/fetched"],
+        )?,
+        second_head,
+    );
+    run_git(
+        &git,
+        &standby,
+        &["merge-base", "--is-ancestor", &first_head, &second_head],
+    )?;
+    Ok(())
+}
+
 fn write_server_config(root: &Path, signing_root: &RootKeyPair) -> TestResult<PathBuf> {
     let key = r9p_auth::generate_key_pair()?;
     let certificate = issue(signing_root, &key, SERVER_DOMAIN)?;
@@ -228,4 +318,57 @@ fn find_executable(name: &str) -> TestResult<PathBuf> {
         .map(|directory| directory.join(name))
         .find(|candidate| candidate.is_file())
         .ok_or_else(|| format!("{name} not found on PATH").into())
+}
+
+fn fetch_replica(git: &Path, repository: &Path, remote: &str) -> TestResult<()> {
+    run_git(
+        git,
+        repository,
+        &[
+            "-c",
+            "protocol.ext.allow=always",
+            "-c",
+            "transfer.fsckObjects=true",
+            "fetch",
+            "--atomic",
+            "--no-tags",
+            remote,
+            "refs/heads/main:refs/coordinator-replica/fetched",
+        ],
+    )
+}
+
+fn run_git(git: &Path, repository: &Path, arguments: &[&str]) -> TestResult<()> {
+    let output = Command::new(git)
+        .current_dir(repository)
+        .args(arguments)
+        .output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "git {:?} failed status={:?} stderr={}",
+            arguments,
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into())
+    }
+}
+
+fn git_output(git: &Path, repository: &Path, arguments: &[&str]) -> TestResult<String> {
+    let output = Command::new(git)
+        .current_dir(repository)
+        .args(arguments)
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "git {:?} failed status={:?} stderr={}",
+            arguments,
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
 }

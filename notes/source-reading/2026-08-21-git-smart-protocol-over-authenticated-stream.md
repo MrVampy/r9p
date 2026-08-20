@@ -67,8 +67,8 @@ Add `r9p stream-export` as the generic server-side counterpart to `r9p stream`.
 It exports `/stream` and runs one fixed process per admitted authenticated
 session. It remains ignorant of Git.
 
-A Git-owning application with one fixed repository can run
-`git upload-pack --strict <repository>` behind that stream and use Git's
+A Git-owning application with one fixed working-tree repository can run
+`git upload-pack --strict <repository>/.git` behind that stream and use Git's
 built-in `ext::r9p ... stream /stream` URL on the consumer. This keeps the
 host-local repository path entirely at the owner. A multi-repository owner can
 instead run `git daemon --inetd` and use `%G<repository>` for the standard

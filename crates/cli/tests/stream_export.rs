@@ -179,7 +179,7 @@ fn git_fetch_uses_the_authenticated_stream_without_a_git_specific_adapter() -> T
             &git.to_string_lossy(),
             "upload-pack",
             "--strict",
-            &authority.to_string_lossy(),
+            &authority.join(".git").to_string_lossy(),
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::null())

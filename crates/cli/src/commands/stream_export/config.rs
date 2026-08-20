@@ -25,7 +25,7 @@ pub(super) struct StreamExportConfig {
     pub(super) allowed_principals: BTreeSet<String>,
     pub(super) max_sessions: usize,
     pub(super) max_buffer_bytes: usize,
-    pub(super) descriptor_file: Option<PathBuf>,
+    pub(super) status_file: Option<PathBuf>,
     pub(super) command: ProcessCommand,
     pub(super) uname: String,
     pub(super) aname: String,
@@ -38,13 +38,16 @@ pub(super) fn parse(global: Config, args: Vec<String>) -> CliResult<StreamExport
             "r9p stream-export uses --bind for its listen address; do not use global -a",
         ));
     }
+    if !matches!(global.aname.as_str(), "" | "/") {
+        return Err(cli_error("r9p stream-export serves only attach name /"));
+    }
 
     let mut bind = None;
     let mut auth_config = global.auth_config;
     let mut allowed_principals = BTreeSet::new();
     let mut max_sessions = DEFAULT_MAX_SESSIONS;
     let mut max_buffer_bytes = DEFAULT_MAX_BUFFER_BYTES;
-    let mut descriptor_file = None;
+    let mut status_file = None;
     let mut command = Vec::new();
     let mut index = 0_usize;
     while index < args.len() {
@@ -100,16 +103,16 @@ pub(super) fn parse(global: Config, args: Vec<String>) -> CliResult<StreamExport
                     "max buffer byte count",
                 )?;
             }
-            "--descriptor-file" => {
+            "--status-file" => {
                 index += 1;
-                if descriptor_file
+                if status_file
                     .replace(PathBuf::from(
                         args.get(index)
-                            .ok_or_else(|| cli_error("missing descriptor file"))?,
+                            .ok_or_else(|| cli_error("missing status file"))?,
                     ))
                     .is_some()
                 {
-                    return Err(cli_error("descriptor file already specified"));
+                    return Err(cli_error("status file already specified"));
                 }
             }
             option if option.starts_with('-') => {
@@ -153,16 +156,13 @@ pub(super) fn parse(global: Config, args: Vec<String>) -> CliResult<StreamExport
         allowed_principals,
         max_sessions,
         max_buffer_bytes,
-        descriptor_file,
+        status_file,
         command: ProcessCommand {
             program,
             arguments: arguments.to_vec(),
         },
         uname: global.uname,
-        aname: match global.aname.as_str() {
-            "" => "/".to_string(),
-            _ => global.aname,
-        },
+        aname: "/".to_string(),
         msize: global.msize,
     })
 }

@@ -30,6 +30,8 @@ fn parses_a_fixed_absolute_command_and_exact_principals() {
             "/run/keys/server.conf".to_string(),
             "--allow-principal".to_string(),
             "/srv/coordinator/nucbox".to_string(),
+            "--status-file".to_string(),
+            "/run/stream-export/status".to_string(),
             "--".to_string(),
             "/nix/store/git/bin/git".to_string(),
             "daemon".to_string(),
@@ -48,6 +50,10 @@ fn parses_a_fixed_absolute_command_and_exact_principals() {
         PathBuf::from("/nix/store/git/bin/git")
     );
     assert_eq!(config.command.arguments, ["daemon", "--inetd"]);
+    assert_eq!(
+        config.status_file,
+        Some(PathBuf::from("/run/stream-export/status"))
+    );
 }
 
 #[test]

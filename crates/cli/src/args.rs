@@ -658,7 +658,7 @@ struct StreamExportArgs {
     #[arg(long, value_name = "BYTES")]
     max_buffer_bytes: Option<usize>,
     #[arg(long, value_name = "PATH")]
-    descriptor_file: Option<String>,
+    status_file: Option<String>,
     #[arg(last = true, num_args = 1.., value_name = "COMMAND")]
     command: Vec<String>,
 }
@@ -1216,7 +1216,7 @@ impl StreamExportArgs {
         }
         push_option(&mut args, "--max-sessions", self.max_sessions);
         push_option(&mut args, "--max-buffer-bytes", self.max_buffer_bytes);
-        push_option(&mut args, "--descriptor-file", self.descriptor_file);
+        push_option(&mut args, "--status-file", self.status_file);
         args.push("--".to_string());
         args.extend(self.command);
         args

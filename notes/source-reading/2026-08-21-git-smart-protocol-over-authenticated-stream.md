@@ -65,7 +65,9 @@ exporter with these bounds:
 
 Add `r9p stream-export` as the generic server-side counterpart to `r9p stream`.
 It exports `/stream` and runs one fixed process per admitted authenticated
-session. It remains ignorant of Git.
+session. It remains ignorant of Git. Its optional runtime status file uses the
+stable `r9p-stream-export` kind with no schema version in the identity; source
+control carries status-contract evolution.
 
 A Git-owning application with one fixed working-tree repository can run
 `git upload-pack --strict <repository>/.git` behind that stream and use Git's

@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     error::Error,
     fs,
     io::Write,
@@ -8,7 +9,6 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use r9p::export_descriptor::ExportDescriptor;
 use r9p_auth::{Certificate, CertificateBody, KeyPair, RootKeyPair};
 
 type TestResult<T> = Result<T, Box<dyn Error>>;
@@ -41,6 +41,10 @@ impl Drop for TestRoot {
 
 struct ServerProcess(Child);
 
+struct StreamStatus {
+    endpoint_bind: String,
+}
+
 impl Drop for ServerProcess {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -55,7 +59,7 @@ fn authenticated_stream_export_is_byte_transparent_and_principal_bounded() -> Te
     let server_config = write_server_config(&root.path, &signing_root)?;
     let allowed_config = write_client_config(&root.path, &signing_root, ALLOWED_PRINCIPAL)?;
     let denied_config = write_client_config(&root.path, &signing_root, DENIED_PRINCIPAL)?;
-    let descriptor_file = root.path.join("stream.descriptor");
+    let status_file = root.path.join("stream.status");
     let cat = find_executable("cat")?;
 
     let server = Command::new(env!("CARGO_BIN_EXE_r9p"))
@@ -67,8 +71,8 @@ fn authenticated_stream_export_is_byte_transparent_and_principal_bounded() -> Te
             &server_config.to_string_lossy(),
             "--allow-principal",
             ALLOWED_PRINCIPAL,
-            "--descriptor-file",
-            &descriptor_file.to_string_lossy(),
+            "--status-file",
+            &status_file.to_string_lossy(),
             "--",
             &cat.to_string_lossy(),
         ])
@@ -77,7 +81,7 @@ fn authenticated_stream_export_is_byte_transparent_and_principal_bounded() -> Te
         .stderr(Stdio::piped())
         .spawn()?;
     let _server = ServerProcess(server);
-    let descriptor = wait_for_descriptor(&descriptor_file)?;
+    let status = wait_for_status(&status_file)?;
 
     let mut input = vec![0x00, 0xff, b'\r', b'\n', 0x1b];
     input.extend((0_u32..130_000).map(|value| value.wrapping_mul(31) as u8));
@@ -88,7 +92,7 @@ fn authenticated_stream_export_is_byte_transparent_and_principal_bounded() -> Te
             "--auth-domain",
             SERVER_DOMAIN,
             "--bind",
-            &descriptor.endpoint_bind,
+            &status.endpoint_bind,
             "-u",
             ALLOWED_PRINCIPAL,
             "-A",
@@ -125,7 +129,7 @@ fn authenticated_stream_export_is_byte_transparent_and_principal_bounded() -> Te
             "--auth-domain",
             SERVER_DOMAIN,
             "--bind",
-            &descriptor.endpoint_bind,
+            &status.endpoint_bind,
             "-u",
             DENIED_PRINCIPAL,
             "-A",
@@ -145,7 +149,7 @@ fn git_fetch_uses_the_authenticated_stream_without_a_git_specific_adapter() -> T
     let signing_root = r9p_auth::generate_root_key_pair()?;
     let server_config = write_server_config(&root.path, &signing_root)?;
     let client_config = write_client_config(&root.path, &signing_root, ALLOWED_PRINCIPAL)?;
-    let descriptor_file = root.path.join("git-stream.descriptor");
+    let status_file = root.path.join("git-stream.status");
     let git = find_executable("git")?;
     let authority = root.path.join("authority");
     let standby = root.path.join("standby");
@@ -173,8 +177,8 @@ fn git_fetch_uses_the_authenticated_stream_without_a_git_specific_adapter() -> T
             &server_config.to_string_lossy(),
             "--allow-principal",
             ALLOWED_PRINCIPAL,
-            "--descriptor-file",
-            &descriptor_file.to_string_lossy(),
+            "--status-file",
+            &status_file.to_string_lossy(),
             "--",
             &git.to_string_lossy(),
             "upload-pack",
@@ -186,13 +190,13 @@ fn git_fetch_uses_the_authenticated_stream_without_a_git_specific_adapter() -> T
         .stderr(Stdio::piped())
         .spawn()?;
     let _server = ServerProcess(server);
-    let descriptor = wait_for_descriptor(&descriptor_file)?;
+    let status = wait_for_status(&status_file)?;
     let remote = format!(
         "ext::{} --auth-config {} --auth-domain {} --bind {} -u {} -A / stream /stream",
         env!("CARGO_BIN_EXE_r9p"),
         client_config.display(),
         SERVER_DOMAIN,
-        descriptor.endpoint_bind,
+        status.endpoint_bind,
         ALLOWED_PRINCIPAL,
     );
 
@@ -235,7 +239,7 @@ fn disconnect_kills_a_process_blocked_behind_stream_input() -> TestResult<()> {
     let signing_root = r9p_auth::generate_root_key_pair()?;
     let server_config = write_server_config(&root.path, &signing_root)?;
     let client_config = write_client_config(&root.path, &signing_root, ALLOWED_PRINCIPAL)?;
-    let descriptor_file = root.path.join("blocked-stream.descriptor");
+    let status_file = root.path.join("blocked-stream.status");
     let sleep = find_executable("sleep")?;
     let server = Command::new(env!("CARGO_BIN_EXE_r9p"))
         .args([
@@ -248,8 +252,8 @@ fn disconnect_kills_a_process_blocked_behind_stream_input() -> TestResult<()> {
             ALLOWED_PRINCIPAL,
             "--max-sessions",
             "1",
-            "--descriptor-file",
-            &descriptor_file.to_string_lossy(),
+            "--status-file",
+            &status_file.to_string_lossy(),
             "--",
             &sleep.to_string_lossy(),
             "60",
@@ -259,7 +263,7 @@ fn disconnect_kills_a_process_blocked_behind_stream_input() -> TestResult<()> {
         .stderr(Stdio::piped())
         .spawn()?;
     let _server = ServerProcess(server);
-    let descriptor = wait_for_descriptor(&descriptor_file)?;
+    let status = wait_for_status(&status_file)?;
 
     let mut client = Command::new(env!("CARGO_BIN_EXE_r9p"))
         .args([
@@ -268,7 +272,7 @@ fn disconnect_kills_a_process_blocked_behind_stream_input() -> TestResult<()> {
             "--auth-domain",
             SERVER_DOMAIN,
             "--bind",
-            &descriptor.endpoint_bind,
+            &status.endpoint_bind,
             "-u",
             ALLOWED_PRINCIPAL,
             "-A",
@@ -299,7 +303,7 @@ fn disconnect_kills_a_process_blocked_behind_stream_input() -> TestResult<()> {
                 "--auth-domain",
                 SERVER_DOMAIN,
                 "--bind",
-                &descriptor.endpoint_bind,
+                &status.endpoint_bind,
                 "-u",
                 ALLOWED_PRINCIPAL,
                 "-A",
@@ -386,19 +390,45 @@ fn issue(signing_root: &RootKeyPair, key: &KeyPair, name: &str) -> TestResult<Ce
     )?)
 }
 
-fn wait_for_descriptor(path: &Path) -> TestResult<ExportDescriptor> {
+fn wait_for_status(path: &Path) -> TestResult<StreamStatus> {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         match fs::read_to_string(path) {
-            Ok(content) => return Ok(ExportDescriptor::parse(&content)?),
+            Ok(content) => return parse_status(&content),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
         if Instant::now() >= deadline {
-            return Err(format!("stream descriptor did not appear at {}", path.display()).into());
+            return Err(format!("stream status did not appear at {}", path.display()).into());
         }
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn parse_status(content: &str) -> TestResult<StreamStatus> {
+    let mut fields = BTreeMap::new();
+    for line in content.lines() {
+        let (name, value) = line
+            .split_once('\t')
+            .ok_or("stream status line is not field-tab-value")?;
+        if fields.insert(name, value).is_some() {
+            return Err(format!("duplicate stream status field {name}").into());
+        }
+    }
+    if fields.get("kind") != Some(&"r9p-stream-export")
+        || fields.get("aname") != Some(&"/")
+        || fields.get("stream_path") != Some(&"/stream")
+        || fields.get("protocol") != Some(&"9P2000.R")
+        || fields.contains_key("format")
+    {
+        return Err("stream status contract mismatch".into());
+    }
+    Ok(StreamStatus {
+        endpoint_bind: fields
+            .get("endpoint_bind")
+            .ok_or("stream status endpoint missing")?
+            .to_string(),
+    })
 }
 
 fn find_executable(name: &str) -> TestResult<PathBuf> {

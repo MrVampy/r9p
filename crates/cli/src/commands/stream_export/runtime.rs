@@ -14,7 +14,6 @@ use std::{
 
 use r9p::{
     codec::Variant,
-    export_descriptor::{AuthBoundary, ExportDescriptor, ExportMode, Protocol, TransportClass},
     server::{serve_connection, ServerConfig as R9pServerConfig},
 };
 use r9p_auth::{authenticate_server, ServerConfig as SessionAuthConfig};
@@ -34,8 +33,8 @@ pub(super) fn run(config: StreamExportConfig) -> CliResult<()> {
     let bound = listener
         .local_addr()
         .map_err(|error| cli_error(format!("inspect stream-export listener: {error}")))?;
-    let descriptor = descriptor(&config, bound.to_string(), &auth)?;
-    write_descriptor(config.descriptor_file.as_deref(), &descriptor)?;
+    let status = status(&config, bound.to_string(), &auth);
+    write_status(config.status_file.as_deref(), status.as_bytes())?;
     eprintln!("r9p: exporting process stream on {bound}");
 
     let sessions = Arc::new(SessionCounter::new(config.max_sessions));
@@ -118,59 +117,46 @@ fn serve_authenticated_stream(
     }
 }
 
-fn descriptor(
-    config: &StreamExportConfig,
-    endpoint_bind: String,
-    auth: &SessionAuthConfig,
-) -> CliResult<ExportDescriptor> {
-    Ok(ExportDescriptor {
-        endpoint_bind,
-        aname: config.aname.clone(),
-        uname: config.uname.clone(),
-        exported_root: "/stream".to_string(),
-        transport_class: TransportClass::Tcp,
-        mode: ExportMode::ReadWrite,
-        auth: AuthBoundary::p9any_noise_xx(auth.domain())?,
-        pid: std::process::id(),
-        protocol: Protocol::_9P2000R,
-        msize: config.msize,
-        expires_at: None,
-        local_root_label: None,
-        namespace_mount_paths: Vec::new(),
-        extra_fields: Default::default(),
-    })
+fn status(config: &StreamExportConfig, endpoint_bind: String, auth: &SessionAuthConfig) -> String {
+    format!(
+        "kind\tr9p-stream-export\nendpoint_bind\t{endpoint_bind}\naname\t{}\nstream_path\t/stream\nauth\tp9any:noise-xx@{}\npid\t{}\nprotocol\t9P2000.R\nmsize\t{}\nmax_sessions\t{}\nmax_buffer_bytes\t{}\n",
+        config.aname,
+        auth.domain(),
+        std::process::id(),
+        config.msize,
+        config.max_sessions,
+        config.max_buffer_bytes,
+    )
 }
 
-fn write_descriptor(path: Option<&Path>, descriptor: &ExportDescriptor) -> CliResult<()> {
-    let rendered = descriptor.render()?;
-    let _ = ExportDescriptor::parse(&rendered)?;
+fn write_status(path: Option<&Path>, bytes: &[u8]) -> CliResult<()> {
     match path {
-        Some(path) => write_descriptor_file(path, rendered.as_bytes()),
+        Some(path) => write_status_file(path, bytes),
         None => {
             let mut stdout = std::io::stdout().lock();
-            stdout.write_all(rendered.as_bytes())?;
+            stdout.write_all(bytes)?;
             stdout.flush()?;
             Ok(())
         }
     }
 }
 
-fn write_descriptor_file(path: &Path, bytes: &[u8]) -> CliResult<()> {
+fn write_status_file(path: &Path, bytes: &[u8]) -> CliResult<()> {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| cli_error(format!("invalid descriptor path {}", path.display())))?;
+        .ok_or_else(|| cli_error(format!("invalid status path {}", path.display())))?;
     let temporary = path.with_file_name(format!(".{file_name}.{}.temporary", std::process::id()));
     fs::write(&temporary, bytes).map_err(|error| {
         cli_error(format!(
-            "write stream-export descriptor {}: {error}",
+            "write stream-export status {}: {error}",
             temporary.display()
         ))
     })?;
     if let Err(error) = fs::rename(&temporary, path) {
         let _ = fs::remove_file(&temporary);
         return Err(cli_error(format!(
-            "publish stream-export descriptor {}: {error}",
+            "publish stream-export status {}: {error}",
             path.display()
         )));
     }

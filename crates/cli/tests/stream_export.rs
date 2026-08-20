@@ -229,6 +229,95 @@ fn git_fetch_uses_the_authenticated_stream_without_a_git_specific_adapter() -> T
     Ok(())
 }
 
+#[test]
+fn disconnect_kills_a_process_blocked_behind_stream_input() -> TestResult<()> {
+    let root = TestRoot::new()?;
+    let signing_root = r9p_auth::generate_root_key_pair()?;
+    let server_config = write_server_config(&root.path, &signing_root)?;
+    let client_config = write_client_config(&root.path, &signing_root, ALLOWED_PRINCIPAL)?;
+    let descriptor_file = root.path.join("blocked-stream.descriptor");
+    let sleep = find_executable("sleep")?;
+    let server = Command::new(env!("CARGO_BIN_EXE_r9p"))
+        .args([
+            "stream-export",
+            "--bind",
+            "127.0.0.1:0",
+            "--auth-config",
+            &server_config.to_string_lossy(),
+            "--allow-principal",
+            ALLOWED_PRINCIPAL,
+            "--max-sessions",
+            "1",
+            "--descriptor-file",
+            &descriptor_file.to_string_lossy(),
+            "--",
+            &sleep.to_string_lossy(),
+            "60",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let _server = ServerProcess(server);
+    let descriptor = wait_for_descriptor(&descriptor_file)?;
+
+    let mut client = Command::new(env!("CARGO_BIN_EXE_r9p"))
+        .args([
+            "--auth-config",
+            &client_config.to_string_lossy(),
+            "--auth-domain",
+            SERVER_DOMAIN,
+            "--bind",
+            &descriptor.endpoint_bind,
+            "-u",
+            ALLOWED_PRINCIPAL,
+            "-A",
+            "/",
+            "stream",
+            "/stream",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let mut input = client
+        .stdin
+        .take()
+        .ok_or("blocked client stdin unavailable")?;
+    let writer = thread::spawn(move || input.write_all(&vec![0x5a; 8 * 1024 * 1024]));
+    thread::sleep(Duration::from_millis(100));
+    client.kill()?;
+    let _ = client.wait()?;
+    let _ = writer.join();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let attached = Command::new(env!("CARGO_BIN_EXE_r9p"))
+            .args([
+                "--auth-config",
+                &client_config.to_string_lossy(),
+                "--auth-domain",
+                SERVER_DOMAIN,
+                "--bind",
+                &descriptor.endpoint_bind,
+                "-u",
+                ALLOWED_PRINCIPAL,
+                "-A",
+                "/",
+                "attach",
+            ])
+            .output()?;
+        if attached.status.success() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("stream session slot did not recover after disconnect".into());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
+}
+
 fn write_server_config(root: &Path, signing_root: &RootKeyPair) -> TestResult<PathBuf> {
     let key = r9p_auth::generate_key_pair()?;
     let certificate = issue(signing_root, &key, SERVER_DOMAIN)?;

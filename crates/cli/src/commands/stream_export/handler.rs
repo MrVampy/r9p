@@ -315,13 +315,14 @@ impl ProcessStream {
 
     fn request_stop(&self) -> Result<()> {
         self.inner.stopping.store(true, Ordering::SeqCst);
-        self.lock_input()?.stdin.take();
         let process_id = self.lock_lifecycle()?.process_id;
         self.inner.output_changed.notify_all();
-        if let Some(process_id) = process_id {
-            terminate_process_group(process_id)?;
-        }
-        Ok(())
+        let termination = match process_id {
+            Some(process_id) => terminate_process_group(process_id),
+            None => Ok(()),
+        };
+        self.lock_input()?.stdin.take();
+        termination
     }
 
     fn reset_session(&self) -> Result<()> {
@@ -448,7 +449,7 @@ impl ConnectionHandler for ProcessStream {
     }
 
     fn wake_after_cancel(&self) {
-        self.inner.output_changed.notify_all();
+        let _ = self.request_stop();
     }
 }
 

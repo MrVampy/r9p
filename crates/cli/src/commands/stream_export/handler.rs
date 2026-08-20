@@ -560,7 +560,7 @@ fn terminate_process_group(process_id: u32) -> Result<()> {
         .ok()
         .and_then(Pid::from_raw)
         .ok_or_else(|| Error::from_static("invalid stream process id"))?;
-    match kill_process_group(raw, Signal::Kill) {
+    match kill_process_group(raw, Signal::KILL) {
         Ok(()) | Err(Errno::SRCH) => Ok(()),
         Err(error) => Err(Error::new(format!(
             "terminate stream process group {process_id}: {error}"

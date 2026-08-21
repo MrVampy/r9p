@@ -54,6 +54,9 @@
               binutils
               makeWrapper
             ];
+            nativeCheckInputs = with pkgs; [
+              git
+            ];
             postFixup = ''
               wrapProgram "$out/bin/r9p" \
                 --suffix PATH : ${pkgs.lib.makeBinPath [ pkgs.fuse3 ]}

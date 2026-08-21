@@ -1,10 +1,7 @@
-use std::{
-    collections::BTreeMap,
-    net::{SocketAddr, ToSocketAddrs},
-    path::PathBuf,
-};
+use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf};
 
 use crate::{
+    commands::listener,
     errors::{cli_error, CliResult},
     target::Config,
 };
@@ -255,13 +252,7 @@ fn parse_unix_bind(path: &str) -> CliResult<BindTarget> {
 }
 
 fn parse_tcp_bind(value: &str) -> CliResult<BindTarget> {
-    let mut addrs = value
-        .to_socket_addrs()
-        .map_err(|error| cli_error(format!("invalid tcp bind address {value}: {error}")))?;
-    let address = addrs
-        .next()
-        .ok_or_else(|| cli_error(format!("tcp bind address {value} resolved no addresses")))?;
-    Ok(BindTarget::Tcp(address))
+    listener::parse_tcp_bind(value).map(BindTarget::Tcp)
 }
 
 fn default_unix_bind() -> BindTarget {

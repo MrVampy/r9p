@@ -1,0 +1,493 @@
+use std::{
+    collections::BTreeMap,
+    error::Error,
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+
+use r9p_auth::{Certificate, CertificateBody, KeyPair, RootKeyPair};
+
+type TestResult<T> = Result<T, Box<dyn Error>>;
+
+const SERVER_DOMAIN: &str = "stream-export.test";
+const ALLOWED_PRINCIPAL: &str = "/srv/coordinator/nucbox";
+const DENIED_PRINCIPAL: &str = "/srv/unrelated/service";
+
+struct TestRoot {
+    path: PathBuf,
+}
+
+impl TestRoot {
+    fn new() -> TestResult<Self> {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "r9p-stream-export-test-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&path)?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for TestRoot {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+struct ServerProcess(Child);
+
+struct StreamStatus {
+    endpoint_bind: String,
+}
+
+impl Drop for ServerProcess {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+fn authenticated_stream_export_is_byte_transparent_and_principal_bounded() -> TestResult<()> {
+    let root = TestRoot::new()?;
+    let signing_root = r9p_auth::generate_root_key_pair()?;
+    let server_config = write_server_config(&root.path, &signing_root)?;
+    let allowed_config = write_client_config(&root.path, &signing_root, ALLOWED_PRINCIPAL)?;
+    let denied_config = write_client_config(&root.path, &signing_root, DENIED_PRINCIPAL)?;
+    let status_file = root.path.join("stream.status");
+    let cat = find_executable("cat")?;
+
+    let server = Command::new(env!("CARGO_BIN_EXE_r9p"))
+        .args([
+            "stream-export",
+            "--bind",
+            "127.0.0.1:0",
+            "--auth-config",
+            &server_config.to_string_lossy(),
+            "--allow-principal",
+            ALLOWED_PRINCIPAL,
+            "--status-file",
+            &status_file.to_string_lossy(),
+            "--",
+            &cat.to_string_lossy(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let _server = ServerProcess(server);
+    let status = wait_for_status(&status_file)?;
+
+    let mut input = vec![0x00, 0xff, b'\r', b'\n', 0x1b];
+    input.extend((0_u32..130_000).map(|value| value.wrapping_mul(31) as u8));
+    let mut client = Command::new(env!("CARGO_BIN_EXE_r9p"))
+        .args([
+            "--auth-config",
+            &allowed_config.to_string_lossy(),
+            "--auth-domain",
+            SERVER_DOMAIN,
+            "--bind",
+            &status.endpoint_bind,
+            "-u",
+            ALLOWED_PRINCIPAL,
+            "-A",
+            "/",
+            "stream",
+            "/stream",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    client
+        .stdin
+        .take()
+        .ok_or("stream client stdin unavailable")?
+        .write_all(&input)?;
+    let output = client.wait_with_output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "allowed stream failed status={:?} stderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    if output.stdout != input {
+        return Err("stream exporter changed relayed bytes".into());
+    }
+
+    let denied = Command::new(env!("CARGO_BIN_EXE_r9p"))
+        .args([
+            "--auth-config",
+            &denied_config.to_string_lossy(),
+            "--auth-domain",
+            SERVER_DOMAIN,
+            "--bind",
+            &status.endpoint_bind,
+            "-u",
+            DENIED_PRINCIPAL,
+            "-A",
+            "/",
+            "attach",
+        ])
+        .output()?;
+    if denied.status.success() {
+        return Err("unauthorized certified principal reached the stream export".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn git_fetch_uses_the_authenticated_stream_without_a_git_specific_adapter() -> TestResult<()> {
+    let root = TestRoot::new()?;
+    let signing_root = r9p_auth::generate_root_key_pair()?;
+    let server_config = write_server_config(&root.path, &signing_root)?;
+    let client_config = write_client_config(&root.path, &signing_root, ALLOWED_PRINCIPAL)?;
+    let status_file = root.path.join("git-stream.status");
+    let git = find_executable("git")?;
+    let authority = root.path.join("authority");
+    let standby = root.path.join("standby");
+    fs::create_dir(&authority)?;
+    fs::create_dir(&standby)?;
+
+    run_git(&git, &authority, &["init", "-b", "main"])?;
+    run_git(&git, &authority, &["config", "user.name", "Coordinator"])?;
+    run_git(
+        &git,
+        &authority,
+        &["config", "user.email", "coordinator@example.invalid"],
+    )?;
+    fs::write(authority.join("state"), "generation one\n")?;
+    run_git(&git, &authority, &["add", "--", "state"])?;
+    run_git(&git, &authority, &["commit", "-m", "Record generation one"])?;
+    let first_head = git_output(&git, &authority, &["rev-parse", "HEAD"])?;
+
+    let server = Command::new(env!("CARGO_BIN_EXE_r9p"))
+        .args([
+            "stream-export",
+            "--bind",
+            "127.0.0.1:0",
+            "--auth-config",
+            &server_config.to_string_lossy(),
+            "--allow-principal",
+            ALLOWED_PRINCIPAL,
+            "--status-file",
+            &status_file.to_string_lossy(),
+            "--",
+            &git.to_string_lossy(),
+            "upload-pack",
+            "--strict",
+            &authority.join(".git").to_string_lossy(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let _server = ServerProcess(server);
+    let status = wait_for_status(&status_file)?;
+    let remote = format!(
+        "ext::{} --auth-config {} --auth-domain {} --bind {} -u {} -A / stream /stream",
+        env!("CARGO_BIN_EXE_r9p"),
+        client_config.display(),
+        SERVER_DOMAIN,
+        status.endpoint_bind,
+        ALLOWED_PRINCIPAL,
+    );
+
+    run_git(&git, &standby, &["init", "-b", "main"])?;
+    fetch_replica(&git, &standby, &remote)?;
+    assert_eq!(
+        git_output(
+            &git,
+            &standby,
+            &["rev-parse", "refs/coordinator-replica/fetched"],
+        )?,
+        first_head,
+    );
+
+    fs::write(authority.join("state"), "generation two\n")?;
+    run_git(&git, &authority, &["add", "--", "state"])?;
+    run_git(&git, &authority, &["commit", "-m", "Record generation two"])?;
+    let second_head = git_output(&git, &authority, &["rev-parse", "HEAD"])?;
+    fetch_replica(&git, &standby, &remote)?;
+    assert_ne!(first_head, second_head);
+    assert_eq!(
+        git_output(
+            &git,
+            &standby,
+            &["rev-parse", "refs/coordinator-replica/fetched"],
+        )?,
+        second_head,
+    );
+    run_git(
+        &git,
+        &standby,
+        &["merge-base", "--is-ancestor", &first_head, &second_head],
+    )?;
+    Ok(())
+}
+
+#[test]
+fn disconnect_kills_a_process_blocked_behind_stream_input() -> TestResult<()> {
+    let root = TestRoot::new()?;
+    let signing_root = r9p_auth::generate_root_key_pair()?;
+    let server_config = write_server_config(&root.path, &signing_root)?;
+    let client_config = write_client_config(&root.path, &signing_root, ALLOWED_PRINCIPAL)?;
+    let status_file = root.path.join("blocked-stream.status");
+    let sleep = find_executable("sleep")?;
+    let server = Command::new(env!("CARGO_BIN_EXE_r9p"))
+        .args([
+            "stream-export",
+            "--bind",
+            "127.0.0.1:0",
+            "--auth-config",
+            &server_config.to_string_lossy(),
+            "--allow-principal",
+            ALLOWED_PRINCIPAL,
+            "--max-sessions",
+            "1",
+            "--status-file",
+            &status_file.to_string_lossy(),
+            "--",
+            &sleep.to_string_lossy(),
+            "60",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let _server = ServerProcess(server);
+    let status = wait_for_status(&status_file)?;
+
+    let mut client = Command::new(env!("CARGO_BIN_EXE_r9p"))
+        .args([
+            "--auth-config",
+            &client_config.to_string_lossy(),
+            "--auth-domain",
+            SERVER_DOMAIN,
+            "--bind",
+            &status.endpoint_bind,
+            "-u",
+            ALLOWED_PRINCIPAL,
+            "-A",
+            "/",
+            "stream",
+            "/stream",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let mut input = client
+        .stdin
+        .take()
+        .ok_or("blocked client stdin unavailable")?;
+    let writer = thread::spawn(move || input.write_all(&vec![0x5a; 8 * 1024 * 1024]));
+    thread::sleep(Duration::from_millis(100));
+    client.kill()?;
+    let _ = client.wait()?;
+    let _ = writer.join();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let attached = Command::new(env!("CARGO_BIN_EXE_r9p"))
+            .args([
+                "--auth-config",
+                &client_config.to_string_lossy(),
+                "--auth-domain",
+                SERVER_DOMAIN,
+                "--bind",
+                &status.endpoint_bind,
+                "-u",
+                ALLOWED_PRINCIPAL,
+                "-A",
+                "/",
+                "attach",
+            ])
+            .output()?;
+        if attached.status.success() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("stream session slot did not recover after disconnect".into());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
+}
+
+fn write_server_config(root: &Path, signing_root: &RootKeyPair) -> TestResult<PathBuf> {
+    let key = r9p_auth::generate_key_pair()?;
+    let certificate = issue(signing_root, &key, SERVER_DOMAIN)?;
+    let config = root.join("server.conf");
+    write_identity(root, "server", &key, &certificate)?;
+    fs::write(
+        &config,
+        format!(
+            "format r9p-session-auth.v1\nrole server\ndomain {SERVER_DOMAIN}\nprivate-key {}\ncertificate {}\nroot {}\n",
+            root.join("server.key").display(),
+            root.join("server.crt").display(),
+            signing_root.public
+        ),
+    )?;
+    Ok(config)
+}
+
+fn write_client_config(
+    root: &Path,
+    signing_root: &RootKeyPair,
+    principal: &str,
+) -> TestResult<PathBuf> {
+    let label = principal.trim_start_matches('/').replace(['/', '.'], "-");
+    let key = r9p_auth::generate_key_pair()?;
+    let certificate = issue(signing_root, &key, principal)?;
+    let config = root.join(format!("{label}.conf"));
+    write_identity(root, &label, &key, &certificate)?;
+    fs::write(
+        &config,
+        format!(
+            "format r9p-session-auth.v1\nrole client\nprivate-key {}\ncertificate {}\nroot {}\n",
+            root.join(format!("{label}.key")).display(),
+            root.join(format!("{label}.crt")).display(),
+            signing_root.public
+        ),
+    )?;
+    Ok(config)
+}
+
+fn write_identity(
+    root: &Path,
+    label: &str,
+    key: &KeyPair,
+    certificate: &Certificate,
+) -> TestResult<()> {
+    r9p_auth::write_key_pair(
+        &root.join(format!("{label}.key")),
+        &root.join(format!("{label}.pub")),
+        key,
+    )?;
+    certificate.write(&root.join(format!("{label}.crt")))?;
+    Ok(())
+}
+
+fn issue(signing_root: &RootKeyPair, key: &KeyPair, name: &str) -> TestResult<Certificate> {
+    Ok(Certificate::sign(
+        &signing_root.private,
+        CertificateBody::new(
+            name,
+            key.public,
+            Vec::<String>::new(),
+            1,
+            4_000_000_000,
+            signing_root.public,
+        )?,
+    )?)
+}
+
+fn wait_for_status(path: &Path) -> TestResult<StreamStatus> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match fs::read_to_string(path) {
+            Ok(content) => return parse_status(&content),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("stream status did not appear at {}", path.display()).into());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn parse_status(content: &str) -> TestResult<StreamStatus> {
+    let mut fields = BTreeMap::new();
+    for line in content.lines() {
+        let (name, value) = line
+            .split_once('\t')
+            .ok_or("stream status line is not field-tab-value")?;
+        if fields.insert(name, value).is_some() {
+            return Err(format!("duplicate stream status field {name}").into());
+        }
+    }
+    if fields.get("kind") != Some(&"r9p-stream-export")
+        || fields.get("aname") != Some(&"/")
+        || fields.get("stream_path") != Some(&"/stream")
+        || fields.get("protocol") != Some(&"9P2000.R")
+        || fields.contains_key("format")
+    {
+        return Err("stream status contract mismatch".into());
+    }
+    Ok(StreamStatus {
+        endpoint_bind: fields
+            .get("endpoint_bind")
+            .ok_or("stream status endpoint missing")?
+            .to_string(),
+    })
+}
+
+fn find_executable(name: &str) -> TestResult<PathBuf> {
+    let path = std::env::var_os("PATH").ok_or("PATH unavailable")?;
+    std::env::split_paths(&path)
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| format!("{name} not found on PATH").into())
+}
+
+fn fetch_replica(git: &Path, repository: &Path, remote: &str) -> TestResult<()> {
+    run_git(
+        git,
+        repository,
+        &[
+            "-c",
+            "protocol.ext.allow=always",
+            "-c",
+            "transfer.fsckObjects=true",
+            "fetch",
+            "--atomic",
+            "--no-tags",
+            remote,
+            "refs/heads/main:refs/coordinator-replica/fetched",
+        ],
+    )
+}
+
+fn run_git(git: &Path, repository: &Path, arguments: &[&str]) -> TestResult<()> {
+    let output = Command::new(git)
+        .current_dir(repository)
+        .args(arguments)
+        .output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "git {:?} failed status={:?} stderr={}",
+            arguments,
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into())
+    }
+}
+
+fn git_output(git: &Path, repository: &Path, arguments: &[&str]) -> TestResult<String> {
+    let output = Command::new(git)
+        .current_dir(repository)
+        .args(arguments)
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "git {:?} failed status={:?} stderr={}",
+            arguments,
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
+}

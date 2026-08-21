@@ -1,4 +1,5 @@
 use super::*;
+use r9p::error::EPERM;
 
 fn metadata(qid_path: u64) -> PushedDirectoryMetadata {
     PushedDirectoryMetadata {
@@ -41,7 +42,12 @@ fn spawn_child_walk(front: Front, fid: Fid) -> thread::JoinHandle<Result<Vec<Qid
 fn unknown_walk_resolves_directory_before_its_first_read() -> Result<()> {
     let front = Front::new();
     front.set_wait_timeout(Duration::from_secs(2))?;
-    front.register_child_directory_resolver("search", "search/resolve", "search/read")?;
+    front.register_child_directory_resolver(
+        "search",
+        "search/resolve",
+        "search/read",
+        ChildDirectoryRemoval::Forbidden,
+    )?;
 
     let walk = spawn_walk(front.clone(), 1);
     let request = front
@@ -84,7 +90,12 @@ fn unknown_walk_resolves_directory_before_its_first_read() -> Result<()> {
 fn concurrent_walks_coalesce_one_child_resolution() -> Result<()> {
     let front = Front::new();
     front.set_wait_timeout(Duration::from_secs(2))?;
-    front.register_child_directory_resolver("search", "search/resolve", "search/read")?;
+    front.register_child_directory_resolver(
+        "search",
+        "search/resolve",
+        "search/read",
+        ChildDirectoryRemoval::Forbidden,
+    )?;
 
     let first = spawn_walk(front.clone(), 1);
     let second = spawn_walk(front.clone(), 2);
@@ -111,7 +122,12 @@ fn concurrent_walks_coalesce_one_child_resolution() -> Result<()> {
 fn rejected_child_resolution_leaves_no_walkable_entry() -> Result<()> {
     let front = Front::new();
     front.set_wait_timeout(Duration::from_secs(2))?;
-    front.register_child_directory_resolver("search", "search/resolve", "search/read")?;
+    front.register_child_directory_resolver(
+        "search",
+        "search/resolve",
+        "search/read",
+        ChildDirectoryRemoval::Forbidden,
+    )?;
     let walk = spawn_child_walk(front.clone(), 1);
     let request = front
         .next_request_for_prefix("search/resolve", Duration::from_secs(1))?
@@ -144,7 +160,12 @@ fn rejected_child_resolution_leaves_no_walkable_entry() -> Result<()> {
 fn removed_resolver_parent_releases_the_pending_resolution() -> Result<()> {
     let front = Front::new();
     front.set_wait_timeout(Duration::from_secs(2))?;
-    front.register_child_directory_resolver("search", "search/resolve", "search/read")?;
+    front.register_child_directory_resolver(
+        "search",
+        "search/resolve",
+        "search/read",
+        ChildDirectoryRemoval::Forbidden,
+    )?;
 
     let walk = spawn_child_walk(front.clone(), 1);
     let request = front
@@ -161,7 +182,12 @@ fn removed_resolver_parent_releases_the_pending_resolution() -> Result<()> {
         .complete_child_directory_resolution("search/resolve", request.request_id, metadata(9003),)
         .is_err());
 
-    front.register_child_directory_resolver("search", "search/resolve", "search/read")?;
+    front.register_child_directory_resolver(
+        "search",
+        "search/resolve",
+        "search/read",
+        ChildDirectoryRemoval::Forbidden,
+    )?;
     let retry = spawn_child_walk(front.clone(), 2);
     let retry_request = front
         .next_request_for_prefix("search/resolve", Duration::from_secs(1))?
@@ -179,11 +205,89 @@ fn removed_resolver_parent_releases_the_pending_resolution() -> Result<()> {
 fn child_resolution_and_read_prefixes_must_be_distinct() -> Result<()> {
     let front = Front::new();
     let error = front
-        .register_child_directory_resolver("search", "search/request", "search/request")
+        .register_child_directory_resolver(
+            "search",
+            "search/request",
+            "search/request",
+            ChildDirectoryRemoval::Forbidden,
+        )
         .expect_err("ambiguous request kinds must be rejected");
     assert_eq!(
         error.message(),
         b"child resolution and directory read prefixes must be distinct"
     );
+    Ok(())
+}
+
+#[test]
+fn owner_relayed_child_is_removable_immediately_after_walk() -> Result<()> {
+    let front = Front::new();
+    front.set_wait_timeout(Duration::from_secs(2))?;
+    front.register_child_directory_resolver(
+        "search",
+        "search/resolve",
+        "search/read",
+        ChildDirectoryRemoval::RelayToOwner,
+    )?;
+
+    let walk = spawn_walk(front.clone(), 1);
+    let resolution = front
+        .next_request_for_prefix("search/resolve", Duration::from_secs(1))?
+        .expect("resolution request");
+    front.complete_child_directory_resolution(
+        "search/resolve",
+        resolution.request_id,
+        metadata(9100),
+    )?;
+    let (mut tree, qids) = walk.join().expect("walk thread")?;
+    let removal = thread::spawn(move || tree.remove(101, qids[1]));
+
+    let request = front
+        .next_request_for_prefix("search/rust", Duration::from_secs(1))?
+        .expect("remove request");
+    assert_eq!(request.context.front_path, "/search/rust");
+    assert_eq!(request.context.target_path, "/search/rust");
+    assert_eq!(request.context.count, 0);
+    front.complete_remove("search/rust", request.request_id)?;
+    removal.join().expect("remove thread")?;
+
+    let retry = spawn_child_walk(front.clone(), 2);
+    let retry_request = front
+        .next_request_for_prefix("search/resolve", Duration::from_secs(1))?
+        .expect("removed child must resolve again");
+    front.reject_child_directory_resolution(
+        "search/resolve",
+        retry_request.request_id,
+        "removed query",
+    )?;
+    assert!(retry.join().expect("retry walk").is_err());
+    Ok(())
+}
+
+#[test]
+fn ordinary_resolved_child_does_not_gain_remove_authority() -> Result<()> {
+    let front = Front::new();
+    front.set_wait_timeout(Duration::from_secs(2))?;
+    front.register_child_directory_resolver(
+        "search",
+        "search/resolve",
+        "search/read",
+        ChildDirectoryRemoval::Forbidden,
+    )?;
+    let walk = spawn_walk(front.clone(), 1);
+    let resolution = front
+        .next_request_for_prefix("search/resolve", Duration::from_secs(1))?
+        .expect("resolution request");
+    front.complete_child_directory_resolution(
+        "search/resolve",
+        resolution.request_id,
+        metadata(9101),
+    )?;
+    let (mut tree, qids) = walk.join().expect("walk thread")?;
+    let error = tree
+        .remove(101, qids[1])
+        .expect_err("ordinary child must remain inert");
+    assert_eq!(error.message(), EPERM.as_bytes());
+    assert!(front.next_request(Duration::from_millis(0))?.is_none());
     Ok(())
 }

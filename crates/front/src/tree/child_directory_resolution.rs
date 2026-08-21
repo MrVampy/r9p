@@ -58,6 +58,7 @@ impl FrontTree {
                     request_id,
                     prefix: resolver.resolution_prefix.clone(),
                     read_prefix: resolver.read_prefix,
+                    removal: resolver.removal,
                     reply: None,
                     waiters: 1,
                 },
@@ -102,9 +103,16 @@ impl FrontTree {
                 .ok_or_else(|| Error::from_static(ENOENT))?;
             let reply = resolution.reply.clone();
             let read_prefix = resolution.read_prefix.clone();
+            let removal = resolution.removal;
             match reply {
                 Some(ChildDirectoryReply::Accepted(metadata)) => {
-                    match state.insert_pushed_child_directory(parent, name, metadata, read_prefix) {
+                    match state.insert_pushed_child_directory(
+                        parent,
+                        name,
+                        metadata,
+                        read_prefix,
+                        removal,
+                    ) {
                         Ok(child) => {
                             state.finish_child_directory_waiter(&key);
                             drop(state);

@@ -1,7 +1,8 @@
 use crate::model::{
-    canonical_root_path, normalise_request_prefix, Body, CreateRelayReply, CreateRelayRequest,
-    Intake, IntakeRequest, LogBody, PrincipalRoot, ProtocolConfig, PushedDirectoryMetadata,
-    PushedFileMetadata, RemoveRelayReply, RequestReply, State, WriteRelayReply, WstatRelayReply,
+    canonical_root_path, normalise_request_prefix, Body, ChildDirectoryRemoval, CreateRelayReply,
+    CreateRelayRequest, Intake, IntakeRequest, LogBody, PrincipalRoot, ProtocolConfig,
+    PushedDirectoryMetadata, PushedFileMetadata, RemoveRelayReply, RequestReply, State,
+    WriteRelayReply, WstatRelayReply,
 };
 use crate::tree::FrontTree;
 use r9p::codec::{MAX_MSIZE, MIN_MSIZE};

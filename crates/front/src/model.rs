@@ -26,6 +26,13 @@ pub(crate) struct DirectoryBody {
 pub(crate) struct ChildDirectoryResolver {
     pub(crate) resolution_prefix: String,
     pub(crate) read_prefix: String,
+    pub(crate) removal: ChildDirectoryRemoval,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChildDirectoryRemoval {
+    Forbidden,
+    RelayToOwner,
 }
 
 impl Deref for DirectoryBody {
@@ -195,6 +202,7 @@ pub(crate) struct ChildDirectoryResolution {
     pub(crate) request_id: u64,
     pub(crate) prefix: String,
     pub(crate) read_prefix: String,
+    pub(crate) removal: ChildDirectoryRemoval,
     pub(crate) reply: Option<ChildDirectoryReply>,
     pub(crate) waiters: usize,
 }
@@ -711,14 +719,37 @@ impl State {
         name: &[u8],
         metadata: PushedDirectoryMetadata,
         read_prefix: String,
+        removal: ChildDirectoryRemoval,
     ) -> Result<u64> {
         if metadata.length != 0 {
             return Err(Error::from_static("pushed directory length must be zero"));
         }
+        let remove_relay = match removal {
+            ChildDirectoryRemoval::Forbidden => None,
+            ChildDirectoryRemoval::RelayToOwner => {
+                let name = std::str::from_utf8(name)
+                    .map_err(|_| Error::from_static("child directory name must be UTF-8"))?;
+                let parent_path = self.path_relative_to(parent, ROOT_ID)?;
+                Some(
+                    created_child_path(&parent_path, name)
+                        .trim_matches('/')
+                        .to_string(),
+                )
+            }
+        };
         if let Body::Dir(directory) = &self.node(parent)?.body {
             if let Some(existing) = directory.children.get(name).copied() {
                 return match self.node(existing)?.body {
-                    Body::Dir(_) => Ok(existing),
+                    Body::Dir(_) => {
+                        if let Some(remove_relay) = remove_relay {
+                            self.remove_relay_prefixes.insert(remove_relay.clone());
+                            self.nodes
+                                .get_mut(&existing)
+                                .ok_or_else(|| Error::from_static(ENOENT))?
+                                .remove_relay = Some(remove_relay);
+                        }
+                        Ok(existing)
+                    }
                     _ => Err(Error::from_static(ENOTDIR)),
                 };
             }
@@ -745,7 +776,7 @@ impl State {
                 wake_token: Some(metadata.wake_token),
                 create_relay: None,
                 write_relay: None,
-                remove_relay: None,
+                remove_relay: remove_relay.clone(),
                 wstat_relay: None,
                 body: Body::Dir(DirectoryBody {
                     children: BTreeMap::new(),
@@ -761,6 +792,9 @@ impl State {
         }) = self.nodes.get_mut(&parent)
         {
             directory.children.insert(name.to_vec(), id);
+        }
+        if let Some(remove_relay) = remove_relay {
+            self.remove_relay_prefixes.insert(remove_relay);
         }
         Ok(id)
     }

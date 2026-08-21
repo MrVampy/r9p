@@ -7,6 +7,7 @@ impl Front {
         path: &str,
         resolution_prefix: &str,
         read_prefix: &str,
+        removal: ChildDirectoryRemoval,
     ) -> Result<()> {
         let path = path.trim_matches('/');
         if path.is_empty() {
@@ -31,6 +32,7 @@ impl Front {
         directory.child_resolver = Some(ChildDirectoryResolver {
             resolution_prefix,
             read_prefix,
+            removal,
         });
         Ok(())
     }

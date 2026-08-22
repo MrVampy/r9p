@@ -260,6 +260,8 @@ pub(crate) struct Node {
 pub(crate) struct State {
     pub(crate) nodes: BTreeMap<u64, Node>,
     pub(crate) qid_index: BTreeMap<u64, u64>,
+    pub(crate) fid_references: BTreeMap<u64, usize>,
+    pub(crate) detached_roots: BTreeSet<u64>,
     pub(crate) next_id: u64,
     pub(crate) next_request_id: u64,
     pub(crate) intakes: BTreeMap<u64, Intake>,
@@ -342,6 +344,8 @@ impl State {
         Self {
             nodes,
             qid_index,
+            fid_references: BTreeMap::new(),
+            detached_roots: BTreeSet::new(),
             next_id: 1,
             next_request_id: 1,
             intakes: BTreeMap::new(),
@@ -894,7 +898,7 @@ impl State {
         {
             children.remove(name.as_slice());
         }
-        self.remove_node_recursive(id);
+        self.retire_detached_subtree(id);
         Ok(())
     }
 
@@ -942,7 +946,7 @@ impl State {
             {
                 children.remove(name.as_slice());
             }
-            self.remove_node_recursive(*id);
+            self.retire_detached_subtree(*id);
         }
 
         if !stale.is_empty() {
@@ -951,6 +955,73 @@ impl State {
                 .retain(|_uname, binding| nodes.contains_key(&binding.root));
         }
         Ok(!stale.is_empty())
+    }
+
+    pub(crate) fn retain_fid_node(&mut self, id: u64) -> Result<()> {
+        self.node(id)?;
+        *self.fid_references.entry(id).or_insert(0) += 1;
+        Ok(())
+    }
+
+    pub(crate) fn release_fid_node(&mut self, id: u64) -> Result<()> {
+        match self.fid_references.get_mut(&id) {
+            Some(references) if *references > 1 => *references -= 1,
+            Some(_) => {
+                self.fid_references.remove(&id);
+            }
+            None => return Err(Error::from_static("front fid node reference missing")),
+        }
+        self.collect_unreferenced_detached_subtrees();
+        Ok(())
+    }
+
+    pub(crate) fn node_is_detached(&self, id: u64) -> bool {
+        let mut current = id;
+        loop {
+            if self.detached_roots.contains(&current) {
+                return true;
+            }
+            let Some(node) = self.nodes.get(&current) else {
+                return false;
+            };
+            if node.parent == current {
+                return false;
+            }
+            current = node.parent;
+        }
+    }
+
+    fn retire_detached_subtree(&mut self, id: u64) {
+        if self.subtree_has_fid_reference(id) {
+            self.detached_roots.insert(id);
+        } else {
+            self.remove_node_recursive(id);
+        }
+    }
+
+    fn subtree_has_fid_reference(&self, id: u64) -> bool {
+        if self.fid_references.contains_key(&id) {
+            return true;
+        }
+        match self.nodes.get(&id).map(|node| &node.body) {
+            Some(Body::Dir(children)) => children
+                .values()
+                .any(|child| self.subtree_has_fid_reference(*child)),
+            _ => false,
+        }
+    }
+
+    fn collect_unreferenced_detached_subtrees(&mut self) {
+        let removable = self
+            .detached_roots
+            .iter()
+            .copied()
+            .filter(|id| !self.subtree_has_fid_reference(*id))
+            .collect::<Vec<_>>();
+        for id in removable {
+            self.detached_roots.remove(&id);
+            self.remove_node_recursive(id);
+        }
     }
 
     fn collect_stale_subtrees(
@@ -982,6 +1053,8 @@ impl State {
         let Some(node) = self.nodes.remove(&id) else {
             return;
         };
+        self.detached_roots.remove(&id);
+        self.fid_references.remove(&id);
         self.qid_index.remove(&node.qid_path);
         self.intakes.remove(&id);
         self.rename_relay_roots.remove(&id);

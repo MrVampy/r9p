@@ -1,7 +1,7 @@
 use crate::front::Front;
 use crate::model::{
-    created_child_path, open_allowed, Body, CreateRelayRequest, IntakeRequest, RequestContext,
-    ROOT_ID,
+    created_child_path, open_allowed, Body, CreateRelayRequest, IntakeRequest, PendingCreate,
+    RequestContext, ROOT_ID,
 };
 use crate::ReadTarget;
 use r9p::error::{Error, Result, EBADFID, EEXIST, ENOENT, ENOTDIR, EPERM};
@@ -279,6 +279,15 @@ impl FileTree for FrontTree {
         let request_id = state.next_request_id;
         state.next_request_id = state.next_request_id.saturating_add(1);
         state.create_relay_responses.insert(request_id, None);
+        state.create_targets.insert(
+            request_id,
+            PendingCreate {
+                parent: parent_id,
+                name: name_text.clone(),
+                generation: parent_generation,
+                prefix: create_prefix.clone(),
+            },
+        );
         state.create_pending.push_back(CreateRelayRequest {
             request_id,
             prefix: create_prefix.clone(),
@@ -292,14 +301,8 @@ impl FileTree for FrontTree {
 
         let state = self.front.lock()?;
         let (qtype, qid_version, qid_path) = self.front.wait_create_relay(state, request_id)?;
-        let mut state = self.front.lock()?;
-        let id = state.insert_created_relay_node(
-            parent_id,
-            &name_text,
-            Qid::new(qtype, qid_version, qid_path),
-            parent_generation,
-            create_prefix,
-        )?;
+        let state = self.front.lock()?;
+        let id = state.node_id_for_qid_path(qid_path)?;
         self.fids.insert(
             fid,
             FidBinding {

@@ -140,6 +140,14 @@ pub struct CreateRelayRequest {
     pub context: RequestContext,
 }
 
+#[derive(Clone)]
+pub(crate) struct PendingCreate {
+    pub(crate) parent: u64,
+    pub(crate) name: String,
+    pub(crate) generation: u64,
+    pub(crate) prefix: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RenameRelayRequest {
     pub request_id: u64,
@@ -257,6 +265,7 @@ pub(crate) struct State {
     pub(crate) intakes: BTreeMap<u64, Intake>,
     pub(crate) pending: VecDeque<IntakeRequest>,
     pub(crate) create_pending: VecDeque<CreateRelayRequest>,
+    pub(crate) create_targets: BTreeMap<u64, PendingCreate>,
     pub(crate) rename_pending: VecDeque<RenameRelayRequest>,
     pub(crate) rpc_responses: BTreeMap<u64, Option<RequestReply>>,
     pub(crate) response_prefixes: BTreeMap<u64, String>,
@@ -338,6 +347,7 @@ impl State {
             intakes: BTreeMap::new(),
             pending: VecDeque::new(),
             create_pending: VecDeque::new(),
+            create_targets: BTreeMap::new(),
             rename_pending: VecDeque::new(),
             rpc_responses: BTreeMap::new(),
             response_prefixes: BTreeMap::new(),

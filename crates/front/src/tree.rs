@@ -1,7 +1,7 @@
 use crate::front::Front;
 use crate::model::{
     created_child_path, open_allowed, Body, CreateRelayRequest, IntakeRequest, PendingCreate,
-    RequestContext, ROOT_ID,
+    RequestContext, State, ROOT_ID,
 };
 use crate::ReadTarget;
 use r9p::error::{Error, Result, EBADFID, EEXIST, ENOENT, ENOTDIR, EPERM};
@@ -61,6 +61,26 @@ struct FidBinding {
     uname: Vec<u8>,
     aname: Vec<u8>,
     principal_id: String,
+}
+
+fn bind_fid(
+    state: &mut State,
+    fids: &mut BTreeMap<Fid, FidBinding>,
+    fid: Fid,
+    binding: FidBinding,
+) -> Result<()> {
+    state.retain_fid_node(binding.node)?;
+    if let Some(previous) = fids.insert(fid, binding) {
+        state.release_fid_node(previous.node)?;
+    }
+    Ok(())
+}
+
+fn unbind_fid(state: &mut State, fids: &mut BTreeMap<Fid, FidBinding>, fid: Fid) -> Result<()> {
+    if let Some(binding) = fids.remove(&fid) {
+        state.release_fid_node(binding.node)?;
+    }
+    Ok(())
 }
 
 struct RpcBuffer {
@@ -132,7 +152,7 @@ impl FileTree for FrontTree {
     }
 
     fn attach(&mut self, fid: Fid, uname: &[u8], aname: &[u8]) -> Result<Qid> {
-        let state = self.front.lock()?;
+        let mut state = self.front.lock()?;
         let root = state.attach_root_for(uname, aname)?;
         let principal_id = state
             .principal_roots
@@ -140,7 +160,9 @@ impl FileTree for FrontTree {
             .map(|root| root.principal_id.clone())
             .unwrap_or_else(|| String::from_utf8_lossy(uname).into_owned());
         let qid = state.qid_for(root)?;
-        self.fids.insert(
+        bind_fid(
+            &mut state,
+            &mut self.fids,
             fid,
             FidBinding {
                 node: root,
@@ -150,7 +172,7 @@ impl FileTree for FrontTree {
                 aname: aname.to_vec(),
                 principal_id,
             },
-        );
+        )?;
         Ok(qid)
     }
 
@@ -202,13 +224,16 @@ impl FileTree for FrontTree {
             }
         }
         if qids.len() == names.len() {
-            self.fids.insert(
+            let mut state = self.front.lock()?;
+            bind_fid(
+                &mut state,
+                &mut self.fids,
                 newfid,
                 FidBinding {
                     node: current,
                     ..binding
                 },
-            );
+            )?;
         }
         Ok(qids)
     }
@@ -301,15 +326,17 @@ impl FileTree for FrontTree {
 
         let state = self.front.lock()?;
         let (qtype, qid_version, qid_path) = self.front.wait_create_relay(state, request_id)?;
-        let state = self.front.lock()?;
+        let mut state = self.front.lock()?;
         let id = state.node_id_for_qid_path(qid_path)?;
-        self.fids.insert(
+        bind_fid(
+            &mut state,
+            &mut self.fids,
             fid,
             FidBinding {
                 node: id,
                 ..binding
             },
-        );
+        )?;
         self.open_modes.insert(fid, mode);
         Ok(OpenFile {
             qid: Qid::new(qtype, qid_version, qid_path),
@@ -474,14 +501,13 @@ impl FileTree for FrontTree {
             .remove(&fid)
             .map(|buffer| self.commit_write_relay(buffer))
             .unwrap_or(Ok(()));
-        self.fids.remove(&fid);
+        let mut state = self.front.lock()?;
+        unbind_fid(&mut state, &mut self.fids, fid)?;
         self.open_modes.remove(&fid);
         self.rpc_buffers.remove(&fid);
         if let Some(snapshot) = self.directory_relay_snapshots.remove(&fid) {
             if let Some(request_id) = snapshot.inflight {
-                if let Ok(mut state) = self.front.lock() {
-                    state.remove_response_request(request_id);
-                }
+                state.remove_response_request(request_id);
             }
         }
         let response_request = self
@@ -489,11 +515,9 @@ impl FileTree for FrontTree {
             .remove(&fid)
             .or_else(|| self.snapshot_relay_inflight.remove(&fid));
         if let Some(request_id) = response_request {
-            if let Ok(mut state) = self.front.lock() {
-                state.remove_response_request(request_id);
-                drop(state);
-                self.front.shared.1.notify_all();
-            }
+            state.remove_response_request(request_id);
+            drop(state);
+            self.front.shared.1.notify_all();
         }
         write_relay_result
     }
@@ -545,7 +569,7 @@ impl FileTree for FrontTree {
         self.front.wait_remove_relay(state, request_id)?;
         let mut state = self.front.lock()?;
         state.remove_subtree_if_exists(&front_path)?;
-        self.fids.remove(&fid);
+        unbind_fid(&mut state, &mut self.fids, fid)?;
         self.open_modes.remove(&fid);
         self.rpc_buffers.remove(&fid);
         self.write_relay_buffers.remove(&fid);
@@ -920,18 +944,10 @@ impl FrontTree {
 
 impl Drop for FrontTree {
     fn drop(&mut self) {
-        if self.rpc_inflight.is_empty()
-            && self.snapshot_relay_inflight.is_empty()
-            && self
-                .directory_relay_snapshots
-                .values()
-                .all(|snapshot| snapshot.inflight.is_none())
-        {
-            self.rpc_buffers.clear();
-            self.write_relay_buffers.clear();
-            return;
-        }
         if let Ok(mut state) = self.front.lock() {
+            for binding in std::mem::take(&mut self.fids).into_values() {
+                let _ = state.release_fid_node(binding.node);
+            }
             for (_, request_id) in std::mem::take(&mut self.rpc_inflight) {
                 state.remove_response_request(request_id);
             }

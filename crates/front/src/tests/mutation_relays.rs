@@ -463,6 +463,49 @@ fn remove_relay_deletes_projection_after_owner_accepts() -> Result<()> {
 }
 
 #[test]
+fn open_fid_survives_removal_until_clunk() -> Result<()> {
+    let front = Front::new();
+    front.set("requests/proof/wait", b"cancelled")?;
+    front.register_remove_relay("requests/proof")?;
+    front.set_wait_timeout(Duration::from_secs(5))?;
+
+    let mut reader = front.tree();
+    reader.attach(1, b"alice", b"/")?;
+    let wait_qids = walk_to(&mut reader, 1, 2, &["requests", "proof", "wait"]);
+    let wait_qid = wait_qids[2];
+    reader.open(2, wait_qid, OREAD)?;
+
+    let remover_front = front.clone();
+    let remover = thread::spawn(move || {
+        let mut tree = remover_front.tree();
+        tree.attach(1, b"alice", b"/")?;
+        let qids = walk_to(&mut tree, 1, 2, &["requests", "proof"]);
+        tree.remove(2, qids[1])
+    });
+    let request = front
+        .next_request(Duration::from_millis(200))?
+        .expect("remove relay request");
+    front.complete_remove("requests/proof", request.request_id)?;
+    remover.join().expect("remover join")?;
+
+    let mut verifier = front.tree();
+    verifier.attach(1, b"alice", b"/")?;
+    assert_eq!(
+        walk_to(&mut verifier, 1, 2, &["requests", "proof"]).len(),
+        1
+    );
+    assert_eq!(
+        reader.read(2, wait_qid, 0, 4096)?,
+        ReadData::Bytes(b"cancelled".to_vec())
+    );
+    assert_eq!(reader.stat(wait_qid)?.name, b"wait".to_vec());
+
+    reader.clunk(2, wait_qid)?;
+    assert!(reader.stat(wait_qid).is_err());
+    Ok(())
+}
+
+#[test]
 fn remove_relay_can_return_owner_denial() -> Result<()> {
     let front = Front::new();
     front.set("trades/hyperliquid/demo/protected/state", b"open")?;

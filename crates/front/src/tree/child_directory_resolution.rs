@@ -14,6 +14,9 @@ impl FrontTree {
     ) -> Result<Option<u64>> {
         let key = (parent, name.to_vec());
         let mut state = self.front.lock()?;
+        if state.node_is_detached(parent) {
+            return Err(Error::from_static(ENOENT));
+        }
         let resolver = match &state.node(parent)?.body {
             Body::Dir(directory) => match directory.children.get(name).copied() {
                 Some(child) => return Ok(Some(child)),
@@ -82,6 +85,10 @@ impl FrontTree {
         }
 
         loop {
+            if state.node_is_detached(parent) {
+                state.finish_child_directory_waiter(&key);
+                return Err(Error::from_static(ENOENT));
+            }
             let child = match state.nodes.get(&parent).map(|node| &node.body) {
                 Some(Body::Dir(directory)) => directory.children.get(name).copied(),
                 Some(_) => {

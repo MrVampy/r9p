@@ -152,6 +152,80 @@ fn create_relay_returns_backend_qid_and_rebinds_fid_for_write() -> Result<()> {
 }
 
 #[test]
+fn accepted_directory_create_publishes_children_before_returning() -> Result<()> {
+    let front = Front::new();
+    front.register_create_relay("requests")?;
+    front.set_wait_timeout(Duration::from_secs(5))?;
+    let creator_front = front.clone();
+    let (done_tx, done_rx) = mpsc::channel();
+    let creator = thread::spawn(move || {
+        let mut tree = creator_front.tree();
+        tree.attach(1, b"alice", b"/")?;
+        let qids = walk_to(&mut tree, 1, 2, &["requests"]);
+        let opened = tree.create(2, qids[0], b"job", DMDIR | 0o755, OREAD)?;
+        tree.clunk(2, opened.qid)?;
+        let qids = walk_to(&mut tree, 1, 3, &["requests", "job", "status"]);
+        let status = tree.read(3, qids[2], 0, 4096)?;
+        done_tx.send(status).expect("send status");
+        Ok::<(), Error>(())
+    });
+
+    let create = front.next_create_request_for_prefix_blocking("requests")?;
+    front.complete_create_with("requests", create.request_id, QTDIR, 1, 42_100, |front| {
+        front.set("requests/job/status", b"accepted")
+    })?;
+    assert_eq!(
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("created directory status"),
+        ReadData::Bytes(b"accepted".to_vec())
+    );
+    creator.join().expect("creator join")?;
+    Ok(())
+}
+
+#[test]
+fn failed_directory_publication_rejects_create_and_removes_the_subtree() -> Result<()> {
+    let front = Front::new();
+    front.register_create_relay("requests")?;
+    front.set_wait_timeout(Duration::from_secs(5))?;
+    let creator_front = front.clone();
+    let (done_tx, done_rx) = mpsc::channel();
+    let creator = thread::spawn(move || {
+        let mut tree = creator_front.tree();
+        tree.attach(1, b"alice", b"/")?;
+        let qids = walk_to(&mut tree, 1, 2, &["requests"]);
+        done_tx
+            .send(tree.create(2, qids[0], b"job", DMDIR | 0o755, OREAD))
+            .expect("send create result");
+        Ok::<(), Error>(())
+    });
+
+    let create = front.next_create_request_for_prefix_blocking("requests")?;
+    let error = front
+        .complete_create_with("requests", create.request_id, QTDIR, 1, 42_101, |front| {
+            front.set("requests/job/status", b"partial")?;
+            Err(Error::from_static("publication failed"))
+        })
+        .expect_err("publication failure");
+    assert_eq!(error.to_string(), "publication failed");
+    assert_eq!(
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("create result")
+            .expect_err("rejected create")
+            .to_string(),
+        "publication failed"
+    );
+    creator.join().expect("creator join")?;
+
+    let mut verifier = front.tree();
+    verifier.attach(1, b"alice", b"/")?;
+    assert_eq!(walk_to(&mut verifier, 1, 2, &["requests", "job"]).len(), 1);
+    Ok(())
+}
+
+#[test]
 fn create_relay_projects_slash_names_as_nested_paths() -> Result<()> {
     let front = Front::new();
     front.register_create_relay("srv")?;

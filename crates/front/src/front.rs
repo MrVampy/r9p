@@ -1,12 +1,13 @@
 use crate::model::{
-    canonical_root_path, normalise_request_prefix, Body, ChildDirectoryRemoval, CreateRelayReply,
-    CreateRelayRequest, Intake, IntakeRequest, LogBody, PrincipalRoot, ProtocolConfig,
-    PushedDirectoryMetadata, PushedFileMetadata, RemoveRelayReply, RequestReply, State,
-    WriteRelayReply, WstatRelayReply,
+    canonical_root_path, created_child_path, normalise_request_prefix, Body, ChildDirectoryRemoval,
+    CreateRelayReply, CreateRelayRequest, Intake, IntakeRequest, LogBody, PrincipalRoot,
+    ProtocolConfig, PushedDirectoryMetadata, PushedFileMetadata, RemoveRelayReply, RequestReply,
+    State, WriteRelayReply, WstatRelayReply, ROOT_ID,
 };
 use crate::tree::FrontTree;
 use r9p::codec::{MAX_MSIZE, MIN_MSIZE};
 use r9p::error::{Error, Result, ENOENT, ENOTDIR, EPERM};
+use r9p::qid::Qid;
 use r9p::server::ReadData;
 use r9p::stat::Stat;
 use std::collections::BTreeSet;
@@ -631,18 +632,87 @@ impl Front {
         qid_version: u32,
         qid_path: u64,
     ) -> Result<()> {
-        self.complete_create_result(
-            prefix,
-            request_id,
-            CreateRelayReply::Accepted {
-                qtype,
-                qid_version,
-                qid_path,
-            },
-        )
+        self.complete_create_with(prefix, request_id, qtype, qid_version, qid_path, |_| Ok(()))
+    }
+
+    /// Publishes only the accepted node's subtree before the create reply is visible.
+    /// The publication step must be bounded and must not mutate paths outside that subtree.
+    pub fn complete_create_with<F>(
+        &self,
+        prefix: &str,
+        request_id: u64,
+        qtype: u8,
+        qid_version: u32,
+        qid_path: u64,
+        publish: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(&Front) -> Result<()>,
+    {
+        let prefix = normalise_request_prefix(prefix)?;
+        let target = {
+            let mut state = self.lock()?;
+            if !state.write_relay_prefixes.contains(&prefix)
+                || !matches!(state.create_relay_responses.get(&request_id), Some(None))
+            {
+                return Err(Error::from_static(ENOENT));
+            }
+            let target = state
+                .create_targets
+                .get(&request_id)
+                .cloned()
+                .ok_or_else(|| Error::from_static(ENOENT))?;
+            if target.prefix != prefix {
+                return Err(Error::from_static(ENOENT));
+            }
+            state.insert_created_relay_node(
+                target.parent,
+                &target.name,
+                Qid::new(qtype, qid_version, qid_path),
+                target.generation,
+                target.prefix.clone(),
+            )?;
+            target
+        };
+        if let Err(error) = publish(self) {
+            let mut state = self.lock()?;
+            let target_path =
+                state.path_relative_to(state.node_id_for_qid_path(qid_path)?, ROOT_ID)?;
+            state.remove_subtree_if_exists(&target_path)?;
+            state.create_targets.remove(&request_id);
+            if let Some(slot) = state.create_relay_responses.get_mut(&request_id) {
+                *slot = Some(CreateRelayReply::Rejected(error.to_string()));
+            }
+            drop(state);
+            self.shared.1.notify_all();
+            return Err(error);
+        }
+        let mut state = self.lock()?;
+        state.create_targets.remove(&request_id);
+        match state.create_relay_responses.get_mut(&request_id) {
+            Some(slot @ None) => {
+                *slot = Some(CreateRelayReply::Accepted {
+                    qtype,
+                    qid_version,
+                    qid_path,
+                });
+                drop(state);
+                self.shared.1.notify_all();
+                Ok(())
+            }
+            _ => {
+                let target_path = created_child_path(
+                    &state.path_relative_to(target.parent, ROOT_ID)?,
+                    &target.name,
+                );
+                state.remove_subtree_if_exists(&target_path)?;
+                Err(Error::from_static(ENOENT))
+            }
+        }
     }
 
     pub fn reject_create(&self, prefix: &str, request_id: u64, message: &str) -> Result<()> {
+        self.lock()?.create_targets.remove(&request_id);
         self.complete_create_result(
             prefix,
             request_id,
@@ -978,6 +1048,7 @@ impl Front {
             let now = Instant::now();
             if now >= deadline {
                 state.create_relay_responses.remove(&request_id);
+                state.create_targets.remove(&request_id);
                 state
                     .create_pending
                     .retain(|request| request.request_id != request_id);

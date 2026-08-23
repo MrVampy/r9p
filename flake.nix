@@ -77,6 +77,9 @@
             pname = "r9p";
             version = "0.1.0";
             src = rustSource;
+            requiredSystemFeatures = pkgs.lib.optionals (
+              pkgs.stdenv.hostPlatform.system == "x86_64-linux"
+            ) [ "cloud-burst" ];
             cargoLock.lockFile = ./Cargo.lock;
             nativeBuildInputs = with pkgs; [
               clang

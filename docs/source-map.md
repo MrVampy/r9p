@@ -141,6 +141,12 @@ This map defines the local sources agents should inspect before making source-sp
 - `crates/cli/tests/cli_stream.rs`
   - End-to-end full-duplex byte transparency, including control, carriage
     return, non-UTF-8, and multi-frame input.
+- `skills/r9p/SKILL.md`
+  - Canonical agent-facing method for operating admitted namespaces through
+    the installed CLI and live service contracts.
+- `flake.nix`
+  - Pure native-skill descriptor and filtered Rust package source that keeps a
+    skill-only change outside the client package derivation.
 - `crates/fuse/src/`
   - Canonical Linux FUSE bridge over the `r9p` client primitives, exposed as
     `r9p mount`.

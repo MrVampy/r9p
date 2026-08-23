@@ -405,7 +405,8 @@ mod tests {
 
     #[test]
     fn receiver_wake_releases_an_event_wait_without_polling() {
-        let receiver = FeedEventBus::default().subscribe();
+        let bus = FeedEventBus::default();
+        let receiver = bus.subscribe();
         let wake = receiver.wake_handle();
         let stopped = Arc::new(AtomicBool::new(false));
         let waiter_stop = Arc::clone(&stopped);

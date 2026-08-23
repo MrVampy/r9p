@@ -62,6 +62,7 @@ impl FrontTree {
                 count: u32::try_from(oldname.len()).map_err(|_| Error::from_static(EPERM))?,
                 open_mode: 0,
                 pushed_generation: old_parent_generation,
+                front_qid_path: Some(state.qid_for(old_binding.node)?.path),
             },
         );
         let new_parent = request_context(
@@ -74,6 +75,7 @@ impl FrontTree {
                 count: u32::try_from(newname.len()).map_err(|_| Error::from_static(EPERM))?,
                 open_mode: 0,
                 pushed_generation: new_parent_generation,
+                front_qid_path: Some(state.qid_for(new_binding.node)?.path),
             },
         );
         let request_id = state.next_request_id;

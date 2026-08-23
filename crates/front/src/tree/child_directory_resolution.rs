@@ -51,6 +51,7 @@ impl FrontTree {
                     count: 0,
                     open_mode: 0,
                     pushed_generation: state.node(parent)?.generation,
+                    front_qid_path: None,
                 },
             );
             let request_id = state.next_request_id;

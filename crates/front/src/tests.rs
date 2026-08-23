@@ -25,7 +25,6 @@ fn test_intake_request(request_id: u64, prefix: &str, bytes: &[u8]) -> IntakeReq
             count: bytes.len() as u32,
             open_mode: OWRITE,
             pushed_generation: 0,
-            front_qid_path: Some(1),
         },
     }
 }
@@ -98,6 +97,7 @@ fn pushed_file_uses_owner_qid_and_version() -> Result<()> {
             wake_token: "wake:status".to_string(),
         },
     )?;
+    assert_eq!(front.qid_path("market/status")?, 9001);
     let mut tree = front.tree();
     tree.attach(1, b"claude", b"/")?;
     let qids = walk_to(&mut tree, 1, 2, &["market", "status"]);
@@ -110,42 +110,6 @@ fn pushed_file_uses_owner_qid_and_version() -> Result<()> {
     assert_eq!(stat.length, 12);
     let data = tree.read(2, qids[1], 0, 4096)?;
     assert_eq!(data, ReadData::Bytes(b"second".to_vec()));
-    Ok(())
-}
-
-#[test]
-fn pushed_write_request_carries_the_front_owned_qid_path() -> Result<()> {
-    let front = Front::new();
-    front.set_pushed_file(
-        "control",
-        b"ready",
-        PushedFileMetadata {
-            qid_path: 9001,
-            qid_version: 44,
-            generation: 100,
-            mtime: 1_700_000_000,
-            length: 5,
-            visibility_class: "runtime-reader".to_string(),
-            freshness_ref: "freshness:control".to_string(),
-            wake_token: "wake:control".to_string(),
-        },
-    )?;
-    front.register_write_relay("control")?;
-    let worker_front = front.clone();
-    let worker = thread::spawn(move || -> Result<Option<u64>> {
-        let request = worker_front.next_request_for_prefix_blocking("control")?;
-        let qid_path = request.context.front_qid_path;
-        worker_front.complete_write("control", request.request_id, request.context.count)?;
-        Ok(qid_path)
-    });
-
-    let mut tree = front.tree();
-    tree.attach(1, b"operator", b"/")?;
-    let qids = walk_to(&mut tree, 1, 2, &["control"]);
-    tree.open(2, qids[0], OWRITE)?;
-    tree.write(2, qids[0], 0, b"updated")?;
-    tree.clunk(2, qids[0])?;
-    assert_eq!(worker.join().expect("worker")?, Some(9001));
     Ok(())
 }
 

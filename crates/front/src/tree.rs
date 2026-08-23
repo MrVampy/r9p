@@ -100,6 +100,7 @@ struct RequestDetails {
     count: u32,
     open_mode: u8,
     pushed_generation: u64,
+    front_qid_path: Option<u64>,
 }
 
 struct DirectoryRelaySnapshot {
@@ -141,6 +142,7 @@ fn request_context(
         count: details.count,
         open_mode: details.open_mode,
         pushed_generation: details.pushed_generation,
+        front_qid_path: details.front_qid_path,
     }
 }
 
@@ -299,6 +301,7 @@ impl FileTree for FrontTree {
                 count: 0,
                 open_mode: mode,
                 pushed_generation: parent_generation,
+                front_qid_path: None,
             },
         );
         let request_id = state.next_request_id;
@@ -385,6 +388,7 @@ impl FileTree for FrontTree {
                 count: u32::try_from(data.len()).map_err(|_| Error::from_static(EPERM))?,
                 open_mode,
                 pushed_generation,
+                front_qid_path: Some(state.qid_for(id)?.path),
             },
         );
         if let Body::Rpc(prefix) = &state.node(id)?.body {
@@ -551,6 +555,7 @@ impl FileTree for FrontTree {
                 count: 0,
                 open_mode: 0,
                 pushed_generation,
+                front_qid_path: Some(state.qid_for(id)?.path),
             },
         );
         let request_id = state.next_request_id;
@@ -610,6 +615,7 @@ impl FileTree for FrontTree {
                 count: u32::try_from(stat_bytes.len()).map_err(|_| Error::from_static(EPERM))?,
                 open_mode,
                 pushed_generation,
+                front_qid_path: Some(state.qid_for(id)?.path),
             },
         );
         let request_id = state.next_request_id;
@@ -734,6 +740,7 @@ impl FrontTree {
                     count,
                     open_mode,
                     pushed_generation,
+                    front_qid_path: Some(state.qid_for(id)?.path),
                 },
             );
             let request_id = state.next_request_id;
@@ -800,6 +807,7 @@ impl FrontTree {
                     count,
                     open_mode,
                     pushed_generation,
+                    front_qid_path: Some(state.qid_for(id)?.path),
                 },
             );
             let request_id = state.next_request_id;
@@ -838,6 +846,7 @@ impl FrontTree {
                     count,
                     open_mode,
                     pushed_generation,
+                    front_qid_path: Some(state.qid_for(id)?.path),
                 },
             );
             let request_id = state.next_request_id;

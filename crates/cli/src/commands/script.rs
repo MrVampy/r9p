@@ -128,6 +128,21 @@ fn run_script_line(
                 hex_encode(&data)
             );
         }
+        ["read-once-hex", path, offset, count] => {
+            let offset = parse_offset(offset)?;
+            let count = parse_count(count)?;
+            let count = u32::try_from(count).map_err(|_| cli_error("read count overflow"))?;
+            let fid = walk_open(client, path, OREAD)?;
+            let result = client.read(fid, offset, count);
+            let clunk = client.clunk(fid);
+            let data = result?;
+            clunk?;
+            println!(
+                "ok\t{line_number}\tread-once-hex\t{}\t{}",
+                data.len(),
+                hex_encode(&data)
+            );
+        }
         ["fresh-stat-error", path] => {
             fresh_stat_error(target, path, line_number)?;
         }

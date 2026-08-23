@@ -637,6 +637,27 @@ fn machine_script_runs_multiple_operations_on_one_session() -> TestResult<()> {
 }
 
 #[test]
+fn machine_script_single_read_returns_the_available_batch() -> TestResult<()> {
+    let script_path = temp_path("script-single-read");
+    fs::write(
+        &script_path,
+        "read-once-hex\t/data\t0\t262144\n",
+    )?;
+    let script_arg = script_path.to_string_lossy().into_owned();
+    let shared = SharedFile::new(b"batch".to_vec());
+    let (address, handle) = start_server(shared.clone())?;
+
+    let output = run_machine(&address, &["script", &script_arg], None)?;
+    let _ = fs::remove_file(&script_path);
+    assert_success(&output)?;
+    assert_stdout(&output, "ok\t1\tread-once-hex\t5\t6261746368\n")?;
+    if shared.read_count() != 1 {
+        return Err(test_error("single-read script issued more than one Tread"));
+    }
+    join_server(handle)
+}
+
+#[test]
 fn machine_script_create_write_from_keeps_created_fid_open_for_initial_write() -> TestResult<()> {
     let input_path = temp_path("script-create-write-input");
     let script_path = temp_path("script-create-write");

@@ -8,6 +8,27 @@
 
   outputs = { self, nixpkgs, flake-utils }:
     {
+      lib = {
+        skills.r9p = builtins.path {
+          path = ./skills/r9p;
+          name = "r9p-skill";
+        };
+        nativeSkills.r9p =
+          let
+            source = self.lib.skills.r9p;
+          in
+          {
+            owner = "r9p";
+            canonicalName = "r9p";
+            inherit source;
+            installedNames = {
+              codex = "r9p";
+              claude = "r9p";
+            };
+            requiredNamespacePaths = [ ];
+          };
+      };
+
       nixosModules.session-auth =
         { pkgs, ... }@moduleArgs:
         import ./nix/session-auth.nix (moduleArgs // {
@@ -19,6 +40,15 @@
         let
           pkgs = import nixpkgs {
             inherit system;
+          };
+          rustSource = nixpkgs.lib.fileset.toSource {
+            root = ./.;
+            fileset = nixpkgs.lib.fileset.unions [
+              ./.cargo
+              ./Cargo.lock
+              ./Cargo.toml
+              ./crates
+            ];
           };
           sessionAuthModuleEval = nixpkgs.lib.nixosSystem {
             inherit system;
@@ -46,7 +76,7 @@
           r9p = pkgs.rustPlatform.buildRustPackage {
             pname = "r9p";
             version = "0.1.0";
-            src = self;
+            src = rustSource;
             cargoLock.lockFile = ./Cargo.lock;
             nativeBuildInputs = with pkgs; [
               clang
@@ -65,7 +95,7 @@
           front = pkgs.rustPlatform.buildRustPackage {
             pname = "r9p-front";
             version = "0.1.0-abi23";
-            src = self;
+            src = rustSource;
             cargoLock.lockFile = ./Cargo.lock;
             cargoBuildFlags = [ "-p" "front" ];
             doCheck = false;
@@ -92,7 +122,7 @@
           beamPort = pkgs.rustPlatform.buildRustPackage {
             pname = "r9p-beam-port";
             version = "0.1.0";
-            src = self;
+            src = rustSource;
             cargoLock.lockFile = ./Cargo.lock;
             cargoBuildFlags = [ "-p" "beam-port" ];
             doCheck = false;
@@ -123,7 +153,7 @@
           frontTests = pkgs.rustPlatform.buildRustPackage {
             pname = "r9p-front-tests";
             version = "0.1.0";
-            src = self;
+            src = rustSource;
             cargoLock.lockFile = ./Cargo.lock;
             cargoBuildFlags = [ "-p" "front" "-p" "beam-port" ];
             cargoTestFlags = [ "-p" "front" "-p" "beam-port" ];
@@ -152,7 +182,7 @@
           packages.front-tests = frontTests;
           packages.r9p = r9p;
 
-          checks = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          checks = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
             r9p = r9p;
             beam-front = frontTests;
             fuse-runtime-helper = pkgs.runCommandLocal "r9p-fuse-runtime-helper-check" { } ''
@@ -236,6 +266,17 @@
                   */bin/r9p\ auth-keygen\ --private\ /var/lib/r9p-session-auth/proof.key\ --public\ /var/lib/r9p-session-auth/proof.key.pub\ --private-access\ owner-only) ;;
                   *) exit 1 ;;
                 esac
+                touch "$out"
+              '';
+            native-skill =
+              assert self.lib.nativeSkills.r9p.owner == "r9p";
+              assert self.lib.nativeSkills.r9p.canonicalName == "r9p";
+              assert self.lib.nativeSkills.r9p.source == self.lib.skills.r9p;
+              pkgs.runCommandLocal "r9p-native-skill-check" { } ''
+                test -f ${self.lib.nativeSkills.r9p.source}/SKILL.md
+                grep -F 'name: r9p' ${self.lib.nativeSkills.r9p.source}/SKILL.md >/dev/null
+                test ! -e ${r9p.src}/skills
+                test ! -e ${r9p.src}/docs
                 touch "$out"
               '';
           };

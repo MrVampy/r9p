@@ -124,6 +124,9 @@ This map defines the local sources agents should inspect before making source-sp
     bound regressions.
 - `crates/cli/src/`
   - The `r9p` binary and one-shot client command dispatch.
+  - Machine scripts distinguish range-filling `read-hex` from one-request
+    `read-once-hex` for blocking append streams that return one available
+    event batch per `Tread`.
   - `r9p con` retains two fids on one multiplexed 9P connection so stdin and
     stdout remain one logical application session.
   - `r9p con --resume` uses the same two lanes across renewed attachments only

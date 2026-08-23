@@ -73,6 +73,12 @@ impl Front {
         Ok(())
     }
 
+    pub fn qid_path(&self, path: &str) -> Result<u64> {
+        let state = self.lock()?;
+        let id = state.lookup_path(path)?;
+        Ok(state.qid_for(id)?.path)
+    }
+
     pub fn remove_subtree_if_exists(&self, path: &str) -> Result<()> {
         self.lock()?.remove_subtree_if_exists(path)?;
         self.shared.1.notify_all();

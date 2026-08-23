@@ -171,7 +171,6 @@ pub struct RequestContext {
     pub count: u32,
     pub open_mode: u8,
     pub pushed_generation: u64,
-    pub front_qid_path: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

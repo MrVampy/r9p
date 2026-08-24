@@ -120,6 +120,43 @@ fn read_relay_dispatches_each_range_and_consumes_its_response() -> Result<()> {
 }
 
 #[test]
+fn read_relay_metadata_reports_the_exact_projected_file() -> Result<()> {
+    let front = Front::new();
+    front.register_read_relay_with_metadata(
+        "library/movie/content",
+        PushedFileMetadata {
+            qid_path: 700,
+            qid_version: 9,
+            generation: 11,
+            mtime: 1_787_500_000,
+            length: 737_934_010,
+            visibility_class: "library".to_string(),
+            freshness_ref: "sha256:artifact".to_string(),
+            wake_token: "artifact-11".to_string(),
+        },
+    )?;
+    let mut tree = front.tree();
+    tree.attach(1, b"codex", b"/")?;
+    let qids = walk_to(&mut tree, 1, 2, &["library", "movie", "content"]);
+    let qid = *qids.last().expect("read relay qid");
+    let stat = tree.stat(qid)?;
+    assert_eq!(stat.qid.path, 700);
+    assert_eq!(stat.qid.version, 9);
+    assert_eq!(stat.mtime, 1_787_500_000);
+    assert_eq!(stat.length, 737_934_010);
+    tree.open(2, qid, OREAD)?;
+    let ReadTarget::Response(request_id, _, _) = tree.read_target_at(2, 0, 16)? else {
+        panic!("read relay request")
+    };
+    let request = front
+        .next_request(Duration::from_millis(200))?
+        .expect("read relay request");
+    assert_eq!(request.request_id, request_id);
+    assert_eq!(request.context.pushed_generation, 11);
+    Ok(())
+}
+
+#[test]
 fn read_relay_rejection_becomes_the_read_error() -> Result<()> {
     let front = Front::new();
     front.register_read_relay("archive/trade/record")?;

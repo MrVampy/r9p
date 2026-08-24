@@ -180,6 +180,31 @@ impl Front {
         Ok(())
     }
 
+    pub fn register_read_relay_with_metadata(
+        &self,
+        path: &str,
+        metadata: PushedFileMetadata,
+    ) -> Result<()> {
+        let mut state = self.lock()?;
+        let trimmed = normalise_request_prefix(path)?;
+        let id = match state.lookup_optional_path(&trimmed)? {
+            Some(id) => {
+                if !matches!(state.node(id)?.body, Body::ReadRelay(_)) {
+                    return Err(Error::from_static(EPERM));
+                }
+                if let Some(node) = state.nodes.get_mut(&id) {
+                    node.body = Body::ReadRelay(trimmed.clone());
+                }
+                id
+            }
+            None => state.place(&trimmed, Body::ReadRelay(trimmed.clone()))?,
+        };
+        state.apply_pushed_metadata(id, &metadata)?;
+        drop(state);
+        self.shared.1.notify_all();
+        Ok(())
+    }
+
     pub fn register_snapshot_read_relay(&self, path: &str) -> Result<()> {
         let mut state = self.lock()?;
         let trimmed = normalise_request_prefix(path)?;

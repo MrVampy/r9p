@@ -4,15 +4,23 @@
     decode_hex/1,
     encode_hex/1,
     front_request/3,
-    request/3
+    request/4
 ]).
 
 -define(CLIENT_SERVER, r9p_beam_client_port_server).
+-define(BLOCKING_CLIENT_SERVER, r9p_beam_blocking_client_port_server).
 -define(FRONT_SERVER, r9p_beam_front_port_server).
 -define(LINE_LIMIT, 16777216).
 
-request(Executable, Line, TimeoutMs) ->
-    request_on(?CLIENT_SERVER, Executable, Line, TimeoutMs).
+request(Executable, Lane, Line, TimeoutMs) ->
+    case Lane of
+        <<"ordinary">> ->
+            request_on(?CLIENT_SERVER, Executable, Line, TimeoutMs);
+        <<"blocking">> ->
+            request_on(?BLOCKING_CLIENT_SERVER, Executable, Line, TimeoutMs);
+        _ ->
+            {error, <<"r9p_beam_port_invalid_client_lane">>}
+    end.
 
 front_request(Executable, Line, TimeoutMs) ->
     request_on(?FRONT_SERVER, Executable, Line, TimeoutMs).

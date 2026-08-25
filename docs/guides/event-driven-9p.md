@@ -238,6 +238,10 @@ The r9p layers preserve these boundaries:
   request intake can remain pending while independent service processes update
   projections or complete earlier requests against the same synchronized
   Front.
+- The BEAM namespace client exposes independent ordinary and blocking lanes.
+  Put retained blocking operations on the blocking lane so credential, status,
+  and completion RPCs keep an ordinary admitted connection with control
+  headroom.
 - Backends own event meaning, cursor encoding, history retention, and gap
   policy.
 

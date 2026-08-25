@@ -19,6 +19,15 @@ pub fn target_defaults_to_standard_msize_test() {
   |> should.equal(None)
 }
 
+pub fn adapter_can_reserve_a_blocking_client_lane_test() {
+  let adapter =
+    r9p.adapter("r9p-beam-port")
+    |> r9p.with_lane(r9p.Blocking)
+
+  adapter.lane
+  |> should.equal(r9p.Blocking)
+}
+
 pub fn target_can_select_session_auth_test() {
   let target =
     r9p.target("tcp!192.0.2.1!9564", "codex", "/")

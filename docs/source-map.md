@@ -205,6 +205,10 @@ This map defines the local sources agents should inspect before making source-sp
 - `crates/beam-port/src/lib.rs` and `bindings/gleam/`
   - BEAM target encoding and caller-local authority bindings for the same
     namespace client.
+  - The client adapter exposes ordinary and blocking lanes backed by
+    independent native ports and cached namespace sessions. A retained
+    blocking operation cannot deny ordinary credential, status, or completion
+    traffic headroom.
   - Tagged native-port multiplexing lets a blocking Front request intake
     remain pending while independent BEAM processes publish and complete work
     against the same Front.

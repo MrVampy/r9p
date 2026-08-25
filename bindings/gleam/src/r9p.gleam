@@ -13,8 +13,13 @@ pub const default_timeout_ms: Int = 5000
 
 pub const default_executable: String = "r9p-beam-port"
 
+pub type ClientLane {
+  Ordinary
+  Blocking
+}
+
 pub type Adapter {
-  Adapter(executable: String, timeout_ms: Int)
+  Adapter(executable: String, timeout_ms: Int, lane: ClientLane)
 }
 
 pub type Target {
@@ -37,7 +42,7 @@ pub type CreateInfo {
 }
 
 pub fn adapter(executable: String) -> Adapter {
-  Adapter(executable:, timeout_ms: default_timeout_ms)
+  Adapter(executable:, timeout_ms: default_timeout_ms, lane: Ordinary)
 }
 
 pub fn default_adapter() -> Adapter {
@@ -46,6 +51,10 @@ pub fn default_adapter() -> Adapter {
 
 pub fn with_timeout(adapter: Adapter, timeout_ms: Int) -> Adapter {
   Adapter(..adapter, timeout_ms:)
+}
+
+pub fn with_lane(adapter: Adapter, lane: ClientLane) -> Adapter {
+  Adapter(..adapter, lane:)
 }
 
 pub fn target(bind: String, uname: String, aname: String) -> Target {
@@ -65,7 +74,14 @@ pub fn target_with_msize(
   aname: String,
   msize: Int,
 ) -> Target {
-  Target(bind:, uname:, aname:, msize:, auth_config: None, expected_responder: None)
+  Target(
+    bind:,
+    uname:,
+    aname:,
+    msize:,
+    auth_config: None,
+    expected_responder: None,
+  )
 }
 
 pub fn with_auth_config(target: Target, path: String) -> Target {
@@ -76,7 +92,10 @@ pub fn expecting_responder(target: Target, responder: String) -> Target {
   Target(..target, expected_responder: Some(responder))
 }
 
-pub fn version(adapter: Adapter, target: Target) -> Result(VersionInfo, String) {
+pub fn version(
+  adapter: Adapter,
+  target: Target,
+) -> Result(VersionInfo, String) {
   use line <- result.try(run(adapter, target, "version", []))
   case codec.fields(line) {
     ["version", version_hex, raw_msize] -> {
@@ -88,7 +107,10 @@ pub fn version(adapter: Adapter, target: Target) -> Result(VersionInfo, String) 
   }
 }
 
-pub fn attach(adapter: Adapter, target: Target) -> Result(r9p_stat.Qid, String) {
+pub fn attach(
+  adapter: Adapter,
+  target: Target,
+) -> Result(r9p_stat.Qid, String) {
   use line <- result.try(run(adapter, target, "attach", []))
   parse_qid_line("attach", line)
 }
@@ -302,9 +324,17 @@ fn run(
 ) -> Result(String, String) {
   request_port(
     adapter.executable,
+    lane_name(adapter.lane),
     string.join(list.append([operation, ..target_fields(target)], fields), "\t"),
     adapter.timeout_ms,
   )
+}
+
+fn lane_name(lane: ClientLane) -> String {
+  case lane {
+    Ordinary -> "ordinary"
+    Blocking -> "blocking"
+  }
 }
 
 fn target_fields(target: Target) -> List(String) {
@@ -369,7 +399,10 @@ fn parse_rpc_line(line: String) -> Result(BitArray, String) {
   }
 }
 
-fn parse_qid_line(prefix: String, line: String) -> Result(r9p_stat.Qid, String) {
+fn parse_qid_line(
+  prefix: String,
+  line: String,
+) -> Result(r9p_stat.Qid, String) {
   case codec.fields(line) {
     [actual, raw_qtype, raw_version, raw_path] if actual == prefix -> {
       use qtype <- result.try(codec.parse_int("qid_qtype", raw_qtype))
@@ -388,6 +421,7 @@ fn text(value: String) -> String {
 @external(erlang, "r9p_beam_port_ffi", "request")
 fn request_port(
   executable: String,
+  lane: String,
   line: String,
   timeout_ms: Int,
 ) -> Result(String, String)

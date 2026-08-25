@@ -821,9 +821,6 @@ impl State {
         generation: u64,
         create_prefix: String,
     ) -> Result<u64> {
-        if self.qid_index.contains_key(&qid.path) {
-            return Err(Error::from_static("qid path already in use"));
-        }
         let segments = split_path(name)?;
         let (leaf, dirs) = segments
             .split_last()
@@ -836,8 +833,27 @@ impl State {
             Body::Dir(children) => children.get(leaf.as_slice()).copied(),
             _ => return Err(Error::from_static(ENOTDIR)),
         };
-        if existing.is_some() {
-            return Err(Error::from_static(EEXIST));
+        if let Some(id) = existing {
+            let node = self.node(id)?;
+            if node.qid_path != qid.path || self.qid_index.get(&qid.path) != Some(&id) {
+                return Err(Error::from_static("create relay existing node identity mismatch"));
+            }
+            let directory = qid.qtype & QTDIR != 0;
+            if directory != matches!(node.body, Body::Dir(_)) {
+                return Err(Error::from_static("create relay existing node kind mismatch"));
+            }
+            if let Some(node) = self.nodes.get_mut(&id) {
+                node.version = qid.version;
+                node.generation = generation;
+                if !directory {
+                    node.write_relay = Some(create_prefix.clone());
+                    node.body = Body::WriteRelay(create_prefix);
+                }
+            }
+            return Ok(id);
+        }
+        if self.qid_index.contains_key(&qid.path) {
+            return Err(Error::from_static("qid path already in use"));
         }
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);

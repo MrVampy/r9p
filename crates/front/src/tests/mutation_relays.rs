@@ -360,6 +360,93 @@ fn create_relay_delegates_existing_child_name_to_backend_policy() -> Result<()> 
 }
 
 #[test]
+fn accepted_create_reconciles_a_retained_node_with_the_same_qid() -> Result<()> {
+    let front = Front::new();
+    front.set_pushed_file(
+        "srv/agent",
+        b"retained descriptor",
+        PushedFileMetadata {
+            qid_path: 42_002,
+            qid_version: 17,
+            generation: 120,
+            mtime: 1_700_000_302,
+            length: 19,
+            visibility_class: "runtime-reader".to_string(),
+            freshness_ref: "freshness:srv/agent".to_string(),
+            wake_token: "wake:srv/agent".to_string(),
+        },
+    )?;
+    front.register_create_relay("srv")?;
+    front.set_wait_timeout(Duration::from_secs(5))?;
+
+    let mut retained = front.tree();
+    retained.attach(1, b"alice", b"/")?;
+    let retained_qids = walk_to(&mut retained, 1, 2, &["srv", "agent"]);
+    retained.open(2, retained_qids[1], OREAD)?;
+
+    let writer_front = front.clone();
+    let (done_tx, done_rx) = mpsc::channel();
+    let writer = thread::spawn(move || {
+        let mut tree = writer_front.tree();
+        tree.attach(1, b"agent", b"/")?;
+        let qids = walk_to(&mut tree, 1, 2, &["srv"]);
+        let opened = tree.create(2, qids[0], b"agent", 0o666, OWRITE)?;
+        let wrote = tree.write(2, opened.qid, 0, b"current descriptor")?;
+        tree.clunk(2, opened.qid)?;
+        done_tx
+            .send((opened.qid, wrote))
+            .expect("send writer result");
+        Ok::<(), Error>(())
+    });
+
+    let create = front.next_create_request_for_prefix_blocking("srv")?;
+    front.complete_create("srv", create.request_id, QTFILE, 18, 42_002)?;
+    assert_eq!(
+        retained
+            .read(2, retained_qids[1], 0, 4096)
+            .expect_err("retained bytes must not remain fresh during recreation")
+            .message(),
+        EPERM.as_bytes()
+    );
+
+    let write = front
+        .next_request_for_prefix("srv", Duration::from_secs(1))?
+        .expect("recreated service write request");
+    front.complete_write(
+        "srv",
+        write.request_id,
+        u32::try_from(write.bytes.len()).expect("request length"),
+    )?;
+    let (qid, wrote) = done_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("writer should finish");
+    assert_eq!(qid.path, 42_002);
+    assert_eq!(qid.version, 18);
+    assert_eq!(wrote as usize, b"current descriptor".len());
+    writer.join().expect("writer join")?;
+
+    front.set_pushed_file(
+        "srv/agent",
+        b"current descriptor",
+        PushedFileMetadata {
+            qid_path: 42_002,
+            qid_version: 19,
+            generation: 121,
+            mtime: 1_700_000_303,
+            length: 18,
+            visibility_class: "runtime-reader".to_string(),
+            freshness_ref: "freshness:srv/agent".to_string(),
+            wake_token: "wake:srv/agent".to_string(),
+        },
+    )?;
+    assert_eq!(
+        retained.read(2, retained_qids[1], 0, 4096)?,
+        ReadData::Bytes(b"current descriptor".to_vec())
+    );
+    Ok(())
+}
+
+#[test]
 fn write_relay_reports_unavailable_when_owner_is_absent() -> Result<()> {
     let front = Front::new();
     front.register_write_relay("control")?;

@@ -1,5 +1,5 @@
 use super::*;
-use r9p::error::{Error, Result};
+use r9p::error::{Error, Result, EPERM};
 use r9p::fid::Fid;
 use r9p::qid::{Qid, DMDIR, QTDIR, QTFILE};
 use r9p::server::{FileTree, ReadData};

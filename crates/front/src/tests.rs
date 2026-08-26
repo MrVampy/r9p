@@ -183,6 +183,29 @@ fn pushed_directory_uses_owner_qid_and_version() -> Result<()> {
 }
 
 #[test]
+fn automatic_nodes_do_not_steal_pushed_qid_paths() -> Result<()> {
+    let front = Front::new();
+    let metadata = PushedDirectoryMetadata {
+        qid_path: 5,
+        qid_version: 1,
+        generation: 1,
+        mtime: 1_700_000_000,
+        length: 0,
+        visibility_class: "runtime-reader".to_string(),
+        freshness_ref: "freshness:reserved".to_string(),
+        wake_token: "wake:reserved".to_string(),
+    };
+    front.set_pushed_directory("reserved", metadata.clone())?;
+    front.set("a/b/c", b"nested")?;
+    front.set("d", b"automatic")?;
+    front.set_pushed_directory("reserved", metadata)?;
+
+    assert_eq!(front.qid_path("reserved")?, 5);
+    assert_ne!(front.qid_path("d")?, 5);
+    Ok(())
+}
+
+#[test]
 fn pushed_directory_rejects_nonzero_logical_length_without_mutation() -> Result<()> {
     let front = Front::new();
     let error = front

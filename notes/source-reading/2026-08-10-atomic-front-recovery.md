@@ -71,3 +71,19 @@ r9p?
 - Whether relay registration sets should gain their own atomic retain
   operation if a generic publisher starts removing relay paths independently
   of their backing nodes.
+
+## Automatic QID allocation correction
+
+A live Coordinator restart later exposed an independent Front invariant in the
+same recovery path. Pushed nodes may reserve arbitrary owner-supplied QID paths,
+but automatic directories and files used their internal node ID as a QID path
+without checking the QID index. When a later node ID reached a retained pushed
+QID, it silently replaced that index entry. The next pushed refresh then failed
+with `qid path already in use` even though the publisher was updating the same
+path and identity.
+
+Automatic Front nodes now select the first unreserved QID path at or above
+their node ID. A regression reserves QID 5 for a pushed directory, advances the
+automatic node sequence through 5, and proves the pushed identity remains
+refreshable. This preserves the publish-before-prune recovery rule above; it
+repairs allocator uniqueness rather than clearing the retained Front.

@@ -1,9 +1,68 @@
-use super::{front_port, parse_u64, response_line, PeerClientServer};
+use super::{front_port, parse_u64, response_line, ClientDispatcher, PeerClientServer};
 use std::{
     io::{self, BufRead, Write},
-    sync::{Arc, Mutex},
+    sync::{
+        mpsc::{sync_channel, Receiver, SyncSender},
+        Arc, Mutex,
+    },
     thread,
 };
+
+const ORDINARY_WORKERS: usize = 16;
+const ORDINARY_QUEUE_CAPACITY: usize = 16;
+
+struct OrdinaryRequest {
+    request_id: u64,
+    command: String,
+}
+
+struct OrdinaryPool {
+    requests: SyncSender<OrdinaryRequest>,
+}
+
+impl OrdinaryPool {
+    fn new(dispatcher: ClientDispatcher, stdout: Arc<Mutex<io::Stdout>>) -> Self {
+        let (requests, receiver) = sync_channel(ORDINARY_QUEUE_CAPACITY);
+        let receiver = Arc::new(Mutex::new(receiver));
+        for _ in 0..ORDINARY_WORKERS {
+            let dispatcher = dispatcher.clone();
+            let receiver = receiver.clone();
+            let stdout = stdout.clone();
+            thread::spawn(move || ordinary_worker(dispatcher, receiver, stdout));
+        }
+        Self { requests }
+    }
+
+    fn submit(&self, request_id: u64, command: &str) -> Result<(), String> {
+        self.requests
+            .send(OrdinaryRequest {
+                request_id,
+                command: command.to_string(),
+            })
+            .map_err(|_| "r9p beam port ordinary queue closed".to_string())
+    }
+}
+
+fn ordinary_worker(
+    dispatcher: ClientDispatcher,
+    requests: Arc<Mutex<Receiver<OrdinaryRequest>>>,
+    stdout: Arc<Mutex<io::Stdout>>,
+) {
+    loop {
+        let request = match requests.lock() {
+            Ok(requests) => requests.recv(),
+            Err(_) => return,
+        };
+        let Ok(request) = request else {
+            return;
+        };
+        let _ = write_response(
+            &stdout,
+            request.request_id,
+            dispatcher.dispatch_line(&request.command),
+        );
+    }
+}
 
 pub(super) enum ResponseWork {
     Ready(Result<String, String>),
@@ -24,10 +83,15 @@ pub(super) fn run() -> Result<(), String> {
     let stdin = io::stdin();
     let mut server = PeerClientServer::default();
     let stdout = Arc::new(Mutex::new(io::stdout()));
+    let ordinary = OrdinaryPool::new(server.client_dispatcher(), stdout.clone());
 
     for line in stdin.lock().lines() {
         let line = line.map_err(|error| format!("read r9p beam port stdin: {error}"))?;
         let (request_id, command) = request_line(&line)?;
+        if !command.starts_with("front-") {
+            ordinary.submit(request_id, command)?;
+            continue;
+        }
         let work = server.dispatch_line(command);
         match work {
             ResponseWork::Ready(response) => write_response(&stdout, request_id, response)?,

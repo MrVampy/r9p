@@ -14,7 +14,11 @@ use session::{
     Client as NamespaceClient, ClientCredential, ConnectionAuthentication, ConnectionConfig,
     Error as SessionError, ResponderName, Result as SessionResult, SessionAuthentication,
 };
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 #[cfg(unix)]
 use std::{os::unix::net::UnixStream, path::Path};
@@ -32,8 +36,13 @@ const AUTH_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
 struct PeerClientServer {
-    clients: HashMap<TargetKey, NamespaceClient>,
+    clients: ClientDispatcher,
     fronts: front_port::FrontManager,
+}
+
+#[derive(Clone, Default)]
+struct ClientDispatcher {
+    clients: Arc<Mutex<HashMap<TargetKey, NamespaceClient>>>,
 }
 
 pub fn run_stdio() -> Result<(), String> {
@@ -61,10 +70,28 @@ impl PeerClientServer {
                 None => stdio::ResponseWork::Ready(self.fronts.handle(&fields)),
             };
         }
+        stdio::ResponseWork::Ready(self.clients.dispatch_fields(&fields))
+    }
+
+    fn client_dispatcher(&self) -> ClientDispatcher {
+        self.clients.clone()
+    }
+}
+
+impl ClientDispatcher {
+    fn dispatch_line(&self, line: &str) -> Result<String, String> {
+        let fields = line
+            .trim_end_matches(['\r', '\n'])
+            .split('\t')
+            .collect::<Vec<_>>();
+        self.dispatch_fields(&fields)
+    }
+
+    fn dispatch_fields(&self, fields: &[&str]) -> Result<String, String> {
         let Some((operation, fields)) = fields.split_first() else {
-            return stdio::ResponseWork::Ready(Err("invalid_r9p_beam_port_request".to_string()));
+            return Err("invalid_r9p_beam_port_request".to_string());
         };
-        let response = target_and_args(fields).and_then(|(key, args)| match (*operation, args) {
+        target_and_args(fields).and_then(|(key, args)| match (*operation, args) {
             ("version", []) => version_probe_output(&key).map_err(|error| error.to_string()),
             ("attach", []) => self.with_client_retry(&key, attach_output),
             ("stat", [path]) => {
@@ -134,49 +161,69 @@ impl PeerClientServer {
                 self.with_client(&key, |client| remove_output(client, &path))
             }
             _ => Err("invalid_r9p_beam_port_request".to_string()),
-        });
-        stdio::ResponseWork::Ready(response)
+        })
     }
 
     fn with_client_retry(
-        &mut self,
+        &self,
         key: &TargetKey,
         operation: impl Fn(&NamespaceClient) -> SessionResult<String> + Copy,
     ) -> Result<String, String> {
         match self.with_client(key, operation) {
             Ok(output) => Ok(output),
-            Err(reason) if retryable_client_error(&reason) => {
-                let _ = self.clients.remove(key);
-                self.with_client(key, operation)
-                    .map_err(|second| format!("{reason}; retry: {second}"))
-            }
+            Err(reason) if retryable_client_error(&reason) => self
+                .with_client(key, operation)
+                .map_err(|second| format!("{reason}; retry: {second}")),
             Err(reason) => Err(reason),
         }
     }
 
     fn with_client(
-        &mut self,
+        &self,
         key: &TargetKey,
         operation: impl FnOnce(&NamespaceClient) -> SessionResult<String>,
     ) -> Result<String, String> {
-        if !self.clients.contains_key(key) {
-            let client = connect_client(key).map_err(|error| error.to_string())?;
-            self.clients.insert(key.clone(), client);
-        }
-
-        let result = {
-            let client = self
-                .clients
-                .get(key)
-                .ok_or_else(|| "r9p_beam_port_missing_cached_client".to_string())?;
-            operation(client).map_err(|error| error.to_string())
-        };
+        let client = self.client(key)?;
+        let result = operation(&client).map_err(|error| error.to_string());
 
         if result.is_err() {
-            let _ = self.clients.remove(key);
+            self.remove_if_same(key, &client)?;
         }
 
         result
+    }
+
+    fn client(&self, key: &TargetKey) -> Result<NamespaceClient, String> {
+        if let Some(client) = self
+            .clients
+            .lock()
+            .map_err(|_| "r9p beam port client cache lock poisoned".to_string())?
+            .get(key)
+            .cloned()
+        {
+            return Ok(client);
+        }
+
+        let connected = connect_client(key).map_err(|error| error.to_string())?;
+        let mut clients = self
+            .clients
+            .lock()
+            .map_err(|_| "r9p beam port client cache lock poisoned".to_string())?;
+        Ok(clients.entry(key.clone()).or_insert(connected).clone())
+    }
+
+    fn remove_if_same(&self, key: &TargetKey, failed: &NamespaceClient) -> Result<(), String> {
+        let mut clients = self
+            .clients
+            .lock()
+            .map_err(|_| "r9p beam port client cache lock poisoned".to_string())?;
+        if clients
+            .get(key)
+            .is_some_and(|cached| cached.same_session(failed))
+        {
+            clients.remove(key);
+        }
+        Ok(())
     }
 }
 

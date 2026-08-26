@@ -390,6 +390,16 @@ impl State {
         Ok(Qid::new(qtype, node.version, node.qid_path))
     }
 
+    fn next_available_qid_path(&self, start: u64) -> Result<u64> {
+        let mut candidate = start;
+        while self.qid_index.contains_key(&candidate) {
+            candidate = candidate
+                .checked_add(1)
+                .ok_or_else(|| Error::from_static("qid path space exhausted"))?;
+        }
+        Ok(candidate)
+    }
+
     pub(crate) fn node_id_for_qid_path(&self, qid_path: u64) -> Result<u64> {
         self.qid_index
             .get(&qid_path)
@@ -482,13 +492,14 @@ impl State {
             return Err(Error::from_static(ENOTDIR));
         }
         let id = self.next_id;
+        let qid_path = self.next_available_qid_path(id)?;
         self.next_id += 1;
         self.nodes.insert(
             id,
             Node {
                 name: name.to_vec(),
                 parent,
-                qid_path: id,
+                qid_path,
                 version: 0,
                 generation: 0,
                 pushed_mtime: None,
@@ -503,7 +514,7 @@ impl State {
                 body: Body::Dir(DirectoryBody::default()),
             },
         );
-        self.qid_index.insert(id, id);
+        self.qid_index.insert(qid_path, id);
         if let Some(Node {
             body: Body::Dir(children),
             ..
@@ -558,13 +569,14 @@ impl State {
             },
             None => {
                 let id = self.next_id;
+                let qid_path = self.next_available_qid_path(id)?;
                 self.next_id += 1;
                 self.nodes.insert(
                     id,
                     Node {
                         name: last.clone(),
                         parent,
-                        qid_path: id,
+                        qid_path,
                         version: 0,
                         generation: 0,
                         pushed_mtime: None,
@@ -579,7 +591,7 @@ impl State {
                         body,
                     },
                 );
-                self.qid_index.insert(id, id);
+                self.qid_index.insert(qid_path, id);
                 if let Some(Node {
                     body: Body::Dir(children),
                     ..

@@ -634,8 +634,18 @@ impl State {
                 Ok(id)
             }
             None => {
-                if self.qid_index.contains_key(&metadata.qid_path) {
-                    return Err(Error::from_static("qid path already in use"));
+                if let Some(id) = self.reattach_detached_pushed_node(
+                    path,
+                    parent,
+                    last,
+                    metadata.qid_path,
+                    |body| matches!(body, Body::File(_) | Body::WriteRelay(_)),
+                )? {
+                    self.apply_pushed_metadata(id, &metadata)?;
+                    if let Some(node) = self.nodes.get_mut(&id) {
+                        node.body = Body::File(bytes);
+                    }
+                    return Ok(id);
                 }
                 let id = self.next_id;
                 self.next_id += 1;
@@ -701,8 +711,15 @@ impl State {
                 Ok(id)
             }
             None => {
-                if self.qid_index.contains_key(&metadata.qid_path) {
-                    return Err(Error::from_static("qid path already in use"));
+                if let Some(id) = self.reattach_detached_pushed_node(
+                    path,
+                    parent,
+                    last,
+                    metadata.qid_path,
+                    |body| matches!(body, Body::Dir(_)),
+                )? {
+                    self.apply_pushed_metadata(id, &metadata)?;
+                    return Ok(id);
                 }
                 let id = self.next_id;
                 self.next_id += 1;
@@ -737,6 +754,51 @@ impl State {
                 Ok(id)
             }
         }
+    }
+
+    fn reattach_detached_pushed_node(
+        &mut self,
+        path: &str,
+        parent: u64,
+        name: &[u8],
+        qid_path: u64,
+        body_matches: impl FnOnce(&Body) -> bool,
+    ) -> Result<Option<u64>> {
+        let Some(id) = self.qid_index.get(&qid_path).copied() else {
+            return Ok(None);
+        };
+        if !self.node_is_detached(id)
+            || self.path_relative_to(id, ROOT_ID)? != format!("/{}", path.trim_matches('/'))
+            || !body_matches(&self.node(id)?.body)
+        {
+            return Err(Error::from_static("qid path already in use"));
+        }
+
+        let old_parent = self.node(id)?.parent;
+        let old_name = self.node(id)?.name.clone();
+        if let Some(Node {
+            body: Body::Dir(children),
+            ..
+        }) = self.nodes.get_mut(&old_parent)
+        {
+            if children.get(old_name.as_slice()) == Some(&id) {
+                children.remove(old_name.as_slice());
+            }
+        }
+        if let Some(node) = self.nodes.get_mut(&id) {
+            node.parent = parent;
+            node.name = name.to_vec();
+        }
+        if let Some(Node {
+            body: Body::Dir(children),
+            ..
+        }) = self.nodes.get_mut(&parent)
+        {
+            children.insert(name.to_vec(), id);
+        }
+        self.detached_roots.remove(&id);
+        self.collect_unreferenced_detached_subtrees();
+        Ok(Some(id))
     }
 
     pub(crate) fn insert_pushed_child_directory(

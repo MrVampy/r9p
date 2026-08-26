@@ -313,6 +313,66 @@ fn remove_subtree_missing_path_is_noop() -> Result<()> {
 }
 
 #[test]
+fn pushed_directory_republication_reattaches_same_detached_qid() -> Result<()> {
+    let front = Front::new();
+    let metadata = |qid_version, generation| PushedDirectoryMetadata {
+        qid_path: 8001,
+        qid_version,
+        generation,
+        mtime: generation as u32,
+        length: 0,
+        visibility_class: "runtime-reader".to_string(),
+        freshness_ref: "freshness:service".to_string(),
+        wake_token: "wake:service".to_string(),
+    };
+    front.set_pushed_directory("views/runtime/service", metadata(1, 1))?;
+
+    let mut retained = front.tree();
+    retained.attach(1, b"claude", b"/")?;
+    let retained_qids = walk_to(&mut retained, 1, 2, &["views", "runtime", "service"]);
+    assert_eq!(retained_qids.last().expect("service qid").path, 8001);
+
+    front.remove_subtree_if_exists("views/runtime/service")?;
+    front.set_pushed_directory("views/runtime/service", metadata(2, 2))?;
+
+    let mut current = front.tree();
+    current.attach(1, b"claude", b"/")?;
+    let current_qids = walk_to(&mut current, 1, 2, &["views", "runtime", "service"]);
+    let current_qid = current_qids.last().expect("current service qid");
+    assert_eq!(current_qid.path, 8001);
+    assert_eq!(current_qid.version, 2);
+    assert_eq!(retained.stat(*current_qid)?.qid.version, 2);
+    Ok(())
+}
+
+#[test]
+fn pushed_republication_rejects_detached_qid_from_another_path() -> Result<()> {
+    let front = Front::new();
+    let metadata = PushedDirectoryMetadata {
+        qid_path: 8001,
+        qid_version: 1,
+        generation: 1,
+        mtime: 1,
+        length: 0,
+        visibility_class: "runtime-reader".to_string(),
+        freshness_ref: "freshness:service".to_string(),
+        wake_token: "wake:service".to_string(),
+    };
+    front.set_pushed_directory("views/runtime/old", metadata.clone())?;
+
+    let mut retained = front.tree();
+    retained.attach(1, b"claude", b"/")?;
+    walk_to(&mut retained, 1, 2, &["views", "runtime", "old"]);
+    front.remove_subtree_if_exists("views/runtime/old")?;
+
+    let error = front
+        .set_pushed_directory("views/runtime/new", metadata)
+        .expect_err("a detached qid cannot move to another logical path");
+    assert_eq!(error.to_string(), "qid path already in use");
+    Ok(())
+}
+
+#[test]
 fn retain_subtree_paths_keeps_current_branches_and_removes_stale_siblings() -> Result<()> {
     let front = Front::new();
     front.set("views/runtime/status", b"ready")?;

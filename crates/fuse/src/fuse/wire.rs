@@ -60,6 +60,7 @@ pub(super) const FUSE_AUTO_INVAL_DATA: u32 = 1 << 12;
 pub(super) const FUSE_DO_READDIRPLUS: u32 = 1 << 13;
 pub(super) const FUSE_READDIRPLUS_AUTO: u32 = 1 << 14;
 pub(super) const FUSE_PARALLEL_DIROPS: u32 = 1 << 18;
+pub(super) const FUSE_MAX_PAGES: u32 = 1 << 22;
 
 pub(super) const FUSE_NOTIFY_INVAL_INODE: i32 = 2;
 pub(super) const FUSE_NOTIFY_INVAL_ENTRY: i32 = 3;
@@ -71,8 +72,8 @@ pub(super) const FUSE_KERNEL_VERSION: u32 = 7;
 pub(super) const FUSE_KERNEL_MINOR_VERSION: u32 = 31;
 pub(super) const FUSE_COMPAT_INIT_OUT_SIZE: usize = 8;
 pub(super) const FUSE_COMPAT_22_INIT_OUT_SIZE: usize = 24;
-pub(super) const DEFAULT_MAX_WRITE: u32 = 1024 * 1024;
-pub(super) const FUSE_BUFFER_SIZE: usize = 1024 * 1024 + 8192;
+pub(super) const DEFAULT_MAX_IO_BYTES: u32 = 1024 * 1024;
+pub(super) const FUSE_BUFFER_SIZE: usize = DEFAULT_MAX_IO_BYTES as usize + 8192;
 
 #[repr(C)]
 #[derive(Clone, Copy)]

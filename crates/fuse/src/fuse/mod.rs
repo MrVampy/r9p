@@ -216,13 +216,13 @@ impl R9pFuse {
             0,
             0,
             format!(
-                "source={} endpoint={} candidates={} msize={} max_write_payload={} fuse_max_write={}",
+                "source={} endpoint={} candidates={} msize={} max_write_payload={} fuse_max_request_bytes={}",
                 config.source_path,
                 client.active_address(),
                 client.candidate_addresses().join(","),
                 client_snapshot.msize(),
                 client_snapshot.max_write_payload(),
-                wire::DEFAULT_MAX_WRITE
+                wire::DEFAULT_MAX_IO_BYTES
             ),
         );
         let (root_fid, root_stat) =

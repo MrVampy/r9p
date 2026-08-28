@@ -1,12 +1,17 @@
 use super::config::DEFAULT_CHANGE_FEED_RECONNECT_DELAY;
-use super::dispatch::{supported_init_flags, wait_for_managed_input, ManagedInput};
+use super::dispatch::{
+    fuse_init_out, max_request_pages, supported_init_flags, wait_for_managed_input, ManagedInput,
+};
 use super::mount_state::negative_entry_out;
 use super::ops::encode_dirents;
 use super::util::{
     dirent_size, flags_to_9p_mode, fuse_name_offset, fuse_open_flags,
     is_lookup_namespace_shape_error, is_namespace_shape_error, is_transport_error,
 };
-use super::wire::{FOPEN_DIRECT_IO, FOPEN_KEEP_CACHE};
+use super::wire::{
+    FuseInitIn, DEFAULT_MAX_IO_BYTES, FOPEN_DIRECT_IO, FOPEN_KEEP_CACHE, FUSE_KERNEL_VERSION,
+    FUSE_MAX_PAGES,
+};
 use super::{
     change_feed, default_congestion_threshold, normalize_config, parse_source_path, Config,
     DEFAULT_MAX_BACKGROUND, DEFAULT_MAX_WORKERS,
@@ -291,6 +296,34 @@ fn init_leaves_caller_umask_application_to_linux() {
     const FUSE_DONT_MASK_BIT: u32 = 1 << 6;
 
     assert_eq!(supported_init_flags() & FUSE_DONT_MASK_BIT, 0);
+}
+
+#[test]
+fn init_admits_requests_larger_than_the_linux_default_page_count() {
+    assert_ne!(supported_init_flags() & FUSE_MAX_PAGES, 0);
+    assert_eq!(
+        max_request_pages(DEFAULT_MAX_IO_BYTES, 4096).expect("4 KiB pages"),
+        256
+    );
+    assert_eq!(
+        max_request_pages(DEFAULT_MAX_IO_BYTES, 65_536).expect("64 KiB pages"),
+        16
+    );
+    let output = fuse_init_out(
+        FuseInitIn {
+            major: FUSE_KERNEL_VERSION,
+            minor: 31,
+            max_readahead: DEFAULT_MAX_IO_BYTES,
+            flags: FUSE_MAX_PAGES,
+        },
+        64,
+        48,
+        4096,
+    )
+    .expect("FUSE init output");
+    assert_ne!(output.flags & FUSE_MAX_PAGES, 0);
+    assert_eq!(output.max_write, DEFAULT_MAX_IO_BYTES);
+    assert_eq!(output.max_pages, 256);
 }
 
 #[test]

@@ -4,14 +4,14 @@ use super::mount::MountCleanup;
 use super::{
     reply::{read_struct, reply_bytes, reply_error},
     wire::{
-        FuseInHeader, FuseInitIn, FuseInitOut, FuseInterruptIn, DEFAULT_MAX_WRITE, FUSE_ACCESS,
+        FuseInHeader, FuseInitIn, FuseInitOut, FuseInterruptIn, DEFAULT_MAX_IO_BYTES, FUSE_ACCESS,
         FUSE_ASYNC_READ, FUSE_ATOMIC_O_TRUNC, FUSE_AUTO_INVAL_DATA, FUSE_BATCH_FORGET,
         FUSE_BIG_WRITES, FUSE_BUFFER_SIZE, FUSE_COMPAT_22_INIT_OUT_SIZE, FUSE_COMPAT_INIT_OUT_SIZE,
         FUSE_CREATE, FUSE_DESTROY, FUSE_DO_READDIRPLUS, FUSE_FLUSH, FUSE_FORGET, FUSE_FSYNC,
         FUSE_FSYNCDIR, FUSE_GETATTR, FUSE_GETLK, FUSE_GETXATTR, FUSE_INIT, FUSE_INTERRUPT,
         FUSE_KERNEL_MINOR_VERSION, FUSE_KERNEL_VERSION, FUSE_LINK, FUSE_LISTXATTR, FUSE_LOOKUP,
-        FUSE_MKDIR, FUSE_MKNOD, FUSE_OPEN, FUSE_OPENDIR, FUSE_PARALLEL_DIROPS, FUSE_POLL,
-        FUSE_READ, FUSE_READDIR, FUSE_READDIRPLUS, FUSE_READDIRPLUS_AUTO, FUSE_READLINK,
+        FUSE_MAX_PAGES, FUSE_MKDIR, FUSE_MKNOD, FUSE_OPEN, FUSE_OPENDIR, FUSE_PARALLEL_DIROPS,
+        FUSE_POLL, FUSE_READ, FUSE_READDIR, FUSE_READDIRPLUS, FUSE_READDIRPLUS_AUTO, FUSE_READLINK,
         FUSE_RELEASE, FUSE_RELEASEDIR, FUSE_REMOVEXATTR, FUSE_RENAME, FUSE_RMDIR, FUSE_SETATTR,
         FUSE_SETLK, FUSE_SETLKW, FUSE_SETXATTR, FUSE_STATFS, FUSE_SYMLINK, FUSE_UNLINK, FUSE_WRITE,
     },
@@ -244,12 +244,13 @@ impl R9pFuse {
 
     fn fuse_init(&mut self, file: &mut File, header: FuseInHeader, payload: &[u8]) -> Result<()> {
         let input = read_struct::<FuseInitIn>(payload)?;
-        let negotiated_minor = input.minor.min(FUSE_KERNEL_MINOR_VERSION);
+        let page_size = system_page_size()?;
         // Capabilities we both want and the kernel advertised. Each opt-in is
         // safe with our current handlers: ATOMIC_O_TRUNC short-circuits the
         // separate truncate round trip on OPEN, BIG_WRITES is governed by
         // max_write, AUTO_INVAL_DATA invalidates page-cache pages when mtime
         // changes (relevant once non-zero attr_timeout returns),
+        // MAX_PAGES admits the same maximum byte count for reads and writes,
         // PARALLEL_DIROPS unblocks concurrent lookups inside one dir, and
         // adaptive READDIRPLUS lets the kernel seed dentry/attribute cache
         // when traversal tools actually inspect returned entries. We do not
@@ -257,22 +258,25 @@ impl R9pFuse {
         // retired, so the bridge cannot satisfy exportfs stale-handle lookup.
         // Nor do we advertise DONT_MASK: Linux must apply the caller's umask
         // before r9p forwards the requested permission bits to the 9P server.
-        let supported = supported_init_flags();
-        let mut output = FuseInitOut {
-            major: FUSE_KERNEL_VERSION,
-            minor: negotiated_minor,
-            max_readahead: input.max_readahead,
-            flags: input.flags & supported,
-            max_background: self.config.max_background,
-            congestion_threshold: self.config.congestion_threshold,
-            max_write: DEFAULT_MAX_WRITE,
-            time_gran: 1,
-            max_pages: 0,
-            map_alignment: 0,
-            unused: [0; 8],
-        };
-        output.flags |= FUSE_BIG_WRITES;
-        let size = init_out_size(negotiated_minor);
+        let output = fuse_init_out(
+            input,
+            self.config.max_background,
+            self.config.congestion_threshold,
+            page_size,
+        )?;
+        self.record_diagnostic(
+            "fuse_initialized",
+            header,
+            0,
+            format!(
+                "max_request_bytes={} page_size={} max_pages={} max_pages_active={}",
+                DEFAULT_MAX_IO_BYTES,
+                page_size,
+                output.max_pages,
+                output.flags & FUSE_MAX_PAGES != 0
+            ),
+        );
+        let size = init_out_size(output.minor);
         reply_bytes(file, header.unique, &init_out_bytes(&output)[..size])
     }
 
@@ -559,6 +563,49 @@ pub(super) fn supported_init_flags() -> u32 {
         | FUSE_DO_READDIRPLUS
         | FUSE_READDIRPLUS_AUTO
         | FUSE_PARALLEL_DIROPS
+        | FUSE_MAX_PAGES
+}
+
+pub(super) fn fuse_init_out(
+    input: FuseInitIn,
+    max_background: u16,
+    congestion_threshold: u16,
+    page_size: u32,
+) -> Result<FuseInitOut> {
+    let mut output = FuseInitOut {
+        major: FUSE_KERNEL_VERSION,
+        minor: input.minor.min(FUSE_KERNEL_MINOR_VERSION),
+        max_readahead: input.max_readahead,
+        flags: input.flags & supported_init_flags(),
+        max_background,
+        congestion_threshold,
+        max_write: DEFAULT_MAX_IO_BYTES,
+        time_gran: 1,
+        max_pages: max_request_pages(DEFAULT_MAX_IO_BYTES, page_size)?,
+        map_alignment: 0,
+        unused: [0; 8],
+    };
+    output.flags |= FUSE_BIG_WRITES;
+    Ok(output)
+}
+
+pub(super) fn max_request_pages(max_request_bytes: u32, page_size: u32) -> Result<u16> {
+    if max_request_bytes == 0 || page_size == 0 {
+        return Err(Error::new(
+            libc::EINVAL,
+            "FUSE request bytes and page size must be nonzero",
+        ));
+    }
+    u16::try_from(max_request_bytes.div_ceil(page_size))
+        .map_err(|_| Error::new(libc::EOVERFLOW, "FUSE request page count overflow"))
+}
+
+fn system_page_size() -> Result<u32> {
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if page_size <= 0 {
+        return Err(Error::new(libc::EIO, "could not read the system page size"));
+    }
+    u32::try_from(page_size).map_err(|_| Error::new(libc::EOVERFLOW, "system page size overflow"))
 }
 
 fn init_out_size(minor: u32) -> usize {

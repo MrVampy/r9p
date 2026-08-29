@@ -4,11 +4,11 @@ use super::mount::MountCleanup;
 use super::{
     reply::{read_struct, reply_bytes, reply_error},
     wire::{
-        FuseInHeader, FuseInitIn, FuseInitOut, FuseInterruptIn, DEFAULT_MAX_IO_BYTES, FUSE_ACCESS,
-        FUSE_ASYNC_READ, FUSE_ATOMIC_O_TRUNC, FUSE_AUTO_INVAL_DATA, FUSE_BATCH_FORGET,
-        FUSE_BIG_WRITES, FUSE_BUFFER_SIZE, FUSE_COMPAT_22_INIT_OUT_SIZE, FUSE_COMPAT_INIT_OUT_SIZE,
-        FUSE_CREATE, FUSE_DESTROY, FUSE_DO_READDIRPLUS, FUSE_FLUSH, FUSE_FORGET, FUSE_FSYNC,
-        FUSE_FSYNCDIR, FUSE_GETATTR, FUSE_GETLK, FUSE_GETXATTR, FUSE_INIT, FUSE_INTERRUPT,
+        FuseInHeader, FuseInitIn, FuseInitOut, FuseInterruptIn, FUSE_ACCESS, FUSE_ASYNC_READ,
+        FUSE_ATOMIC_O_TRUNC, FUSE_AUTO_INVAL_DATA, FUSE_BATCH_FORGET, FUSE_BIG_WRITES,
+        FUSE_BUFFER_SIZE, FUSE_COMPAT_22_INIT_OUT_SIZE, FUSE_COMPAT_INIT_OUT_SIZE, FUSE_CREATE,
+        FUSE_DESTROY, FUSE_DO_READDIRPLUS, FUSE_FLUSH, FUSE_FORGET, FUSE_FSYNC, FUSE_FSYNCDIR,
+        FUSE_GETATTR, FUSE_GETLK, FUSE_GETXATTR, FUSE_INIT, FUSE_INTERRUPT,
         FUSE_KERNEL_MINOR_VERSION, FUSE_KERNEL_VERSION, FUSE_LINK, FUSE_LISTXATTR, FUSE_LOOKUP,
         FUSE_MAX_PAGES, FUSE_MKDIR, FUSE_MKNOD, FUSE_OPEN, FUSE_OPENDIR, FUSE_PARALLEL_DIROPS,
         FUSE_POLL, FUSE_READ, FUSE_READDIR, FUSE_READDIRPLUS, FUSE_READDIRPLUS_AUTO, FUSE_READLINK,
@@ -263,6 +263,7 @@ impl R9pFuse {
             self.config.max_background,
             self.config.congestion_threshold,
             page_size,
+            self.max_request_bytes,
         )?;
         self.record_diagnostic(
             "fuse_initialized",
@@ -270,7 +271,7 @@ impl R9pFuse {
             0,
             format!(
                 "max_request_bytes={} page_size={} max_pages={} max_pages_active={}",
-                DEFAULT_MAX_IO_BYTES,
+                output.max_write,
                 page_size,
                 output.max_pages,
                 output.flags & FUSE_MAX_PAGES != 0
@@ -571,7 +572,13 @@ pub(super) fn fuse_init_out(
     max_background: u16,
     congestion_threshold: u16,
     page_size: u32,
+    max_request_bytes: u32,
 ) -> Result<FuseInitOut> {
+    let max_pages = max_request_pages(max_request_bytes, page_size)?;
+    let max_write = u32::from(max_pages)
+        .checked_mul(page_size)
+        .ok_or_else(|| Error::new(libc::EOVERFLOW, "FUSE request byte count overflow"))?
+        .min(max_request_bytes);
     let mut output = FuseInitOut {
         major: FUSE_KERNEL_VERSION,
         minor: input.minor.min(FUSE_KERNEL_MINOR_VERSION),
@@ -579,9 +586,9 @@ pub(super) fn fuse_init_out(
         flags: input.flags & supported_init_flags(),
         max_background,
         congestion_threshold,
-        max_write: DEFAULT_MAX_IO_BYTES,
+        max_write,
         time_gran: 1,
-        max_pages: max_request_pages(DEFAULT_MAX_IO_BYTES, page_size)?,
+        max_pages,
         map_alignment: 0,
         unused: [0; 8],
     };
@@ -596,7 +603,7 @@ pub(super) fn max_request_pages(max_request_bytes: u32, page_size: u32) -> Resul
             "FUSE request bytes and page size must be nonzero",
         ));
     }
-    u16::try_from(max_request_bytes.div_ceil(page_size))
+    u16::try_from((max_request_bytes / page_size).max(1))
         .map_err(|_| Error::new(libc::EOVERFLOW, "FUSE request page count overflow"))
 }
 

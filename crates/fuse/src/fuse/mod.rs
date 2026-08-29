@@ -144,6 +144,7 @@ pub struct R9pFuse {
     status: MountStatus,
     uid: u32,
     gid: u32,
+    max_request_bytes: u32,
     shape_recovery: Arc<Mutex<ShapeRecovery>>,
     reconnect: Arc<Mutex<()>>,
 }
@@ -209,6 +210,9 @@ impl R9pFuse {
             client.candidate_addresses(),
         );
         let client_snapshot = client.snapshot()?;
+        let max_request_bytes = client_snapshot
+            .max_write_payload()
+            .min(wire::DEFAULT_MAX_IO_BYTES);
         let _ = diagnostics.record(
             "mount_attached",
             0,
@@ -222,7 +226,7 @@ impl R9pFuse {
                 client.candidate_addresses().join(","),
                 client_snapshot.msize(),
                 client_snapshot.max_write_payload(),
-                wire::DEFAULT_MAX_IO_BYTES
+                max_request_bytes
             ),
         );
         let (root_fid, root_stat) =
@@ -239,6 +243,7 @@ impl R9pFuse {
             status,
             uid,
             gid,
+            max_request_bytes,
             shape_recovery: Arc::new(Mutex::new(ShapeRecovery::new())),
             reconnect: Arc::new(Mutex::new(())),
         })

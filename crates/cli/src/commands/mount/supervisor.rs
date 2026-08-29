@@ -1,3 +1,5 @@
+mod read_ahead;
+
 use std::env;
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
@@ -65,6 +67,10 @@ pub(super) fn mount_stop_cmd(args: Vec<String>) -> CliResult<()> {
     stop_mount(&config)?;
     println!("mountpoint {} stopped", config.mountpoint.display());
     Ok(())
+}
+
+pub(super) fn mount_read_ahead_cmd(args: Vec<String>) -> CliResult<()> {
+    read_ahead::run(args)
 }
 
 fn check_mount_status(config: &MountSupervisorConfig) -> CliResult<()> {
@@ -483,7 +489,7 @@ fn wait_with_timeout(child: &mut std::process::Child, timeout: Duration) -> std:
 
 fn mount_supervisor_usage(code: i32) -> ! {
     eprintln!(
-        "usage: r9p mount ensure|status|stop --mountpoint path [--unit name --unit-scope user|system] [--status-file path] [--expect-endpoint endpoint] [--expect-change-feed path] [--expect-status-file path] [--attempts count] [-- mount args...]"
+        "usage: r9p mount ensure|status|stop --mountpoint path [--unit name --unit-scope user|system] [--status-file path] [--expect-endpoint endpoint] [--expect-change-feed path] [--expect-status-file path] [--attempts count] [-- mount args...]\n       r9p mount read-ahead --mountpoint path --kilobytes count"
     );
     std::process::exit(code);
 }

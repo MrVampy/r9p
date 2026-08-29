@@ -9,6 +9,7 @@ pub(crate) fn mount_cmd(global: Config, args: Vec<String>) -> CliResult<()> {
     if let Some(action) = args.first().map(String::as_str) {
         match action {
             "ensure" => return supervisor::mount_ensure_cmd(args[1..].to_vec()),
+            "read-ahead" => return supervisor::mount_read_ahead_cmd(args[1..].to_vec()),
             "status" => return supervisor::mount_status_cmd(args[1..].to_vec()),
             "stop" => return supervisor::mount_stop_cmd(args[1..].to_vec()),
             _ => {}

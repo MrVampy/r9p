@@ -302,12 +302,12 @@ fn init_leaves_caller_umask_application_to_linux() {
 fn init_admits_requests_larger_than_the_linux_default_page_count() {
     assert_ne!(supported_init_flags() & FUSE_MAX_PAGES, 0);
     assert_eq!(
-        max_request_pages(DEFAULT_MAX_IO_BYTES, 4096).expect("4 KiB pages"),
-        256
+        max_request_pages(DEFAULT_MAX_IO_BYTES - 23, 4096).expect("4 KiB pages"),
+        255
     );
     assert_eq!(
-        max_request_pages(DEFAULT_MAX_IO_BYTES, 65_536).expect("64 KiB pages"),
-        16
+        max_request_pages(DEFAULT_MAX_IO_BYTES - 23, 65_536).expect("64 KiB pages"),
+        15
     );
     let output = fuse_init_out(
         FuseInitIn {
@@ -319,11 +319,12 @@ fn init_admits_requests_larger_than_the_linux_default_page_count() {
         64,
         48,
         4096,
+        DEFAULT_MAX_IO_BYTES - 23,
     )
     .expect("FUSE init output");
     assert_ne!(output.flags & FUSE_MAX_PAGES, 0);
-    assert_eq!(output.max_write, DEFAULT_MAX_IO_BYTES);
-    assert_eq!(output.max_pages, 256);
+    assert_eq!(output.max_write, 255 * 4096);
+    assert_eq!(output.max_pages, 255);
 }
 
 #[test]

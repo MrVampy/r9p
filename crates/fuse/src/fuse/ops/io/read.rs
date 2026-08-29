@@ -61,48 +61,55 @@ impl R9pFuse {
         if read_is_known_eof(known_length, input.offset) {
             return reply_bytes(file, header.unique, &[]);
         }
+        let count = read_count(known_length, input.offset, input.size);
         let handle = self.nodes()?.handle(input.fh)?.clone();
         let fid = handle.require_fid()?;
-        let data =
-            match handle
+        let data = match if known_length > 0 {
+            handle
                 .client
-                .read_timeout(fid, input.offset, input.size, self.read_timeout())
+                .read_full_timeout(fid, input.offset, count, self.read_timeout())
+        } else {
+            handle
+                .client
+                .read_timeout(fid, input.offset, count, self.read_timeout())
+        } {
+            Ok(data) => data,
+            Err(error)
+                if is_transport_error(&error)
+                    && read_handle_is_replayable(handle.is_dir, handle.write_on_release) =>
             {
-                Ok(data) => data,
-                Err(error)
-                    if is_transport_error(&error)
-                        && read_handle_is_replayable(handle.is_dir, handle.write_on_release) =>
-                {
-                    self.reconnect()?;
-                    self.read_from_reopened_handle(
-                        header.nodeid,
-                        input.fh,
-                        input.offset,
-                        input.size,
-                    )?
-                }
-                Err(error) if is_transport_error(&error) => {
-                    self.reconnect()?;
-                    return Err(Error::new(libc::ESTALE, "file handle is not replayable"));
-                }
-                Err(error)
-                    if is_namespace_shape_error(&error)
-                        && read_handle_is_replayable(handle.is_dir, handle.write_on_release) =>
-                {
-                    self.recover_namespace_shape(header.nodeid)?;
-                    self.read_from_reopened_handle(
-                        header.nodeid,
-                        input.fh,
-                        input.offset,
-                        input.size,
-                    )?
-                }
-                Err(error) if is_namespace_shape_error(&error) => {
-                    self.recover_namespace_shape(header.nodeid)?;
-                    return Err(Error::new(libc::ESTALE, "file handle is not replayable"));
-                }
-                Err(error) => return Err(error.into()),
-            };
+                self.reconnect()?;
+                self.read_from_reopened_handle(
+                    header.nodeid,
+                    input.fh,
+                    input.offset,
+                    count,
+                    known_length > 0,
+                )?
+            }
+            Err(error) if is_transport_error(&error) => {
+                self.reconnect()?;
+                return Err(Error::new(libc::ESTALE, "file handle is not replayable"));
+            }
+            Err(error)
+                if is_namespace_shape_error(&error)
+                    && read_handle_is_replayable(handle.is_dir, handle.write_on_release) =>
+            {
+                self.recover_namespace_shape(header.nodeid)?;
+                self.read_from_reopened_handle(
+                    header.nodeid,
+                    input.fh,
+                    input.offset,
+                    count,
+                    known_length > 0,
+                )?
+            }
+            Err(error) if is_namespace_shape_error(&error) => {
+                self.recover_namespace_shape(header.nodeid)?;
+                return Err(Error::new(libc::ESTALE, "file handle is not replayable"));
+            }
+            Err(error) => return Err(error.into()),
+        };
         reply_bytes(file, header.unique, &data)
     }
 
@@ -112,6 +119,7 @@ impl R9pFuse {
         handle_id: u64,
         offset: u64,
         size: u32,
+        fill_requested: bool,
     ) -> Result<Vec<u8>> {
         let (client, node_fid) = self.bound_node_fid(nodeid)?;
         let fid = client.clone_fid_timeout(node_fid, self.lookup_timeout())?;
@@ -133,7 +141,11 @@ impl R9pFuse {
         let _ = old_handle
             .client
             .clunk_timeout(old_handle.require_fid()?, self.control_timeout());
-        Ok(client.read_timeout(fid, offset, size, self.read_timeout())?)
+        if fill_requested {
+            Ok(client.read_full_timeout(fid, offset, size, self.read_timeout())?)
+        } else {
+            Ok(client.read_timeout(fid, offset, size, self.read_timeout())?)
+        }
     }
 }
 
@@ -146,13 +158,21 @@ fn read_is_known_eof(known_length: u64, offset: u64) -> bool {
     known_length > 0 && offset >= known_length
 }
 
+fn read_count(known_length: u64, offset: u64, requested: u32) -> u32 {
+    if known_length == 0 {
+        return requested;
+    }
+    let remaining = u32::try_from(known_length.saturating_sub(offset)).unwrap_or(u32::MAX);
+    requested.min(remaining)
+}
+
 fn read_handle_is_replayable(is_dir: bool, write_on_release: bool) -> bool {
     !is_dir && !write_on_release
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{read_handle_is_replayable, read_is_known_eof};
+    use super::{read_count, read_handle_is_replayable, read_is_known_eof};
 
     #[test]
     fn read_at_known_positive_length_is_eof() {
@@ -169,6 +189,13 @@ mod tests {
     #[test]
     fn read_before_known_length_reaches_9p() {
         assert!(!read_is_known_eof(26_698, 26_697));
+    }
+
+    #[test]
+    fn known_file_reads_fill_only_the_remaining_range() {
+        assert_eq!(read_count(26_698, 0, 4096), 4096);
+        assert_eq!(read_count(26_698, 26_000, 4096), 698);
+        assert_eq!(read_count(0, 26_000, 4096), 4096);
     }
 
     #[test]

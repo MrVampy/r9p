@@ -124,6 +124,7 @@ r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] con [--resume] [-r] path
 r9p [-n] [-a address] [-A aname] [-u uname] [-m msize] stream path
 r9p mount [--source namespace-path] [--uname uname] [--aname aname] [--attr-timeout seconds] [--entry-timeout seconds] [--request-timeout seconds] [--lookup-timeout seconds] [--read-timeout seconds] [--write-timeout seconds] [--mutation-timeout seconds] [--control-timeout seconds] [--interrupt-timeout seconds] [--max-workers count] [--max-background count] [--congestion-threshold count] [--diagnostics-file path] [--diagnostics-capacity count] endpoint mountpoint
 r9p mount ensure|status|stop --mountpoint path [--unit name --unit-scope user|system] [--status-file path] [--expect-endpoint endpoint] [--expect-change-feed path] [--expect-status-file path] [--attempts count] [-- mount args...]
+r9p mount read-ahead --mountpoint path --kilobytes count [--attempts count]
 r9p serve [--bind address] [--max-fids count] [--writable] root
 r9p export [--bind address] [--max-fids count] [--writable] [--descriptor machine] [--descriptor-file path] [--auth-config path] [--descriptor-field key=value] root
 r9p reverse-broker --reverse-bind address [--proxy-bind address] [--proxy-exposure local|authenticated-network] --principal name --auth-config path [--pool count]

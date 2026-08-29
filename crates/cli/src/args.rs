@@ -518,7 +518,7 @@ struct SessionRequiredPathArgs {
 
 #[derive(Debug, ClapArgs)]
 struct MountArgs {
-    /// Direct endpoint, or one of ensure, status, and stop.
+    /// Direct endpoint, or one of ensure, read-ahead, status, and stop.
     #[arg(value_name = "ENDPOINT_OR_ACTION")]
     endpoint_or_action: String,
     /// Direct-mode mountpoint.
@@ -608,6 +608,8 @@ struct MountArgs {
     expect_change_feed: Option<String>,
     #[arg(long, value_name = "COUNT")]
     attempts: Option<usize>,
+    #[arg(long = "kilobytes", value_name = "COUNT")]
+    read_ahead_kilobytes: Option<u64>,
     /// Direct mount arguments for `mount ensure`.
     #[arg(last = true, num_args = 0.., value_name = "MOUNT_ARG")]
     mount_args: Vec<String>,
@@ -1076,7 +1078,7 @@ impl MountArgs {
     fn into_args(self) -> Vec<String> {
         let action = matches!(
             self.endpoint_or_action.as_str(),
-            "ensure" | "status" | "stop"
+            "ensure" | "read-ahead" | "status" | "stop"
         );
         let mut options = Vec::new();
         for endpoint in self.fallback_endpoint {
@@ -1161,6 +1163,7 @@ impl MountArgs {
             self.expect_change_feed,
         );
         push_option(&mut options, "--attempts", self.attempts);
+        push_option(&mut options, "--kilobytes", self.read_ahead_kilobytes);
 
         let mut args = Vec::new();
         if action {
@@ -1405,6 +1408,30 @@ mod tests {
         let normalized = mount.into_args();
         assert_eq!(normalized.first().map(String::as_str), Some("ensure"));
         assert!(normalized.contains(&"--mountpoint".to_string()));
+
+        let read_ahead = Cli::try_parse_from([
+            "r9p",
+            "mount",
+            "read-ahead",
+            "--mountpoint",
+            "/mnt/wiki",
+            "--kilobytes",
+            "4096",
+        ])
+        .expect("read-ahead mount action");
+        let Command::Mount(read_ahead) = read_ahead.command else {
+            panic!("expected mount command");
+        };
+        assert_eq!(
+            read_ahead.into_args(),
+            [
+                "read-ahead",
+                "--mountpoint",
+                "/mnt/wiki",
+                "--kilobytes",
+                "4096",
+            ]
+        );
 
         let direct_mount = Cli::try_parse_from([
             "r9p",

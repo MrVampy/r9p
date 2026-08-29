@@ -45,9 +45,11 @@ still insufficient.
 
 Add one typed `r9p mount read-ahead` host operation. It accepts only one exact
 `fuse.r9p` mount, derives its backing-device coordinate from mountinfo, writes
-a bounded read-ahead value, and verifies the observed value. A system service
-can invoke it directly after mounting without embedding shell logic or
-teaching an application module how Linux names FUSE backing devices.
+a bounded read-ahead value, and verifies the observed value. Its bounded
+readiness wait covers the `Type=simple` interval between process execution and
+FUSE attachment. A system service can invoke it directly after mounting
+without embedding shell logic or teaching an application module how Linux
+names FUSE backing devices.
 
 ## Open Question
 

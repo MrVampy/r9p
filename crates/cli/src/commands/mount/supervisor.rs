@@ -489,7 +489,7 @@ fn wait_with_timeout(child: &mut std::process::Child, timeout: Duration) -> std:
 
 fn mount_supervisor_usage(code: i32) -> ! {
     eprintln!(
-        "usage: r9p mount ensure|status|stop --mountpoint path [--unit name --unit-scope user|system] [--status-file path] [--expect-endpoint endpoint] [--expect-change-feed path] [--expect-status-file path] [--attempts count] [-- mount args...]\n       r9p mount read-ahead --mountpoint path --kilobytes count"
+        "usage: r9p mount ensure|status|stop --mountpoint path [--unit name --unit-scope user|system] [--status-file path] [--expect-endpoint endpoint] [--expect-change-feed path] [--expect-status-file path] [--attempts count] [-- mount args...]\n       r9p mount read-ahead --mountpoint path --kilobytes count [--attempts count]"
     );
     std::process::exit(code);
 }

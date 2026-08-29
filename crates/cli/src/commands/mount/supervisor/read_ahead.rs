@@ -1,28 +1,55 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    thread,
+    time::Duration,
+};
 
 use crate::errors::{cli_error, CliResult};
 
 const MINIMUM_KILOBYTES: u64 = 128;
 const MAXIMUM_KILOBYTES: u64 = 16 * 1024;
+const DEFAULT_ATTEMPTS: usize = 50;
+const MAXIMUM_ATTEMPTS: usize = 600;
+const RETRY_INTERVAL: Duration = Duration::from_millis(100);
+
+struct Config {
+    mountpoint: PathBuf,
+    kilobytes: u64,
+    attempts: usize,
+}
 
 pub(super) fn run(args: Vec<String>) -> CliResult<()> {
-    let (mountpoint, kilobytes) = parse(args)?;
-    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")
-        .map_err(|error| cli_error(format!("read mountinfo: {error}")))?;
-    let path =
-        backing_device_read_ahead_path(&mountinfo, &mountpoint, Path::new("/sys/class/bdi"))?;
-    write_and_verify(&path, kilobytes)?;
+    let config = parse(args)?;
+    let mut attempt = 0;
+    let path = loop {
+        let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")
+            .map_err(|error| cli_error(format!("read mountinfo: {error}")))?;
+        match backing_device_read_ahead_path(
+            &mountinfo,
+            &config.mountpoint,
+            Path::new("/sys/class/bdi"),
+        ) {
+            Ok(path) => break path,
+            Err(error) if attempt < config.attempts => {
+                attempt += 1;
+                thread::sleep(RETRY_INTERVAL);
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    write_and_verify(&path, config.kilobytes)?;
     println!(
         "mountpoint {} read_ahead_kb {}",
-        mountpoint.display(),
-        kilobytes
+        config.mountpoint.display(),
+        config.kilobytes
     );
     Ok(())
 }
 
-fn parse(args: Vec<String>) -> CliResult<(PathBuf, u64)> {
+fn parse(args: Vec<String>) -> CliResult<Config> {
     let mut mountpoint = None;
     let mut kilobytes = None;
+    let mut attempts = DEFAULT_ATTEMPTS;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
@@ -46,6 +73,17 @@ fn parse(args: Vec<String>) -> CliResult<(PathBuf, u64)> {
                         .ok_or_else(|| cli_error("read-ahead kilobytes outside allowed range"))?,
                 );
             }
+            "--attempts" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| cli_error("missing read-ahead attempts"))?;
+                attempts = value
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|value| *value <= MAXIMUM_ATTEMPTS)
+                    .ok_or_else(|| cli_error("read-ahead attempts outside allowed range"))?;
+            }
             value => return Err(cli_error(format!("unknown read-ahead option {value}"))),
         }
         index += 1;
@@ -54,10 +92,11 @@ fn parse(args: Vec<String>) -> CliResult<(PathBuf, u64)> {
     if !mountpoint.is_absolute() {
         return Err(cli_error("read-ahead mountpoint must be absolute"));
     }
-    Ok((
+    Ok(Config {
         mountpoint,
-        kilobytes.ok_or_else(|| cli_error("missing --kilobytes"))?,
-    ))
+        kilobytes: kilobytes.ok_or_else(|| cli_error("missing --kilobytes"))?,
+        attempts,
+    })
 }
 
 fn backing_device_read_ahead_path(
@@ -168,18 +207,30 @@ mod tests {
 
     #[test]
     fn bounds_the_configured_window() {
-        assert!(parse(vec![
+        let config = parse(vec![
             "--mountpoint".to_string(),
             "/mnt/data".to_string(),
             "--kilobytes".to_string(),
             "4096".to_string(),
+            "--attempts".to_string(),
+            "100".to_string(),
         ])
-        .is_ok());
+        .expect("config");
+        assert_eq!(config.attempts, 100);
         assert!(parse(vec![
             "--mountpoint".to_string(),
             "/mnt/data".to_string(),
             "--kilobytes".to_string(),
             "65536".to_string(),
+        ])
+        .is_err());
+        assert!(parse(vec![
+            "--mountpoint".to_string(),
+            "/mnt/data".to_string(),
+            "--kilobytes".to_string(),
+            "4096".to_string(),
+            "--attempts".to_string(),
+            "601".to_string(),
         ])
         .is_err());
     }

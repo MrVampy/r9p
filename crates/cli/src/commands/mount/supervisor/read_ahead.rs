@@ -22,11 +22,9 @@ pub(super) fn run(args: Vec<String>) -> CliResult<()> {
     let config = parse(args)?;
     let mut attempt = 0;
     let path = loop {
-        let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")
-            .map_err(|error| cli_error(format!("read mountinfo: {error}")))?;
-        match backing_device_read_ahead_path(
-            &mountinfo,
+        match ready_backing_device_read_ahead_path(
             &config.mountpoint,
+            Path::new("/proc/self/mountinfo"),
             Path::new("/sys/class/bdi"),
         ) {
             Ok(path) => break path,
@@ -44,6 +42,34 @@ pub(super) fn run(args: Vec<String>) -> CliResult<()> {
         config.kilobytes
     );
     Ok(())
+}
+
+fn ready_backing_device_read_ahead_path(
+    mountpoint: &Path,
+    mountinfo_path: &Path,
+    bdi_root: &Path,
+) -> CliResult<PathBuf> {
+    let before = std::fs::read_to_string(mountinfo_path)
+        .map_err(|error| cli_error(format!("read mountinfo: {error}")))?;
+    let before = backing_device_read_ahead_path(&before, mountpoint, bdi_root)?;
+    require_ready_mountpoint(mountpoint)?;
+    let after = std::fs::read_to_string(mountinfo_path)
+        .map_err(|error| cli_error(format!("read mountinfo: {error}")))?;
+    let after = backing_device_read_ahead_path(&after, mountpoint, bdi_root)?;
+    if before != after {
+        return Err(cli_error("r9p_mount_replaced_during_readiness"));
+    }
+    Ok(after)
+}
+
+fn require_ready_mountpoint(mountpoint: &Path) -> CliResult<()> {
+    let metadata = std::fs::metadata(mountpoint)
+        .map_err(|error| cli_error(format!("r9p_mount_not_ready:{error}")))?;
+    if metadata.is_dir() {
+        Ok(())
+    } else {
+        Err(cli_error("r9p_mountpoint_not_directory"))
+    }
 }
 
 fn parse(args: Vec<String>) -> CliResult<Config> {
@@ -245,6 +271,19 @@ mod tests {
         std::fs::write(&path, "128\n").expect("initial value");
         write_and_verify(&path, 4096).expect("verified write");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "4096\n");
+        std::fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn readiness_requires_a_served_directory() {
+        let directory =
+            std::env::temp_dir().join(format!("r9p-ready-mount-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("directory");
+        require_ready_mountpoint(&directory).expect("ready directory");
+        let file = directory.join("file");
+        std::fs::write(&file, b"file").expect("file");
+        assert!(require_ready_mountpoint(&file).is_err());
         std::fs::remove_dir_all(directory).expect("cleanup");
     }
 }

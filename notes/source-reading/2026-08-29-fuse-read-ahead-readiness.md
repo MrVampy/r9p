@@ -11,6 +11,12 @@ kernel replace that value when FUSE initialization completes.
 The live Newsgroups mount demonstrated the exact race. The post-start command
 logged 4096 KiB, but the backing device changed to 128 KiB about 300 ms later.
 
+The first readiness implementation ran as root because writing
+`/sys/class/bdi/.../read_ahead_kb` requires privilege. A normal FUSE mount
+without `allow_root` rejects root traversal, so the metadata request failed
+with `EACCES` even though the mount was healthy. Linux exposes the admitted
+mount owner as `user_id` in the mountinfo super options.
+
 ## Source
 
 - `refs/linux-kernel/fs/fuse/inode.c` in the Coordinator workspace,
@@ -26,7 +32,9 @@ logged 4096 KiB, but the backing device changed to 128 KiB about 300 ms later.
 ## Consequence
 
 The read-ahead command now performs a metadata operation through the mounted
-FUSE root before writing the backing-device value. That operation cannot
-complete until FUSE initialization is released. It then re-reads mountinfo and
-requires the same backing-device identity, so a concurrent remount is retried
-instead of configuring the wrong mount.
+FUSE root under the kernel-reported mount-owner fsuid before writing the
+backing-device value as its privileged caller. That operation cannot complete
+until FUSE initialization is released. The command restores its original
+fsuid, re-reads mountinfo, and requires the same backing-device identity and
+owner, so a concurrent remount is retried instead of configuring the wrong
+mount.

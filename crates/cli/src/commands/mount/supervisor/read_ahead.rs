@@ -28,7 +28,7 @@ pub(super) fn run(args: Vec<String>) -> CliResult<()> {
             Path::new("/sys/class/bdi"),
         ) {
             Ok(path) => break path,
-            Err(error) if attempt < config.attempts => {
+            Err(_error) if attempt < config.attempts => {
                 attempt += 1;
                 thread::sleep(RETRY_INTERVAL);
             }
@@ -51,24 +51,48 @@ fn ready_backing_device_read_ahead_path(
 ) -> CliResult<PathBuf> {
     let before = std::fs::read_to_string(mountinfo_path)
         .map_err(|error| cli_error(format!("read mountinfo: {error}")))?;
-    let before = backing_device_read_ahead_path(&before, mountpoint, bdi_root)?;
-    require_ready_mountpoint(mountpoint)?;
+    let before = backing_device(&before, mountpoint, bdi_root)?;
+    require_ready_mountpoint(mountpoint, before.owner_uid)?;
     let after = std::fs::read_to_string(mountinfo_path)
         .map_err(|error| cli_error(format!("read mountinfo: {error}")))?;
-    let after = backing_device_read_ahead_path(&after, mountpoint, bdi_root)?;
+    let after = backing_device(&after, mountpoint, bdi_root)?;
     if before != after {
         return Err(cli_error("r9p_mount_replaced_during_readiness"));
     }
-    Ok(after)
+    Ok(after.read_ahead_path)
 }
 
-fn require_ready_mountpoint(mountpoint: &Path) -> CliResult<()> {
+fn require_ready_mountpoint(mountpoint: &Path, owner_uid: u32) -> CliResult<()> {
+    let _fsuid = FsuidGuard::set(owner_uid)?;
     let metadata = std::fs::metadata(mountpoint)
         .map_err(|error| cli_error(format!("r9p_mount_not_ready:{error}")))?;
     if metadata.is_dir() {
         Ok(())
     } else {
         Err(cli_error("r9p_mountpoint_not_directory"))
+    }
+}
+
+struct FsuidGuard {
+    previous: libc::c_int,
+}
+
+impl FsuidGuard {
+    fn set(uid: u32) -> CliResult<Self> {
+        let uid: libc::uid_t = uid;
+        let previous = unsafe { libc::setfsuid(uid) };
+        let observed = unsafe { libc::setfsuid(uid) };
+        if observed as libc::uid_t != uid {
+            unsafe { libc::setfsuid(previous as libc::uid_t) };
+            return Err(cli_error("r9p_mount_owner_fsuid_unavailable"));
+        }
+        Ok(Self { previous })
+    }
+}
+
+impl Drop for FsuidGuard {
+    fn drop(&mut self) {
+        unsafe { libc::setfsuid(self.previous as libc::uid_t) };
     }
 }
 
@@ -125,11 +149,13 @@ fn parse(args: Vec<String>) -> CliResult<Config> {
     })
 }
 
-fn backing_device_read_ahead_path(
-    mountinfo: &str,
-    mountpoint: &Path,
-    bdi_root: &Path,
-) -> CliResult<PathBuf> {
+#[derive(Debug, Eq, PartialEq)]
+struct BackingDevice {
+    read_ahead_path: PathBuf,
+    owner_uid: u32,
+}
+
+fn backing_device(mountinfo: &str, mountpoint: &Path, bdi_root: &Path) -> CliResult<BackingDevice> {
     let target = mountpoint
         .to_str()
         .ok_or_else(|| cli_error("mountpoint is not valid UTF-8"))?;
@@ -151,7 +177,13 @@ fn backing_device_read_ahead_path(
     if record.filesystem != "fuse.r9p" || !record.source.starts_with("r9p:") {
         return Err(cli_error(format!("r9p_mount_type_invalid:{target}")));
     }
-    Ok(bdi_root.join(&record.major_minor).join("read_ahead_kb"))
+    let owner_uid = record
+        .owner_uid
+        .ok_or_else(|| cli_error(format!("r9p_mount_owner_missing:{target}")))?;
+    Ok(BackingDevice {
+        read_ahead_path: bdi_root.join(&record.major_minor).join("read_ahead_kb"),
+        owner_uid,
+    })
 }
 
 fn write_and_verify(path: &Path, kilobytes: u64) -> CliResult<()> {
@@ -178,6 +210,7 @@ struct MountRecord {
     target: String,
     filesystem: String,
     source: String,
+    owner_uid: Option<u32>,
 }
 
 fn parse_mount_record(line: &str) -> Option<MountRecord> {
@@ -191,6 +224,16 @@ fn parse_mount_record(line: &str) -> Option<MountRecord> {
         target: super::decode_mountinfo_path(fields[4]),
         filesystem: fields[separator + 1].to_string(),
         source: fields[separator + 2].to_string(),
+        owner_uid: fields
+            .get(separator + 3)
+            .and_then(|options| mount_option_u32(options, "user_id")),
+    })
+}
+
+fn mount_option_u32(options: &str, name: &str) -> Option<u32> {
+    options.split(',').find_map(|option| {
+        let (key, value) = option.split_once('=')?;
+        (key == name).then(|| value.parse::<u32>().ok()).flatten()
     })
 }
 
@@ -205,14 +248,18 @@ mod tests {
 
     #[test]
     fn derives_only_the_exact_r9p_backing_device() {
-        let path = backing_device_read_ahead_path(
+        let device = backing_device(
             MOUNTINFO,
             Path::new("/home/mrvamp/Newsgroups"),
             Path::new("/sys/class/bdi"),
         )
-        .expect("path");
-        assert_eq!(path, Path::new("/sys/class/bdi/0:85/read_ahead_kb"));
-        assert!(backing_device_read_ahead_path(
+        .expect("device");
+        assert_eq!(
+            device.read_ahead_path,
+            Path::new("/sys/class/bdi/0:85/read_ahead_kb")
+        );
+        assert_eq!(device.owner_uid, 1000);
+        assert!(backing_device(
             MOUNTINFO,
             Path::new("/mnt/local"),
             Path::new("/sys/class/bdi"),
@@ -221,9 +268,21 @@ mod tests {
     }
 
     #[test]
+    fn requires_the_kernel_reported_fuse_owner() {
+        let without_owner = MOUNTINFO.replace("rw,user_id=1000", "rw");
+        let error = backing_device(
+            &without_owner,
+            Path::new("/home/mrvamp/Newsgroups"),
+            Path::new("/sys/class/bdi"),
+        )
+        .expect_err("FUSE owner must be declared");
+        assert!(error.to_string().contains("r9p_mount_owner_missing"));
+    }
+
+    #[test]
     fn rejects_stacked_mount_layers() {
         let stacked = format!("{MOUNTINFO}{}", MOUNTINFO.lines().next().unwrap());
-        assert!(backing_device_read_ahead_path(
+        assert!(backing_device(
             &stacked,
             Path::new("/home/mrvamp/Newsgroups"),
             Path::new("/sys/class/bdi"),
@@ -280,10 +339,11 @@ mod tests {
             std::env::temp_dir().join(format!("r9p-ready-mount-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("directory");
-        require_ready_mountpoint(&directory).expect("ready directory");
+        let owner_uid = unsafe { libc::geteuid() };
+        require_ready_mountpoint(&directory, owner_uid).expect("ready directory");
         let file = directory.join("file");
         std::fs::write(&file, b"file").expect("file");
-        assert!(require_ready_mountpoint(&file).is_err());
+        assert!(require_ready_mountpoint(&file, owner_uid).is_err());
         std::fs::remove_dir_all(directory).expect("cleanup");
     }
 }

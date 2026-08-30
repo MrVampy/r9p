@@ -7,6 +7,7 @@ members = [
     "crates/fs",
     "crates/fuse",
     "crates/front",
+    "crates/mount-cli",
     "crates/reverse",
     "crates/session",
 ]
@@ -27,6 +28,7 @@ unwrap_used = "deny"
 # Certificates sign with Ed25519 while session keys stay X25519 Noise statics:
 # the same split Nebula uses, because a DH key cannot sign.
 clap = { version = "4", features = ["derive"] }
+cli = { version = "0.1.0", path = "crates/cli" }
 ed25519-dalek = { version = "=2.2.0", default-features = false, features = [
     "zeroize",
 ] }

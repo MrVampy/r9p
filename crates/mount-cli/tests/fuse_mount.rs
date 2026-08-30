@@ -467,9 +467,9 @@ fn host_can_run_fuse() -> bool {
 }
 
 fn r9p_bin() -> PathBuf {
-    std::env::var_os("CARGO_BIN_EXE_r9p")
+    std::env::var_os("CARGO_BIN_EXE_r9p-mount")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("target/debug/r9p"))
+        .unwrap_or_else(|| PathBuf::from("target/debug/r9p-mount"))
 }
 
 fn unique_temp_dir(label: &str) -> io::Result<PathBuf> {

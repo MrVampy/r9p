@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use crate::errors::{cli_error, CliResult};
+use cli::{cli_error, CliResult};
 use fuse::Config as MountConfig;
 use session::control::{ControlConfig, ControlRuntime};
 

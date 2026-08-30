@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::errors::{cli_error, CliResult};
+use cli::{cli_error, CliResult};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct MountSupervisorConfig {

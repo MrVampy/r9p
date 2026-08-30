@@ -4,17 +4,17 @@ use crate::errors::{cli_error, CliResult};
 use crate::usage;
 
 #[derive(Clone, Debug)]
-pub(crate) struct Config {
-    pub(crate) address: Option<String>,
-    pub(crate) auth_config: Option<PathBuf>,
-    pub(crate) auth_domain: Option<String>,
-    pub(crate) aname: String,
-    pub(crate) uname: String,
-    pub(crate) msize: u32,
-    pub(crate) msize_set: bool,
-    pub(crate) machine: bool,
-    pub(crate) request_timeout: Option<Duration>,
-    pub(crate) control_timeout: Option<Duration>,
+pub struct Config {
+    pub address: Option<String>,
+    pub auth_config: Option<PathBuf>,
+    pub auth_domain: Option<String>,
+    pub aname: String,
+    pub uname: String,
+    pub msize: u32,
+    pub msize_set: bool,
+    pub machine: bool,
+    pub request_timeout: Option<Duration>,
+    pub control_timeout: Option<Duration>,
 }
 
 #[derive(Clone, Debug)]
@@ -23,9 +23,7 @@ pub(crate) struct Target {
     pub(crate) path: String,
 }
 
-pub(crate) fn client_authentication(
-    config: &Config,
-) -> CliResult<session::ConnectionAuthentication> {
+pub fn client_authentication(config: &Config) -> CliResult<session::ConnectionAuthentication> {
     let Some(path) = config.auth_config.clone() else {
         if config.auth_domain.is_some() {
             return Err(cli_error("--auth-domain requires --auth-config"));

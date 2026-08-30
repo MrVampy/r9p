@@ -1,6 +1,7 @@
 use crate::{
     error::{Error, Result},
     fuse::{
+        read_cache::CacheIdentity,
         reply::{read_struct, reply_bytes, reply_error},
         util::{is_namespace_shape_error, is_transport_error},
         wire::{FuseInHeader, FuseReadIn},
@@ -54,38 +55,35 @@ impl R9pFuse {
         payload: &[u8],
     ) -> Result<()> {
         let input = read_struct::<FuseReadIn>(payload)?;
-        let known_length = {
+        let (stat, cache_identity) = {
             let nodes = self.nodes()?;
-            nodes.node(header.nodeid)?.stat.length
+            let node = nodes.node(header.nodeid)?;
+            let identity = read_cache_identity(&node.stat, node.stat_freshness.is_stale());
+            (node.stat.clone(), identity)
         };
+        let known_length = stat.length;
         if read_is_known_eof(known_length, input.offset) {
             return reply_bytes(file, header.unique, &[]);
         }
         let count = read_count(known_length, input.offset, input.size);
         let handle = self.nodes()?.handle(input.fh)?.clone();
         let fid = handle.require_fid()?;
-        let data = match if known_length > 0 {
-            handle
-                .client
-                .read_full_timeout(fid, input.offset, count, self.read_timeout())
-        } else {
-            handle
-                .client
-                .read_timeout(fid, input.offset, count, self.read_timeout())
-        } {
+        let data = match self.read_handle_range(
+            &handle.client,
+            fid,
+            handle.open_mode,
+            &stat,
+            cache_identity,
+            input.offset,
+            count,
+        ) {
             Ok(data) => data,
             Err(error)
                 if is_transport_error(&error)
                     && read_handle_is_replayable(handle.is_dir, handle.write_on_release) =>
             {
                 self.reconnect()?;
-                self.read_from_reopened_handle(
-                    header.nodeid,
-                    input.fh,
-                    input.offset,
-                    count,
-                    known_length > 0,
-                )?
+                self.read_from_reopened_handle(header.nodeid, input.fh, input.offset, count)?
             }
             Err(error) if is_transport_error(&error) => {
                 self.reconnect()?;
@@ -96,13 +94,7 @@ impl R9pFuse {
                     && read_handle_is_replayable(handle.is_dir, handle.write_on_release) =>
             {
                 self.recover_namespace_shape(header.nodeid)?;
-                self.read_from_reopened_handle(
-                    header.nodeid,
-                    input.fh,
-                    input.offset,
-                    count,
-                    known_length > 0,
-                )?
+                self.read_from_reopened_handle(header.nodeid, input.fh, input.offset, count)?
             }
             Err(error) if is_namespace_shape_error(&error) => {
                 self.recover_namespace_shape(header.nodeid)?;
@@ -119,7 +111,6 @@ impl R9pFuse {
         handle_id: u64,
         offset: u64,
         size: u32,
-        fill_requested: bool,
     ) -> Result<Vec<u8>> {
         let (client, node_fid) = self.bound_node_fid(nodeid)?;
         let fid = client.clone_fid_timeout(node_fid, self.lookup_timeout())?;
@@ -141,7 +132,40 @@ impl R9pFuse {
         let _ = old_handle
             .client
             .clunk_timeout(old_handle.require_fid()?, self.control_timeout());
-        if fill_requested {
+        let (stat, cache_identity) = {
+            let nodes = self.nodes()?;
+            let node = nodes.node(nodeid)?;
+            let identity = read_cache_identity(&node.stat, node.stat_freshness.is_stale());
+            (node.stat.clone(), identity)
+        };
+        self.read_handle_range(&client, fid, OREAD, &stat, cache_identity, offset, size)
+    }
+
+    fn read_handle_range(
+        &self,
+        client: &session::Client,
+        fid: r9p::fid::Fid,
+        open_mode: u8,
+        stat: &r9p::stat::Stat,
+        cache_identity: Option<CacheIdentity>,
+        offset: u64,
+        size: u32,
+    ) -> Result<Vec<u8>> {
+        if open_mode == OREAD {
+            if let (Some(cache), Some(identity)) = (self.read_cache.as_ref(), cache_identity) {
+                let result = cache.read(identity, offset, size, |range_offset, range_size| {
+                    Ok(client.read_full_timeout(
+                        fid,
+                        range_offset,
+                        range_size,
+                        self.read_timeout(),
+                    )?)
+                });
+                self.status.set_read_cache(cache.snapshot());
+                return result;
+            }
+        }
+        if stat.length > 0 {
             Ok(client.read_full_timeout(fid, offset, size, self.read_timeout())?)
         } else {
             Ok(client.read_timeout(fid, offset, size, self.read_timeout())?)
@@ -170,9 +194,18 @@ fn read_handle_is_replayable(is_dir: bool, write_on_release: bool) -> bool {
     !is_dir && !write_on_release
 }
 
+fn read_cache_identity(stat: &r9p::stat::Stat, stale: bool) -> Option<CacheIdentity> {
+    if stale {
+        None
+    } else {
+        CacheIdentity::from_stat(stat)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{read_count, read_handle_is_replayable, read_is_known_eof};
+    use super::{read_cache_identity, read_count, read_handle_is_replayable, read_is_known_eof};
+    use r9p::{qid::Qid, stat::Stat};
 
     #[test]
     fn read_at_known_positive_length_is_eof() {
@@ -203,5 +236,13 @@ mod tests {
         assert!(read_handle_is_replayable(false, false));
         assert!(!read_handle_is_replayable(false, true));
         assert!(!read_handle_is_replayable(true, false));
+    }
+
+    #[test]
+    fn namespace_invalidation_bypasses_persistent_cache_until_stat_refresh() {
+        let mut stat = Stat::new("video.mp4", Qid::new(0, 4, 7), 0o444);
+        stat.length = 32;
+        assert!(read_cache_identity(&stat, false).is_some());
+        assert!(read_cache_identity(&stat, true).is_none());
     }
 }

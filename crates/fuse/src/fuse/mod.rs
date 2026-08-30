@@ -15,6 +15,7 @@ mod invalidation;
 mod mount;
 mod mount_state;
 mod ops;
+mod read_cache;
 mod recovery;
 mod reply;
 mod status;
@@ -29,8 +30,9 @@ use crate::{
     error::{Error, Result},
     node::NodeTable,
 };
-use config::{normalize_config, parse_source_path};
+use config::{normalize_config, parse_source_path, read_cache_volume_identity};
 use mount::{block_termination_signals, mount_fuse, FuseMount, MountCleanup};
+use read_cache::ReadCache;
 use recovery::ShapeRecovery;
 use session::{feed::FeedEventReceiver, ClientSession};
 use status::MountStatus;
@@ -45,6 +47,7 @@ use std::{
 pub use config::{
     default_congestion_threshold, Config, DEFAULT_ATTR_TIMEOUT, DEFAULT_ENTRY_TIMEOUT,
     DEFAULT_MAX_BACKGROUND, DEFAULT_MAX_WORKERS, DEFAULT_NEGATIVE_TIMEOUT,
+    MAX_PERSISTENT_READ_CACHE_BYTES, PERSISTENT_READ_CACHE_CHUNK_BYTES,
 };
 
 pub struct MountHandle {
@@ -142,6 +145,7 @@ pub struct R9pFuse {
     config: Config,
     diagnostics: Diagnostics,
     status: MountStatus,
+    read_cache: Option<ReadCache>,
     uid: u32,
     gid: u32,
     max_request_bytes: u32,
@@ -201,6 +205,14 @@ impl R9pFuse {
 
     fn prepare(config: Config, client: ClientSession) -> Result<Self> {
         let source_path = parse_source_path(&config.source_path)?;
+        let read_cache = match config.read_cache_path.as_ref() {
+            Some(path) => Some(ReadCache::open(
+                path,
+                config.read_cache_max_bytes,
+                &read_cache_volume_identity(&config)?,
+            )?),
+            None => None,
+        };
         let diagnostics =
             Diagnostics::new(config.diagnostics_capacity, config.diagnostics_path.clone());
         let status = MountStatus::new(
@@ -209,6 +221,9 @@ impl R9pFuse {
             client.active_address(),
             client.candidate_addresses(),
         );
+        if let Some(cache) = read_cache.as_ref() {
+            status.set_read_cache(cache.snapshot());
+        }
         let client_snapshot = client.snapshot()?;
         let max_request_bytes = client_snapshot
             .max_write_payload()
@@ -220,13 +235,14 @@ impl R9pFuse {
             0,
             0,
             format!(
-                "source={} endpoint={} candidates={} msize={} max_write_payload={} fuse_max_request_bytes={}",
+                "source={} endpoint={} candidates={} msize={} max_write_payload={} fuse_max_request_bytes={} persistent_read_cache={}",
                 config.source_path,
                 client.active_address(),
                 client.candidate_addresses().join(","),
                 client_snapshot.msize(),
                 client_snapshot.max_write_payload(),
-                max_request_bytes
+                max_request_bytes,
+                if read_cache.is_some() { "enabled" } else { "disabled" }
             ),
         );
         let (root_fid, root_stat) =
@@ -241,6 +257,7 @@ impl R9pFuse {
             config,
             diagnostics,
             status,
+            read_cache,
             uid,
             gid,
             max_request_bytes,

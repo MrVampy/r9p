@@ -1,12 +1,18 @@
 //! Small local status sink for long-running mounts.
 
-use crate::error::{Error, Result};
+use crate::{
+    error::{Error, Result},
+    fuse::read_cache::CacheSnapshot,
+};
 use std::{
     fs::OpenOptions,
     io::Write,
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
+
+const CACHE_STATUS_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
 pub(super) struct MountStatus {
@@ -23,6 +29,8 @@ struct State {
     source: Option<&'static str>,
     last_event_id: Option<String>,
     last_error: Option<String>,
+    read_cache: Option<CacheSnapshot>,
+    last_cache_publish: Option<Instant>,
 }
 
 impl MountStatus {
@@ -42,6 +50,8 @@ impl MountStatus {
                 source: None,
                 last_event_id: None,
                 last_error: None,
+                read_cache: None,
+                last_cache_publish: None,
             })),
         };
         status.publish();
@@ -81,6 +91,25 @@ impl MountStatus {
         let _ = write_status(snapshot);
     }
 
+    pub(super) fn set_read_cache(&self, read_cache: CacheSnapshot) {
+        let snapshot = {
+            let Ok(mut state) = self.state.lock() else {
+                return;
+            };
+            state.read_cache = Some(read_cache);
+            let now = Instant::now();
+            if state
+                .last_cache_publish
+                .is_some_and(|last| now.duration_since(last) < CACHE_STATUS_INTERVAL)
+            {
+                return;
+            }
+            state.last_cache_publish = Some(now);
+            state.clone()
+        };
+        let _ = write_status(snapshot);
+    }
+
     fn publish(&self) {
         let snapshot = {
             let Ok(state) = self.state.lock() else {
@@ -108,14 +137,34 @@ fn write_status(state: State) -> Result<()> {
 
 fn status_json(state: &State) -> String {
     format!(
-        "{{\"namespace_source\":\"{}\",\"active_endpoint\":\"{}\",\"endpoint_candidates\":{},\"change_feed\":\"{}\",\"source\":{},\"last_event_id\":{},\"last_error\":{}}}",
+        "{{\"namespace_source\":\"{}\",\"active_endpoint\":\"{}\",\"endpoint_candidates\":{},\"change_feed\":\"{}\",\"source\":{},\"last_event_id\":{},\"last_error\":{},\"persistent_read_cache\":{}}}",
         escape_json(&state.namespace_source),
         escape_json(&state.active_endpoint),
         string_array_json(&state.endpoint_candidates),
         state.change_feed,
         optional_static_json(state.source),
         optional_json(&state.last_event_id),
-        optional_json(&state.last_error)
+        optional_json(&state.last_error),
+        read_cache_json(state.read_cache)
+    )
+}
+
+fn read_cache_json(snapshot: Option<CacheSnapshot>) -> String {
+    let Some(snapshot) = snapshot else {
+        return "{\"state\":\"disabled\"}".to_string();
+    };
+    format!(
+        "{{\"state\":\"ready\",\"chunk_bytes\":{},\"max_bytes\":{},\"current_bytes\":{},\"hit_chunks\":{},\"miss_chunks\":{},\"hit_bytes\":{},\"fetched_bytes\":{},\"evictions\":{},\"read_errors\":{},\"write_errors\":{}}}",
+        snapshot.chunk_bytes,
+        snapshot.max_bytes,
+        snapshot.current_bytes,
+        snapshot.hit_chunks,
+        snapshot.miss_chunks,
+        snapshot.hit_bytes,
+        snapshot.fetched_bytes,
+        snapshot.evictions,
+        snapshot.read_errors,
+        snapshot.write_errors
     )
 }
 
@@ -164,7 +213,7 @@ fn escape_json(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{status_json, State};
+    use super::{status_json, CacheSnapshot, State};
 
     #[test]
     fn status_json_reports_feed_state() {
@@ -177,6 +226,19 @@ mod tests {
             source: Some("stream"),
             last_event_id: Some("event-1".to_string()),
             last_error: Some("feed missing".to_string()),
+            read_cache: Some(CacheSnapshot {
+                chunk_bytes: 4 * 1024 * 1024,
+                max_bytes: 1024 * 1024 * 1024,
+                current_bytes: 8 * 1024 * 1024,
+                hit_chunks: 3,
+                miss_chunks: 2,
+                hit_bytes: 4096,
+                fetched_bytes: 8192,
+                evictions: 1,
+                read_errors: 0,
+                write_errors: 0,
+            }),
+            last_cache_publish: None,
         });
         assert!(json.contains("\"namespace_source\":\"/sources/newsgroups/browse\""));
         assert!(json.contains("\"active_endpoint\":\"nucbox.mesh:9564\""));
@@ -185,5 +247,7 @@ mod tests {
         assert!(json.contains("\"source\":\"stream\""));
         assert!(json.contains("\"last_event_id\":\"event-1\""));
         assert!(json.contains("\"last_error\":\"feed missing\""));
+        assert!(json.contains("\"persistent_read_cache\":{\"state\":\"ready\""));
+        assert!(json.contains("\"hit_chunks\":3"));
     }
 }

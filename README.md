@@ -409,6 +409,16 @@ for all 9P operations, while `--lookup-timeout`, `--read-timeout`,
 nodeid, errno, and message fields. Namespace-control writes explicitly
 invalidate affected FUSE inode and dentry cache entries.
 
+An opt-in persistent read-through cache keeps bounded 4 MiB ranges on local
+disk across mount restarts. Configure it with `--read-cache PATH` and
+`--read-cache-max-bytes BYTES` alongside `--coherent-read-cache` and the
+namespace change feed. Only read-only regular files with a known length and a
+nonzero 9P `qid.version` are eligible. A stale node bypasses the persistent
+cache until a fresh stat supplies its current identity. The private cache
+directory admits one mount owner, publishes complete ranges atomically, evicts
+least-recently-used ranges at the configured quota, and reports hit, miss,
+fetch, eviction, and local I/O error counters through the mount status file.
+
 `--machine` keeps the same connection flags but emits tab-separated records
 with byte fields hex-encoded. It is intended for typed wrappers that need a
 stable one-shot client surface without parsing the human plan9port-style output:

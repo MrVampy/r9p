@@ -196,6 +196,9 @@ This map defines the local sources agents should inspect before making source-sp
 - `notes/source-reading/2026-08-15-fuse-namespace-source-provenance.md`
   - FUSE `fsname` and subtype provenance for translating a local projection
     path back to its original logical namespace source.
+- `notes/source-reading/2026-08-30-persistent-fuse-range-cache.md`
+  - Persistent client-side range-cache identity, coherence, quota, ownership,
+    and the boundary that keeps service bytes off Coordinator.
 - `notes/source-reading/2026-08-16-owner-atomic-cross-parent-rename.md`
   - Source-backed boundary between plain `Twstat`, the exact `Trenameat` wire
     shape admitted by 9P2000.R, and one application-owner rename transaction.

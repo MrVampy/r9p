@@ -5,13 +5,14 @@ use crate::{
 use std::{path::PathBuf, time::Duration};
 
 use super::change_feed;
-
 pub const DEFAULT_MAX_WORKERS: usize = 10;
 pub const DEFAULT_MAX_BACKGROUND: u16 = 12;
 pub const DEFAULT_CHANGE_FEED_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 pub const DEFAULT_ATTR_TIMEOUT: Duration = Duration::from_secs(1);
 pub const DEFAULT_ENTRY_TIMEOUT: Duration = Duration::from_secs(1);
 pub const DEFAULT_NEGATIVE_TIMEOUT: Duration = Duration::ZERO;
+pub const PERSISTENT_READ_CACHE_CHUNK_BYTES: u32 = 4 * 1024 * 1024;
+pub const MAX_PERSISTENT_READ_CACHE_BYTES: u64 = PERSISTENT_READ_CACHE_CHUNK_BYTES as u64 * 65_536;
 
 pub fn default_congestion_threshold(max_background: u16) -> u16 {
     ((u32::from(max_background) * 3 / 4).max(1)) as u16
@@ -52,6 +53,8 @@ pub struct Config {
     pub change_feed_reconnect_delay: Duration,
     pub change_feed_backpressure_limit: usize,
     pub coherent_read_cache: bool,
+    pub read_cache_path: Option<PathBuf>,
+    pub read_cache_max_bytes: u64,
     pub allow_other: bool,
     pub debug: bool,
 }
@@ -122,6 +125,48 @@ pub(super) fn normalize_config(config: &mut Config) -> Result<()> {
     if config.congestion_threshold == 0 || config.congestion_threshold > config.max_background {
         config.congestion_threshold = default_congestion_threshold(config.max_background);
     }
+    match (&config.read_cache_path, config.read_cache_max_bytes) {
+        (None, 0) => {}
+        (Some(path), max_bytes)
+            if path.is_absolute()
+                && max_bytes >= u64::from(PERSISTENT_READ_CACHE_CHUNK_BYTES)
+                && max_bytes <= MAX_PERSISTENT_READ_CACHE_BYTES
+                && config.coherent_read_cache => {}
+        (Some(path), _) if !path.is_absolute() => {
+            return Err(Error::new(
+                libc::EINVAL,
+                "persistent read cache path must be absolute",
+            ));
+        }
+        (Some(_), max_bytes) if max_bytes < u64::from(PERSISTENT_READ_CACHE_CHUNK_BYTES) => {
+            return Err(Error::new(
+                libc::EINVAL,
+                format!(
+                    "persistent read cache quota must be at least {PERSISTENT_READ_CACHE_CHUNK_BYTES} bytes"
+                ),
+            ));
+        }
+        (Some(_), max_bytes) if max_bytes > MAX_PERSISTENT_READ_CACHE_BYTES => {
+            return Err(Error::new(
+                libc::EINVAL,
+                format!(
+                    "persistent read cache quota must not exceed {MAX_PERSISTENT_READ_CACHE_BYTES} bytes"
+                ),
+            ));
+        }
+        (Some(_), _) => {
+            return Err(Error::new(
+                libc::EINVAL,
+                "persistent read cache requires coherent read caching",
+            ));
+        }
+        (None, _) => {
+            return Err(Error::new(
+                libc::EINVAL,
+                "persistent read cache quota requires a cache path",
+            ));
+        }
+    }
     match (
         config.change_feed_path.as_ref(),
         config.change_feed_stream_path.as_ref(),
@@ -133,4 +178,32 @@ pub(super) fn normalize_config(config: &mut Config) -> Result<()> {
             "change feed requires both catch-up and blocking stream paths",
         )),
     }
+}
+
+pub(super) fn read_cache_volume_identity(config: &Config) -> Result<Vec<u8>> {
+    let authentication = config.authentication.session().ok_or_else(|| {
+        Error::new(
+            libc::EINVAL,
+            "persistent read cache requires an authenticated root",
+        )
+    })?;
+    let responder = authentication.responder().ok_or_else(|| {
+        Error::new(
+            libc::EINVAL,
+            "persistent read cache requires an authenticated root responder",
+        )
+    })?;
+    let mut identity = Vec::new();
+    for value in [
+        config.source_path.as_bytes(),
+        config.uname.as_bytes(),
+        config.aname.as_bytes(),
+        responder.as_str().as_bytes(),
+    ] {
+        let length = u64::try_from(value.len())
+            .map_err(|_| Error::new(libc::EOVERFLOW, "read cache identity field too large"))?;
+        identity.extend_from_slice(&length.to_le_bytes());
+        identity.extend_from_slice(value);
+    }
+    Ok(identity)
 }

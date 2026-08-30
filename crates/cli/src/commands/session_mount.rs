@@ -18,6 +18,8 @@ pub(crate) struct SessionMountConfig {
     entry_timeout: Duration,
     negative_timeout: Duration,
     coherent_read_cache: bool,
+    read_cache_path: Option<PathBuf>,
+    read_cache_max_bytes: u64,
 }
 
 pub(crate) fn take_session_mount_config(args: &mut Vec<String>) -> CliResult<SessionMountConfig> {
@@ -40,6 +42,11 @@ pub(crate) fn take_session_mount_config(args: &mut Vec<String>) -> CliResult<Ses
         .transpose()?
         .unwrap_or(fuse::DEFAULT_NEGATIVE_TIMEOUT);
     let coherent_read_cache = take_flag(args, "--mount-coherent-read-cache");
+    let read_cache_path = take_optional_value(args, "--mount-read-cache")?.map(PathBuf::from);
+    let read_cache_max_bytes = take_optional_value(args, "--mount-read-cache-max-bytes")?
+        .map(|value| parse_read_cache_quota(&value))
+        .transpose()?
+        .unwrap_or(0);
     Ok(SessionMountConfig {
         mountpoint,
         source_path,
@@ -49,6 +56,8 @@ pub(crate) fn take_session_mount_config(args: &mut Vec<String>) -> CliResult<Ses
         entry_timeout,
         negative_timeout,
         coherent_read_cache,
+        read_cache_path,
+        read_cache_max_bytes,
     })
 }
 
@@ -117,6 +126,8 @@ fn mount_config(
         change_feed_reconnect_delay: Duration::ZERO,
         change_feed_backpressure_limit: 0,
         coherent_read_cache: mount.coherent_read_cache,
+        read_cache_path: mount.read_cache_path.clone(),
+        read_cache_max_bytes: mount.read_cache_max_bytes,
         allow_other: false,
         debug: false,
     }
@@ -136,6 +147,19 @@ fn parse_duration_secs(value: &str, name: &str) -> CliResult<Duration> {
         return Err(cli_error(format!("invalid {name} {value}")));
     }
     Ok(Duration::from_secs_f64(seconds))
+}
+
+fn parse_read_cache_quota(value: &str) -> CliResult<u64> {
+    let bytes = value
+        .parse::<u64>()
+        .map_err(|_| cli_error(format!("invalid persistent read cache quota {value}")))?;
+    if bytes == 0 || bytes > fuse::MAX_PERSISTENT_READ_CACHE_BYTES {
+        return Err(cli_error(format!(
+            "persistent read cache quota must be between 1 and {}: {value}",
+            fuse::MAX_PERSISTENT_READ_CACHE_BYTES
+        )));
+    }
+    Ok(bytes)
 }
 
 fn take_optional_value(args: &mut Vec<String>, name: &str) -> CliResult<Option<String>> {
@@ -161,4 +185,33 @@ fn take_optional_value(args: &mut Vec<String>, name: &str) -> CliResult<Option<S
     }
     *args = rest;
     Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::take_session_mount_config;
+    use std::path::Path;
+
+    #[test]
+    fn session_mount_extracts_persistent_cache_options() {
+        let mut args = vec![
+            "--mount".to_string(),
+            "/home/mrvamp/Newsgroups".to_string(),
+            "--mount-coherent-read-cache".to_string(),
+            "--mount-read-cache".to_string(),
+            "/var/cache/r9p/newsgroups".to_string(),
+            "--mount-read-cache-max-bytes".to_string(),
+            "1073741824".to_string(),
+            "nucbox.mesh:9564".to_string(),
+        ];
+        let config = take_session_mount_config(&mut args).expect("mount config");
+
+        assert!(config.coherent_read_cache);
+        assert_eq!(
+            config.read_cache_path.as_deref(),
+            Some(Path::new("/var/cache/r9p/newsgroups"))
+        );
+        assert_eq!(config.read_cache_max_bytes, 1_073_741_824);
+        assert_eq!(args, ["nucbox.mesh:9564"]);
+    }
 }

@@ -78,6 +78,11 @@ fn parses_final_mount_options() {
             "--negative-timeout".to_string(),
             "5.25".to_string(),
             "--allow-other".to_string(),
+            "--coherent-read-cache".to_string(),
+            "--read-cache".to_string(),
+            "/var/cache/r9p/newsgroups".to_string(),
+            "--read-cache-max-bytes".to_string(),
+            "1073741824".to_string(),
             "--source".to_string(),
             "/hosts/tuxedo/projects".to_string(),
             "--fallback-endpoint".to_string(),
@@ -131,6 +136,12 @@ fn parses_final_mount_options() {
     assert_eq!(config.entry_timeout, Duration::from_secs(2));
     assert_eq!(config.negative_timeout, Duration::from_millis(5250));
     assert!(config.allow_other);
+    assert!(config.coherent_read_cache);
+    assert_eq!(
+        config.read_cache_path.as_deref(),
+        Some(std::path::Path::new("/var/cache/r9p/newsgroups"))
+    );
+    assert_eq!(config.read_cache_max_bytes, 1_073_741_824);
     assert_eq!(config.max_workers, 8);
     assert_eq!(config.max_background, 24);
     assert_eq!(config.congestion_threshold, 18);

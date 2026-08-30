@@ -13,8 +13,8 @@ use super::wire::{
     FUSE_MAX_PAGES,
 };
 use super::{
-    change_feed, default_congestion_threshold, normalize_config, parse_source_path, Config,
-    DEFAULT_MAX_BACKGROUND, DEFAULT_MAX_WORKERS,
+    change_feed, default_congestion_threshold, normalize_config, parse_source_path,
+    read_cache_volume_identity, Config, DEFAULT_MAX_BACKGROUND, DEFAULT_MAX_WORKERS,
 };
 use crate::error::Error;
 use crate::node::DirEntry;
@@ -363,6 +363,8 @@ fn mount_config_normalization_keeps_worker_and_background_limits_nonzero() {
         change_feed_reconnect_delay: Duration::ZERO,
         change_feed_backpressure_limit: 0,
         coherent_read_cache: false,
+        read_cache_path: None,
+        read_cache_max_bytes: 0,
         allow_other: false,
         debug: false,
     };
@@ -385,6 +387,46 @@ fn mount_config_normalization_keeps_worker_and_background_limits_nonzero() {
     assert_eq!(
         config.congestion_threshold,
         default_congestion_threshold(DEFAULT_MAX_BACKGROUND)
+    );
+
+    let mut persistent = config.clone();
+    persistent.coherent_read_cache = true;
+    persistent.read_cache_path = Some("/var/cache/r9p/newsgroups".into());
+    persistent.read_cache_max_bytes = 4 * 1024 * 1024;
+    normalize_config(&mut persistent).expect("complete persistent cache config");
+    assert_eq!(
+        read_cache_volume_identity(&persistent)
+            .expect_err("unauthenticated cache identity must fail")
+            .errno,
+        libc::EINVAL
+    );
+    persistent.authentication = session::SessionAuthentication::authenticated_root(
+        session::ClientCredential::new("/tmp/r9p-test-client.conf").expect("credential"),
+        session::ResponderName::new("coordinator").expect("responder"),
+    )
+    .into();
+    let identity = read_cache_volume_identity(&persistent).expect("cache identity");
+    persistent.source_path = "/sources/newsgroups/downloads/files".to_string();
+    assert_ne!(
+        read_cache_volume_identity(&persistent).expect("source-bound cache identity"),
+        identity
+    );
+
+    persistent.read_cache_path = Some("relative/cache".into());
+    assert_eq!(
+        normalize_config(&mut persistent)
+            .expect_err("relative persistent cache path must fail")
+            .errno,
+        libc::EINVAL
+    );
+
+    let mut incomplete = config.clone();
+    incomplete.read_cache_max_bytes = 4 * 1024 * 1024;
+    assert_eq!(
+        normalize_config(&mut incomplete)
+            .expect_err("cache quota without cache path must fail")
+            .errno,
+        libc::EINVAL
     );
 
     config.change_feed_path = Some("/events/namespace/recent".to_string());

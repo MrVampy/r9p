@@ -5,7 +5,7 @@ use super::{
     decode_mountinfo_path, mountinfo_targets_for_absolute, parse_mount_config,
     parse_mount_ensure_config, parse_mount_supervisor_config, systemd_command, SystemdUnitScope,
 };
-use cli::{ClientConfig as Config, DEFAULT_MSIZE};
+use crate::{target::Config, DEFAULT_MSIZE};
 
 fn global() -> Config {
     Config {

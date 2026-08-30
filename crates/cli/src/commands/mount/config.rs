@@ -3,22 +3,22 @@ use std::time::Duration;
 
 use fuse::Config as MountConfig;
 
-use cli::{cli_error, client_authentication, CliResult, ClientConfig};
+use crate::{
+    errors::{cli_error, CliResult},
+    target::Config,
+};
 
 const MAX_CONFIGURED_WORKERS: usize = 1024;
 const MAX_CONFIGURED_BACKGROUND: u16 = 1024;
 
-pub(super) fn parse_mount_config(
-    global: ClientConfig,
-    args: Vec<String>,
-) -> CliResult<MountConfig> {
+pub(super) fn parse_mount_config(global: Config, args: Vec<String>) -> CliResult<MountConfig> {
     if global.address.is_some() {
         return Err(cli_error(
             "r9p mount takes the endpoint as a positional argument; do not use global -a",
         ));
     }
 
-    let authentication = client_authentication(&global)?;
+    let authentication = crate::target::client_authentication(&global)?;
     let mut config = MountConfig {
         address: String::new(),
         fallback_addresses: Vec::new(),

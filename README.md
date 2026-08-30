@@ -10,9 +10,8 @@ Current surfaces and consumers:
 - `r9p`, a plan9port `9p`-shaped client CLI for one-shot reads, writes,
   stats, listings, creates, removes, console-style interaction, stable tab/hex
   machine-readable output, and renewable root sessions.
-- `r9p mount`, dispatched to the installed `r9p-mount` adapter for the Linux
-  FUSE-to-9P bridge, with ordered equivalent root endpoints for transport
-  failover.
+- `r9p mount`, the Linux FUSE-to-9P bridge, with ordered equivalent root
+  endpoints for transport failover.
 - `r9p serve`, a local filesystem-backed 9P server that is read-only by
   default and explicitly writable with `--writable`.
 - `r9p export`, `serve` plus a machine-readable `r9p-export.v1` descriptor.
@@ -36,14 +35,6 @@ The architectural boundary is deliberately small:
 - `r9p-auth` owns p9any negotiation, peer authentication, and encrypted stream
   records above the protocol core.
 - Runtime adapters own sockets, threads, async tasks, BEAM ports, and FUSE.
-
-The default `r9p` package contains ordinary namespace commands only. The
-`with-mount` package combines that stable client with the separately derived
-`r9p-mount` adapter. It preserves `r9p mount` and session-hosted mount syntax by
-replacing the client process before mount-specific parsing; the helper then
-enters the same typed command and session runtime through the mount adapter.
-Hosts without a mount consumer select the default package and carry no FUSE or
-mount-CLI bytes.
 
 ## Scope
 

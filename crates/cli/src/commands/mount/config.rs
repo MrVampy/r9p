@@ -57,6 +57,8 @@ pub(super) fn parse_mount_config(global: Config, args: Vec<String>) -> CliResult
         change_feed_reconnect_delay: Duration::ZERO,
         change_feed_backpressure_limit: 0,
         coherent_read_cache: false,
+        read_cache_path: None,
+        read_cache_max_bytes: 0,
         allow_other: false,
         debug: false,
     };
@@ -69,6 +71,22 @@ pub(super) fn parse_mount_config(global: Config, args: Vec<String>) -> CliResult
             "-D" | "--debug" => config.debug = true,
             "--allow-other" => config.allow_other = true,
             "--coherent-read-cache" => config.coherent_read_cache = true,
+            "--read-cache" => {
+                index += 1;
+                config.read_cache_path =
+                    Some(PathBuf::from(args.get(index).ok_or_else(|| {
+                        cli_error("missing persistent read cache path")
+                    })?));
+            }
+            "--read-cache-max-bytes" => {
+                index += 1;
+                config.read_cache_max_bytes = parse_u64_limit(
+                    args.get(index),
+                    "missing persistent read cache quota",
+                    "persistent read cache quota",
+                    fuse::MAX_PERSISTENT_READ_CACHE_BYTES,
+                )?;
+            }
             "--source" => {
                 index += 1;
                 config.source_path = args
@@ -339,9 +357,27 @@ fn parse_u16_limit(
     Ok(parsed)
 }
 
+fn parse_u64_limit(
+    value: Option<&String>,
+    missing: &'static str,
+    label: &'static str,
+    limit: u64,
+) -> CliResult<u64> {
+    let value = value.ok_or_else(|| cli_error(missing))?;
+    let parsed = value
+        .parse::<u64>()
+        .map_err(|_| cli_error(format!("invalid {label} {value}")))?;
+    if parsed == 0 || parsed > limit {
+        return Err(cli_error(format!(
+            "{label} must be between 1 and {limit}: {value}"
+        )));
+    }
+    Ok(parsed)
+}
+
 fn mount_usage(code: i32) -> ! {
     eprintln!(
-        "usage: r9p mount [--fallback-endpoint endpoint ...] [--source namespace-path] [--aname aname] [--uname uname] [--msize msize] [--allow-other] [--coherent-read-cache] [--attr-timeout seconds] [--entry-timeout seconds] [--negative-timeout seconds] [--request-timeout seconds] [--connect-timeout seconds] [--lookup-timeout seconds] [--read-timeout seconds] [--change-feed-read-timeout seconds] [--write-timeout seconds] [--mutation-timeout seconds] [--control-timeout seconds] [--interrupt-timeout seconds] [--max-workers count] [--max-background count] [--congestion-threshold count] [--diagnostics-file path] [--diagnostics-capacity count] [--status-file path] [--change-feed namespace-path] [--change-feed-stream namespace-path] [--change-feed-cursor-template path-with-{{event_id}}] [--change-feed-scope scope] [--change-feed-reconnect-delay seconds] [--change-feed-backpressure count] endpoint mountpoint\nusage: r9p mount ensure|status|stop --mountpoint path [--unit name --unit-scope user|system] [--status-file path] [--expect-endpoint endpoint] [--expect-change-feed path] [--expect-status-file path] [--attempts count] [-- mount args...]\nusage: r9p mount read-ahead --mountpoint path --kilobytes count [--attempts count]"
+        "usage: r9p mount [--fallback-endpoint endpoint ...] [--source namespace-path] [--aname aname] [--uname uname] [--msize msize] [--allow-other] [--coherent-read-cache] [--read-cache path --read-cache-max-bytes bytes] [--attr-timeout seconds] [--entry-timeout seconds] [--negative-timeout seconds] [--request-timeout seconds] [--connect-timeout seconds] [--lookup-timeout seconds] [--read-timeout seconds] [--change-feed-read-timeout seconds] [--write-timeout seconds] [--mutation-timeout seconds] [--control-timeout seconds] [--interrupt-timeout seconds] [--max-workers count] [--max-background count] [--congestion-threshold count] [--diagnostics-file path] [--diagnostics-capacity count] [--status-file path] [--change-feed namespace-path] [--change-feed-stream namespace-path] [--change-feed-cursor-template path-with-{{event_id}}] [--change-feed-scope scope] [--change-feed-reconnect-delay seconds] [--change-feed-backpressure count] endpoint mountpoint\nusage: r9p mount ensure|status|stop --mountpoint path [--unit name --unit-scope user|system] [--status-file path] [--expect-endpoint endpoint] [--expect-change-feed path] [--expect-status-file path] [--attempts count] [-- mount args...]\nusage: r9p mount read-ahead --mountpoint path --kilobytes count [--attempts count]"
     );
     std::process::exit(code);
 }

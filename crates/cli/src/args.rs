@@ -479,6 +479,12 @@ struct SessionServeArgs {
     /// Permit coherent kernel read caching when a feed proves freshness.
     #[arg(long)]
     mount_coherent_read_cache: bool,
+    /// Private persistent range-cache directory for the optional mount.
+    #[arg(long, value_name = "PATH")]
+    mount_read_cache: Option<String>,
+    /// Persistent range-cache quota in bytes.
+    #[arg(long, value_name = "BYTES")]
+    mount_read_cache_max_bytes: Option<u64>,
     /// Endpoint to host. May be omitted when global --bind supplies it.
     #[arg(value_name = "ENDPOINT")]
     endpoint: Option<String>,
@@ -544,6 +550,12 @@ struct MountArgs {
     allow_other: bool,
     #[arg(long)]
     coherent_read_cache: bool,
+    /// Private persistent range-cache directory.
+    #[arg(long, value_name = "PATH")]
+    read_cache: Option<String>,
+    /// Persistent range-cache quota in bytes.
+    #[arg(long, value_name = "BYTES")]
+    read_cache_max_bytes: Option<u64>,
     #[arg(long, value_name = "SECONDS")]
     attr_timeout: Option<String>,
     #[arg(long, value_name = "SECONDS")]
@@ -1052,6 +1064,12 @@ impl SessionServeArgs {
             "--mount-coherent-read-cache",
             self.mount_coherent_read_cache,
         );
+        push_option(&mut args, "--mount-read-cache", self.mount_read_cache);
+        push_option(
+            &mut args,
+            "--mount-read-cache-max-bytes",
+            self.mount_read_cache_max_bytes,
+        );
         args.extend(self.endpoint);
         args
     }
@@ -1095,6 +1113,12 @@ impl MountArgs {
             &mut options,
             "--coherent-read-cache",
             self.coherent_read_cache,
+        );
+        push_option(&mut options, "--read-cache", self.read_cache);
+        push_option(
+            &mut options,
+            "--read-cache-max-bytes",
+            self.read_cache_max_bytes,
         );
         push_option(&mut options, "--attr-timeout", self.attr_timeout);
         push_option(&mut options, "--entry-timeout", self.entry_timeout);

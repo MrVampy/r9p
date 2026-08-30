@@ -296,9 +296,9 @@ fn test_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
 }
 
 fn r9p_bin() -> PathBuf {
-    env::var_os("CARGO_BIN_EXE_r9p-mount")
+    env::var_os("CARGO_BIN_EXE_r9p")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("target/debug/r9p-mount"))
+        .unwrap_or_else(|| PathBuf::from("target/debug/r9p"))
 }
 
 fn temp_path(label: &str) -> PathBuf {

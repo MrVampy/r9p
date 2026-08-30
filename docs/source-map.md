@@ -124,8 +124,6 @@ This map defines the local sources agents should inspect before making source-sp
     bound regressions.
 - `crates/cli/src/`
   - The `r9p` binary and one-shot client command dispatch.
-  - The general client owns only a stable raw mount-dispatch seam. It has no
-    Cargo dependency on FUSE and contains no mount implementation or tests.
   - Machine scripts distinguish range-filling `read-hex` from one-request
     `read-once-hex` for blocking append streams that return one available
     event batch per `Tread`.
@@ -143,11 +141,6 @@ This map defines the local sources agents should inspect before making source-sp
 - `crates/cli/tests/cli_stream.rs`
   - End-to-end full-duplex byte transparency, including control, carriage
     return, non-UTF-8, and multi-frame input.
-- `crates/mount-cli/`
-  - The separately derived `r9p-mount` executable, direct and session-hosted
-    mount parsing, FUSE command adapter, supervisor, and mount regressions.
-  - It enters the general CLI and session graph through `MountAdapter`, keeping
-    one command surface without adding FUSE to the general client product.
 - `skills/r9p/SKILL.md`
   - Canonical agent-facing method for operating admitted namespaces through
     the installed CLI and live service contracts.
@@ -157,8 +150,8 @@ This map defines the local sources agents should inspect before making source-sp
     the existing Cargo manifests; the skill and non-Rust bindings retain their
     independent source identities.
 - `notes/source-reading/2026-08-30-cargo-derived-product-sources.md`
-  - Cargo-derived product source boundaries, the failed 41-consumer live proof,
-    and the raw-root evaluator regression.
+  - Cargo-derived build boundaries, the failed 41-consumer live proof, and the
+    rule that build granularity must not become runtime product configuration.
 - `crates/fuse/src/`
   - Canonical Linux FUSE bridge over the `r9p` client primitives, exposed as
     `r9p mount`.

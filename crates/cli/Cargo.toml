@@ -14,11 +14,9 @@ name = "r9p"
 path = "src/main.rs"
 doc = false
 
-[lib]
-path = "src/lib.rs"
-
 [dependencies]
 clap.workspace = true
+fuse.workspace = true
 fs.workspace = true
 libc.workspace = true
 r9p.workspace = true

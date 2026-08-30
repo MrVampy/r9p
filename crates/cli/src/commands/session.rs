@@ -1,25 +1,22 @@
 use std::{path::PathBuf, time::Duration};
 
 use crate::{
+    commands::session_mount::{start_session_mount, take_session_mount_config},
     errors::{cli_error, CliResult},
     target::Config,
-    usage, MountAdapter,
+    usage,
 };
 use session::control::{
     request_control_socket, serve_control_socket_with_runtime, ControlConfig, ControlRuntime,
 };
 
-pub(crate) fn session_cmd(
-    config: Config,
-    mut args: Vec<String>,
-    mount: &dyn MountAdapter,
-) -> CliResult<()> {
+pub(crate) fn session_cmd(config: Config, mut args: Vec<String>) -> CliResult<()> {
     if args.is_empty() {
         usage();
     }
     let command = args.remove(0);
     match command.as_str() {
-        "serve" => session_serve_cmd(config, args, mount),
+        "serve" => session_serve_cmd(config, args),
         "status" => session_status_cmd(config, args),
         "snapshot" => session_snapshot_cmd(config, args),
         "stat" => session_path_request_cmd(config, args, "stat", Some("/")),
@@ -29,17 +26,14 @@ pub(crate) fn session_cmd(
     }
 }
 
-fn session_serve_cmd(
-    config: Config,
-    mut args: Vec<String>,
-    mount: &dyn MountAdapter,
-) -> CliResult<()> {
+fn session_serve_cmd(config: Config, mut args: Vec<String>) -> CliResult<()> {
     let socket = take_socket(&mut args)?;
     let change_feed_path = take_change_feed_path(&mut args)?;
     let change_feed_stream_path = take_change_feed_stream_path(&mut args)?;
     let change_feed_cursor_template = take_change_feed_cursor_template(&mut args)?;
     let change_feed_reconnect_delay = take_change_feed_reconnect_delay(&mut args)?;
     let change_feed_backpressure_limit = take_change_feed_backpressure(&mut args)?;
+    let mount = take_session_mount_config(&mut args)?;
     let address = match (config.address.clone(), args.as_slice()) {
         (_, [endpoint]) => {
             let endpoint = endpoint.clone();
@@ -75,7 +69,7 @@ fn session_serve_cmd(
         )));
     }
     let runtime = ControlRuntime::start(&control)?;
-    let _mount = mount.start_session_mount(&control, &runtime)?;
+    let _mount = start_session_mount(&control, &runtime, &mount)?;
     serve_control_socket_with_runtime(&socket, control, runtime)?;
     Ok(())
 }

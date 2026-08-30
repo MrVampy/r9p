@@ -12,6 +12,10 @@ as authoritative instead of relying on a copied command list.
 When `$NAMESPACE` is set, use logical paths such as `memory/status` or
 `newsgroups/resolve/guide`. The first path element resolves through the
 already-admitted local projection, and r9p follows governed referrals itself.
+An absent namespace socket is treated as a transient startup race and retried
+until the request timeout. When service admission or readiness is uncertain,
+preflight the intended `guide`, `manifest`, or `status` path with an explicit
+short `--request-timeout`; do not mistake the bounded retry for a hung command.
 Do not discover or guess a Coordinator endpoint, service host, authentication
 domain, principal, or credential path. Use `--bind` only when the surrounding
 request explicitly supplies an admitted endpoint and authentication context.

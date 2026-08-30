@@ -127,7 +127,7 @@
           '';
           front = pkgs.symlinkJoin {
             name = "r9p-front-0.1.0-abi23";
-            paths = [ frontMember.build frontAssets ];
+            paths = [ (pkgs.lib.getLib frontMember.build) frontAssets ];
             passthru = {
               cargoTests = frontMember.runTests;
               cargoClippy = cargoNix.clippy.workspaceMembers.front.checkTests;
@@ -175,6 +175,12 @@
           checks = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux ({
             r9p = r9p;
             beam-front = frontTests;
+            front-package = pkgs.runCommandLocal "r9p-front-package-check" { } ''
+              test -e ${front}/lib/libfront.so
+              test -e ${front}/include/r9p_front.h
+              test -e ${front}/share/r9p/front/deno/front_sink.ts
+              touch "$out"
+            '';
             fuse-runtime-helper = pkgs.runCommandLocal "r9p-fuse-runtime-helper-check" { } ''
               grep -F ${pkgs.lib.escapeShellArg "${pkgs.fuse3}/bin"} ${r9p}/bin/r9p
               grep -F 'PATH=$PATH' ${r9p}/bin/r9p

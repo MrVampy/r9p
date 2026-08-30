@@ -1,11 +1,11 @@
 mod config;
 mod supervisor;
 
-use crate::{errors::CliResult, target::Config};
+use cli::{cli_error, CliResult, ClientConfig};
 
 use config::parse_mount_config;
 
-pub(crate) fn mount_cmd(global: Config, args: Vec<String>) -> CliResult<()> {
+pub(crate) fn mount_cmd(global: ClientConfig, args: Vec<String>) -> CliResult<()> {
     if let Some(action) = args.first().map(String::as_str) {
         match action {
             "ensure" => return supervisor::mount_ensure_cmd(args[1..].to_vec()),
@@ -16,8 +16,7 @@ pub(crate) fn mount_cmd(global: Config, args: Vec<String>) -> CliResult<()> {
         }
     }
     let config = parse_mount_config(global, args)?;
-    fuse::mount(config)
-        .map_err(|error| crate::errors::cli_error(format!("mount: {}", error.message())))
+    fuse::mount(config).map_err(|error| cli_error(format!("mount: {}", error.message())))
 }
 
 #[cfg(test)]

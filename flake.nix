@@ -45,29 +45,35 @@
           pkgs = import nixpkgs {
             inherit system;
           };
-          workspaceSource = nixpkgs.lib.fileset.toSource {
-            root = ./.;
-            fileset = nixpkgs.lib.fileset.unions [
-              ./.cargo
-              ./Cargo.lock
-              ./Cargo.toml
-              ./crates
-            ];
-          };
           cargoNixPluginSource = cargo-nix-plugin.outPath or cargo-nix-plugin;
-          cargoNix = import "${cargoNixPluginSource}/lib" {
-            inherit pkgs;
-            src = workspaceSource;
-            clippyArgs = [
-              "-D"
-              "warnings"
-            ];
-            crateOverrides = pkgs.defaultCrateOverrides // {
-              cli = _: {
-                nativeCheckInputs = [ pkgs.git ];
+          mkCargoNix =
+            src:
+            import "${cargoNixPluginSource}/lib" {
+              inherit pkgs src;
+              clippyArgs = [
+                "-D"
+                "warnings"
+              ];
+              crateOverrides = pkgs.defaultCrateOverrides // {
+                cli = _: {
+                  nativeCheckInputs = [ pkgs.git ];
+                };
               };
             };
+          cargoNix = mkCargoNix ./.;
+          sourceWithout = excluded: builtins.path {
+            path = ./.;
+            name = "source";
+            filter =
+              path: _type:
+              let
+                relative = nixpkgs.lib.removePrefix (toString ./. + "/") (toString path);
+              in
+              relative != excluded;
           };
+          fuseEditedCargoNix = mkCargoNix (sourceWithout "crates/fuse/src/fuse/read_cache.rs");
+          mountCliEditedCargoNix =
+            mkCargoNix (sourceWithout "crates/mount-cli/src/direct/config.rs");
           sessionAuthModuleEval = nixpkgs.lib.nixosSystem {
             inherit system;
             modules = [
@@ -91,30 +97,76 @@
               }
             ];
           };
-          cliMember = cargoNix.workspaceMembers.cli;
-          r9p = pkgs.symlinkJoin {
-            name = "r9p-0.1.0";
-            pname = "r9p";
-            version = "0.1.0";
-            paths = [ cliMember.build ];
+          mkR9p = cargo:
+            let
+              member = cargo.workspaceMembers.cli;
+            in
+            pkgs.symlinkJoin {
+              name = "r9p-0.1.0";
+              pname = "r9p";
+              version = "0.1.0";
+              paths = [ member.build ];
+              passthru = {
+                src = member.build.src;
+                cargoTests = member.runTests;
+                cargoClippy = cargo.clippy.workspaceMembers.cli.checkTests;
+              };
+              meta = {
+                description = "Reusable 9P2000 command-line client";
+                license = pkgs.lib.licenses.mit;
+                mainProgram = "r9p";
+                platforms = pkgs.lib.platforms.unix;
+              };
+            };
+          r9p = mkR9p cargoNix;
+          fuseEditedR9p = mkR9p fuseEditedCargoNix;
+          mountCliEditedR9p = mkR9p mountCliEditedCargoNix;
+          mkMountHelper = cargo:
+            let
+              member = cargo.workspaceMembers."mount-cli";
+            in
+            pkgs.runCommandLocal "r9p-mount-helper-0.1.0"
+              {
+                nativeBuildInputs = [ pkgs.makeWrapper ];
+                passthru = {
+                  src = member.build.src;
+                  cargoTests = member.runTests;
+                  cargoClippy = cargo.clippy.workspaceMembers."mount-cli".checkTests;
+                };
+              }
+              ''
+                mkdir -p "$out/bin"
+                makeWrapper ${member.build}/bin/r9p-mount "$out/bin/r9p-mount" \
+                  --suffix PATH : ${pkgs.lib.makeBinPath [ pkgs.fuse3 ]}
+              '';
+          mountHelper = mkMountHelper cargoNix;
+          fuseEditedMountHelper = mkMountHelper fuseEditedCargoNix;
+          mountCliEditedMountHelper = mkMountHelper mountCliEditedCargoNix;
+          mkWithMount = client: helper: pkgs.symlinkJoin {
+            name = "r9p-with-mount-0.1.0";
+            paths = [ client helper ];
             nativeBuildInputs = [ pkgs.makeWrapper ];
             postBuild = ''
               wrapProgram "$out/bin/r9p" \
-                --suffix PATH : ${pkgs.lib.makeBinPath [ pkgs.fuse3 ]}
+                --set R9P_MOUNT_HELPER ${helper}/bin/r9p-mount
             '';
             passthru = {
-              src = cliMember.build.src;
-              cargoTests = cliMember.runTests;
-              cargoClippy = cargoNix.clippy.workspaceMembers.cli.checkTests;
+              inherit client helper;
             };
             meta = {
-              description = "Reusable 9P2000 command-line and FUSE client";
+              description = "r9p client with the FUSE mount command adapter";
               license = pkgs.lib.licenses.mit;
               mainProgram = "r9p";
               platforms = pkgs.lib.platforms.unix;
             };
           };
+          withMount = mkWithMount r9p mountHelper;
+          fuseEditedWithMount = mkWithMount fuseEditedR9p fuseEditedMountHelper;
+          mountCliEditedWithMount = mkWithMount mountCliEditedR9p mountCliEditedMountHelper;
+          cliMember = cargoNix.workspaceMembers.cli;
           frontMember = cargoNix.workspaceMembers.front;
+          fuseEditedFrontMember = fuseEditedCargoNix.workspaceMembers.front;
+          mountCliEditedFrontMember = mountCliEditedCargoNix.workspaceMembers.front;
           frontAssets = pkgs.runCommandLocal "r9p-front-assets-abi23" { } ''
               install -Dm644 ${./crates/front/include/r9p_front.h} \
                 "$out/include/r9p_front.h"
@@ -125,12 +177,12 @@
               install -Dm644 ${./crates/front/bindings/deno/request_context.ts} \
                 "$out/share/r9p/front/deno/request_context.ts"
           '';
-          front = pkgs.symlinkJoin {
+          mkFront = cargo: member: pkgs.symlinkJoin {
             name = "r9p-front-0.1.0-abi23";
-            paths = [ (pkgs.lib.getLib frontMember.build) frontAssets ];
+            paths = [ (pkgs.lib.getLib member.build) frontAssets ];
             passthru = {
-              cargoTests = frontMember.runTests;
-              cargoClippy = cargoNix.clippy.workspaceMembers.front.checkTests;
+              cargoTests = member.runTests;
+              cargoClippy = cargo.clippy.workspaceMembers.front.checkTests;
             };
             meta = {
               description = "Native r9p Front ABI library";
@@ -138,6 +190,9 @@
               platforms = pkgs.lib.platforms.unix;
             };
           };
+          front = mkFront cargoNix frontMember;
+          fuseEditedFront = mkFront fuseEditedCargoNix fuseEditedFrontMember;
+          mountCliEditedFront = mkFront mountCliEditedCargoNix mountCliEditedFrontMember;
           beamPortMember = cargoNix.workspaceMembers."beam-port";
           beamPort = beamPortMember.build;
           beamGleam = pkgs.stdenvNoCC.mkDerivation {
@@ -170,7 +225,9 @@
           packages.beam-port = beamPort;
           packages.front = front;
           packages.front-tests = frontTests;
+          packages.mount-helper = mountHelper;
           packages.r9p = r9p;
+          packages.with-mount = withMount;
 
           checks = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux ({
             r9p = r9p;
@@ -181,9 +238,59 @@
               test -e ${front}/share/r9p/front/deno/front_sink.ts
               touch "$out"
             '';
+            product-source-isolation =
+              assert builtins.pathExists ./crates/fuse/src/fuse/read_cache.rs;
+              assert builtins.pathExists ./crates/mount-cli/src/direct/config.rs;
+              assert toString frontMember.build.src == toString fuseEditedFrontMember.build.src;
+              assert
+                toString frontMember.build.src == toString mountCliEditedFrontMember.build.src;
+              assert front.drvPath == fuseEditedFront.drvPath;
+              assert front.drvPath == mountCliEditedFront.drvPath;
+              assert toString r9p.src == toString fuseEditedR9p.src;
+              assert toString r9p.src == toString mountCliEditedR9p.src;
+              assert r9p.drvPath == fuseEditedR9p.drvPath;
+              assert r9p.drvPath == mountCliEditedR9p.drvPath;
+              assert withMount.drvPath != fuseEditedWithMount.drvPath;
+              assert withMount.drvPath != mountCliEditedWithMount.drvPath;
+              assert builtins.all
+                (dependency: dependency.name != "fuse")
+                cliMember.crateInfo.dependencies;
+              assert builtins.any
+                (dependency: dependency.name == "fuse")
+                cargoNix.workspaceMembers."mount-cli".crateInfo.dependencies;
+              assert builtins.any
+                (dependency: dependency.name == "cli")
+                cargoNix.workspaceMembers."mount-cli".crateInfo.dependencies;
+              pkgs.runCommandLocal "r9p-product-source-isolation-check"
+                {
+                  frontSource = frontMember.build.src;
+                  clientSource = r9p.src;
+                  mountSource = mountHelper.src;
+                }
+                ''
+                  test -f "$frontSource/crates/front/Cargo.toml"
+                  test ! -e "$frontSource/crates/fuse"
+                  test ! -e "$frontSource/crates/cli"
+                  test -f "$clientSource/crates/cli/Cargo.toml"
+                  test ! -e "$clientSource/crates/fuse"
+                  test ! -e "$clientSource/crates/mount-cli"
+                  test -f "$mountSource/crates/mount-cli/Cargo.toml"
+                  test ! -e "$mountSource/crates/cli"
+                  test ! -e "$mountSource/crates/fuse"
+                  touch "$out"
+                '';
+            product-contents = pkgs.runCommandLocal "r9p-product-contents-check" { } ''
+              test -x ${r9p}/bin/r9p
+              test ! -e ${r9p}/bin/r9p-mount
+              test -x ${mountHelper}/bin/r9p-mount
+              test ! -e ${mountHelper}/bin/r9p
+              test -x ${withMount}/bin/r9p
+              test -x ${withMount}/bin/r9p-mount
+              touch "$out"
+            '';
             fuse-runtime-helper = pkgs.runCommandLocal "r9p-fuse-runtime-helper-check" { } ''
-              grep -F ${pkgs.lib.escapeShellArg "${pkgs.fuse3}/bin"} ${r9p}/bin/r9p
-              grep -F 'PATH=$PATH' ${r9p}/bin/r9p
+              grep -F ${pkgs.lib.escapeShellArg "${pkgs.fuse3}/bin"} ${mountHelper}/bin/r9p-mount
+              grep -F 'R9P_MOUNT_HELPER' ${withMount}/bin/r9p
               touch "$out"
             '';
             session-auth-module =

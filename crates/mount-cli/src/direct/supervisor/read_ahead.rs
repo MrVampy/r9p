@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use crate::errors::{cli_error, CliResult};
+use cli::{cli_error, CliResult};
 
 const MINIMUM_KILOBYTES: u64 = 128;
 const MAXIMUM_KILOBYTES: u64 = 16 * 1024;

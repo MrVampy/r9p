@@ -1,5 +1,6 @@
 use std::{
     env,
+    ffi::OsString,
     io::{self, Write},
     path::PathBuf,
     time::Duration,
@@ -14,7 +15,6 @@ use crate::{
         con::con_cmd,
         ls::ls_cmd,
         machine::{machine_list_cmd, machine_remove_cmd, machine_rpc_hex_cmd},
-        mount::mount_cmd,
         mutate::{create_cmd, mkdir_cmd, rm_cmd},
         read_write::{
             create_write_from_cmd, read_cmd, read_to_cmd, rpc_cmd, write_at_cmd, write_cmd,
@@ -31,7 +31,7 @@ use crate::{
     },
     errors::CliResult,
     target::Config,
-    DEFAULT_MSIZE,
+    MountAdapter, DEFAULT_MSIZE,
 };
 
 #[derive(Debug, Parser)]
@@ -129,7 +129,7 @@ enum Command {
     /// Host or inspect a reusable client session.
     Session(SessionArgs),
     /// Mount a 9P namespace through FUSE or supervise a declared mount.
-    Mount(Box<MountArgs>),
+    Mount(MountDispatchArgs),
     /// Serve a local filesystem over a local 9P endpoint.
     Serve(ServeArgs),
     /// Export a local filesystem with an optional authenticated boundary.
@@ -458,33 +458,6 @@ struct SessionServeArgs {
     /// Maximum unprocessed change-feed records.
     #[arg(long, value_name = "COUNT")]
     change_feed_backpressure: Option<usize>,
-    /// Optional coherent FUSE mountpoint hosted by this session.
-    #[arg(long, value_name = "PATH")]
-    mount: Option<String>,
-    /// Namespace subtree exposed by the optional mount.
-    #[arg(long, value_name = "NAMESPACE_PATH")]
-    mount_source: Option<String>,
-    /// Optional mount status output file.
-    #[arg(long, value_name = "PATH")]
-    mount_status_file: Option<String>,
-    /// Optional mount diagnostics output file.
-    #[arg(long, value_name = "PATH")]
-    mount_diagnostics_file: Option<String>,
-    #[arg(long, value_name = "SECONDS")]
-    mount_attr_timeout: Option<String>,
-    #[arg(long, value_name = "SECONDS")]
-    mount_entry_timeout: Option<String>,
-    #[arg(long, value_name = "SECONDS")]
-    mount_negative_timeout: Option<String>,
-    /// Permit coherent kernel read caching when a feed proves freshness.
-    #[arg(long)]
-    mount_coherent_read_cache: bool,
-    /// Private persistent range-cache directory for the optional mount.
-    #[arg(long, value_name = "PATH")]
-    mount_read_cache: Option<String>,
-    /// Persistent range-cache quota in bytes.
-    #[arg(long, value_name = "BYTES")]
-    mount_read_cache_max_bytes: Option<u64>,
     /// Endpoint to host. May be omitted when global --bind supplies it.
     #[arg(value_name = "ENDPOINT")]
     endpoint: Option<String>,
@@ -523,108 +496,10 @@ struct SessionRequiredPathArgs {
 }
 
 #[derive(Debug, ClapArgs)]
-struct MountArgs {
-    /// Direct endpoint, or one of ensure, read-ahead, status, and stop.
-    #[arg(value_name = "ENDPOINT_OR_ACTION")]
-    endpoint_or_action: String,
-    /// Direct-mode mountpoint.
-    #[arg(value_name = "MOUNTPOINT")]
-    direct_mountpoint: Option<String>,
-
-    /// Ordered endpoints tried after the primary endpoint is unavailable.
-    #[arg(long, value_name = "ENDPOINT")]
-    fallback_endpoint: Vec<String>,
-
-    /// Namespace subtree mounted in direct mode.
-    #[arg(long, value_name = "NAMESPACE_PATH")]
-    source: Option<String>,
-    #[arg(short = 'A', long, value_name = "ANAME")]
-    aname: Option<String>,
-    #[arg(short = 'u', long, value_name = "UNAME")]
-    uname: Option<String>,
-    #[arg(short = 'm', long, value_name = "BYTES")]
-    msize: Option<u32>,
-    #[arg(short = 'D', long)]
-    debug: bool,
-    #[arg(long)]
-    allow_other: bool,
-    #[arg(long)]
-    coherent_read_cache: bool,
-    /// Private persistent range-cache directory.
-    #[arg(long, value_name = "PATH")]
-    read_cache: Option<String>,
-    /// Persistent range-cache quota in bytes.
-    #[arg(long, value_name = "BYTES")]
-    read_cache_max_bytes: Option<u64>,
-    #[arg(long, value_name = "SECONDS")]
-    attr_timeout: Option<String>,
-    #[arg(long, value_name = "SECONDS")]
-    entry_timeout: Option<String>,
-    #[arg(long, value_name = "SECONDS")]
-    negative_timeout: Option<String>,
-    #[arg(long, value_name = "SECONDS")]
-    request_timeout: Option<String>,
-    #[arg(long, value_name = "SECONDS")]
-    connect_timeout: Option<String>,
-    #[arg(long, value_name = "SECONDS")]
-    lookup_timeout: Option<String>,
-    #[arg(long, value_name = "SECONDS")]
-    read_timeout: Option<String>,
-    #[arg(long, value_name = "SECONDS")]
-    change_feed_read_timeout: Option<String>,
-    #[arg(long, value_name = "SECONDS")]
-    write_timeout: Option<String>,
-    #[arg(long, value_name = "SECONDS")]
-    mutation_timeout: Option<String>,
-    #[arg(long, value_name = "SECONDS")]
-    control_timeout: Option<String>,
-    #[arg(long, value_name = "SECONDS")]
-    interrupt_timeout: Option<String>,
-    #[arg(long, value_name = "COUNT")]
-    max_workers: Option<usize>,
-    #[arg(long, value_name = "COUNT")]
-    max_background: Option<u16>,
-    #[arg(long, value_name = "COUNT")]
-    congestion_threshold: Option<u16>,
-    #[arg(long, value_name = "PATH")]
-    diagnostics_file: Option<String>,
-    #[arg(long, value_name = "COUNT")]
-    diagnostics_capacity: Option<usize>,
-    #[arg(long, value_name = "PATH")]
-    status_file: Option<String>,
-    #[arg(long, value_name = "NAMESPACE_PATH")]
-    change_feed: Option<String>,
-    #[arg(long, value_name = "NAMESPACE_PATH")]
-    change_feed_stream: Option<String>,
-    #[arg(long, value_name = "PATH_TEMPLATE")]
-    change_feed_cursor_template: Option<String>,
-    #[arg(long, value_name = "SCOPE")]
-    change_feed_scope: Option<String>,
-    #[arg(long, value_name = "SECONDS")]
-    change_feed_reconnect_delay: Option<String>,
-    #[arg(long, value_name = "COUNT")]
-    change_feed_backpressure: Option<usize>,
-
-    /// Supervisor-mode mountpoint.
-    #[arg(long = "mountpoint", value_name = "PATH")]
-    supervised_mountpoint: Option<String>,
-    #[arg(long, value_name = "UNIT")]
-    unit: Option<String>,
-    #[arg(long, value_name = "SCOPE", value_parser = ["user", "system"])]
-    unit_scope: Option<String>,
-    #[arg(long, value_name = "ENDPOINT")]
-    expect_endpoint: Option<String>,
-    #[arg(long, value_name = "PATH")]
-    expect_status_file: Option<String>,
-    #[arg(long, value_name = "NAMESPACE_PATH")]
-    expect_change_feed: Option<String>,
-    #[arg(long, value_name = "COUNT")]
-    attempts: Option<usize>,
-    #[arg(long = "kilobytes", value_name = "COUNT")]
-    read_ahead_kilobytes: Option<u64>,
-    /// Direct mount arguments for `mount ensure`.
-    #[arg(last = true, num_args = 0.., value_name = "MOUNT_ARG")]
-    mount_args: Vec<String>,
+#[command(trailing_var_arg = true, disable_help_flag = true)]
+struct MountDispatchArgs {
+    #[arg(allow_hyphen_values = true, num_args = 0.., value_name = "MOUNT_ARG")]
+    args: Vec<String>,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -745,8 +620,15 @@ struct SessionProxyArgs {
     auth_timeout: Option<String>,
 }
 
-pub(crate) fn run() -> CliResult<()> {
-    let (config, command) = Cli::parse().into_parts();
+pub(crate) fn run_client(mount: &dyn MountAdapter) -> CliResult<()> {
+    let arguments = env::args_os().collect::<Vec<_>>();
+    crate::mount_dispatch::dispatch_if_required(&arguments)?;
+    run_with_mount(arguments, mount)
+}
+
+pub(crate) fn run_with_mount(arguments: Vec<OsString>, mount: &dyn MountAdapter) -> CliResult<()> {
+    let direct_mount_arguments = crate::mount_dispatch::direct_mount_arguments(&arguments)?;
+    let (config, command) = Cli::parse_from(arguments).into_parts();
     match command {
         Command::AuthKeygen(args) => auth_keygen_cmd(config, args.into_args()),
         Command::Cert(args) => cert_cmd(config, args.into_args()),
@@ -790,8 +672,10 @@ pub(crate) fn run() -> CliResult<()> {
             require_machine(&config);
             machine_rpc_hex_cmd(config, vec![args.path, args.request_hex])
         }
-        Command::Session(args) => session_cmd(config, args.into_args()),
-        Command::Mount(args) => mount_cmd(config, args.into_args()),
+        Command::Session(args) => session_cmd(config, args.into_args(), mount),
+        Command::Mount(args) => {
+            mount.direct_mount(config, direct_mount_arguments.unwrap_or(args.args))
+        }
         Command::Serve(args) => serve_cmd(config, args.into_args()),
         Command::Export(args) => export_cmd(config, args.into_args()),
         Command::StreamExport(args) => stream_export_cmd(config, args.into_args()),
@@ -1044,32 +928,6 @@ impl SessionServeArgs {
             "--change-feed-backpressure",
             self.change_feed_backpressure,
         );
-        push_option(&mut args, "--mount", self.mount);
-        push_option(&mut args, "--mount-source", self.mount_source);
-        push_option(&mut args, "--mount-status-file", self.mount_status_file);
-        push_option(
-            &mut args,
-            "--mount-diagnostics-file",
-            self.mount_diagnostics_file,
-        );
-        push_option(&mut args, "--mount-attr-timeout", self.mount_attr_timeout);
-        push_option(&mut args, "--mount-entry-timeout", self.mount_entry_timeout);
-        push_option(
-            &mut args,
-            "--mount-negative-timeout",
-            self.mount_negative_timeout,
-        );
-        push_flag(
-            &mut args,
-            "--mount-coherent-read-cache",
-            self.mount_coherent_read_cache,
-        );
-        push_option(&mut args, "--mount-read-cache", self.mount_read_cache);
-        push_option(
-            &mut args,
-            "--mount-read-cache-max-bytes",
-            self.mount_read_cache_max_bytes,
-        );
         args.extend(self.endpoint);
         args
     }
@@ -1088,120 +946,6 @@ impl SessionOptionalPathArgs {
     fn into_args(self, command: &str) -> Vec<String> {
         let mut args = vec![command.to_string(), "--socket".to_string(), self.socket];
         args.extend(self.path);
-        args
-    }
-}
-
-impl MountArgs {
-    fn into_args(self) -> Vec<String> {
-        let action = matches!(
-            self.endpoint_or_action.as_str(),
-            "ensure" | "read-ahead" | "status" | "stop"
-        );
-        let mut options = Vec::new();
-        for endpoint in self.fallback_endpoint {
-            options.push("--fallback-endpoint".to_string());
-            options.push(endpoint);
-        }
-        push_option(&mut options, "--source", self.source);
-        push_option(&mut options, "--aname", self.aname);
-        push_option(&mut options, "--uname", self.uname);
-        push_option(&mut options, "--msize", self.msize);
-        push_flag(&mut options, "--debug", self.debug);
-        push_flag(&mut options, "--allow-other", self.allow_other);
-        push_flag(
-            &mut options,
-            "--coherent-read-cache",
-            self.coherent_read_cache,
-        );
-        push_option(&mut options, "--read-cache", self.read_cache);
-        push_option(
-            &mut options,
-            "--read-cache-max-bytes",
-            self.read_cache_max_bytes,
-        );
-        push_option(&mut options, "--attr-timeout", self.attr_timeout);
-        push_option(&mut options, "--entry-timeout", self.entry_timeout);
-        push_option(&mut options, "--negative-timeout", self.negative_timeout);
-        push_option(&mut options, "--request-timeout", self.request_timeout);
-        push_option(&mut options, "--connect-timeout", self.connect_timeout);
-        push_option(&mut options, "--lookup-timeout", self.lookup_timeout);
-        push_option(&mut options, "--read-timeout", self.read_timeout);
-        push_option(
-            &mut options,
-            "--change-feed-read-timeout",
-            self.change_feed_read_timeout,
-        );
-        push_option(&mut options, "--write-timeout", self.write_timeout);
-        push_option(&mut options, "--mutation-timeout", self.mutation_timeout);
-        push_option(&mut options, "--control-timeout", self.control_timeout);
-        push_option(&mut options, "--interrupt-timeout", self.interrupt_timeout);
-        push_option(&mut options, "--max-workers", self.max_workers);
-        push_option(&mut options, "--max-background", self.max_background);
-        push_option(
-            &mut options,
-            "--congestion-threshold",
-            self.congestion_threshold,
-        );
-        push_option(&mut options, "--diagnostics-file", self.diagnostics_file);
-        push_option(
-            &mut options,
-            "--diagnostics-capacity",
-            self.diagnostics_capacity,
-        );
-        push_option(&mut options, "--status-file", self.status_file);
-        push_option(&mut options, "--change-feed", self.change_feed);
-        push_option(
-            &mut options,
-            "--change-feed-stream",
-            self.change_feed_stream,
-        );
-        push_option(
-            &mut options,
-            "--change-feed-cursor-template",
-            self.change_feed_cursor_template,
-        );
-        push_option(&mut options, "--change-feed-scope", self.change_feed_scope);
-        push_option(
-            &mut options,
-            "--change-feed-reconnect-delay",
-            self.change_feed_reconnect_delay,
-        );
-        push_option(
-            &mut options,
-            "--change-feed-backpressure",
-            self.change_feed_backpressure,
-        );
-        push_option(&mut options, "--mountpoint", self.supervised_mountpoint);
-        push_option(&mut options, "--unit", self.unit);
-        push_option(&mut options, "--unit-scope", self.unit_scope);
-        push_option(&mut options, "--expect-endpoint", self.expect_endpoint);
-        push_option(
-            &mut options,
-            "--expect-status-file",
-            self.expect_status_file,
-        );
-        push_option(
-            &mut options,
-            "--expect-change-feed",
-            self.expect_change_feed,
-        );
-        push_option(&mut options, "--attempts", self.attempts);
-        push_option(&mut options, "--kilobytes", self.read_ahead_kilobytes);
-
-        let mut args = Vec::new();
-        if action {
-            args.push(self.endpoint_or_action);
-            args.extend(options);
-        } else {
-            args.extend(options);
-            args.push(self.endpoint_or_action);
-        }
-        args.extend(self.direct_mountpoint);
-        if !self.mount_args.is_empty() {
-            args.push("--".to_string());
-            args.extend(self.mount_args);
-        }
         args
     }
 }
@@ -1375,10 +1119,11 @@ mod tests {
         assert!(cert.contains("--key <HEX>"));
 
         let mount = Cli::try_parse_from(["r9p", "mount", "--help"])
-            .expect_err("command help exits before dispatch")
-            .to_string();
-        assert!(mount.contains("--change-feed-cursor-template"));
-        assert!(mount.contains("--mountpoint <PATH>"));
+            .expect("mount arguments remain opaque to the general parser");
+        let Command::Mount(mount) = mount.command else {
+            panic!("expected mount command");
+        };
+        assert_eq!(mount.args, ["--help"]);
     }
 
     #[test]
@@ -1429,7 +1174,7 @@ mod tests {
         let Command::Mount(mount) = mount.command else {
             panic!("expected mount command");
         };
-        let normalized = mount.into_args();
+        let normalized = mount.args;
         assert_eq!(normalized.first().map(String::as_str), Some("ensure"));
         assert!(normalized.contains(&"--mountpoint".to_string()));
 
@@ -1447,7 +1192,7 @@ mod tests {
             panic!("expected mount command");
         };
         assert_eq!(
-            read_ahead.into_args(),
+            read_ahead.args,
             [
                 "read-ahead",
                 "--mountpoint",
@@ -1470,7 +1215,7 @@ mod tests {
             panic!("expected mount command");
         };
         assert_eq!(
-            direct_mount.into_args(),
+            direct_mount.args,
             [
                 "--fallback-endpoint",
                 "nucbox.mesh:9564",

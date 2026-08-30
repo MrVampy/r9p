@@ -1,28 +1,22 @@
 [package]
-name = "cli"
+name = "mount-cli"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
-description = "Command-line 9P client for the r9p communication suite"
+description = "FUSE mount command adapter for the r9p communication suite"
 repository.workspace = true
 
 [lints]
 workspace = true
 
 [[bin]]
-name = "r9p"
+name = "r9p-mount"
 path = "src/main.rs"
 doc = false
 
-[lib]
-path = "src/lib.rs"
-
 [dependencies]
-clap.workspace = true
-fs.workspace = true
+cli.workspace = true
+fuse.workspace = true
 libc.workspace = true
 r9p.workspace = true
-r9p-auth.workspace = true
-r9p-reverse.workspace = true
-rustix.workspace = true
 session.workspace = true

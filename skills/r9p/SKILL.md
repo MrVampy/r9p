@@ -9,9 +9,29 @@ Use the Nix-installed `r9p` on `PATH`. Begin with `r9p --help` and the exact
 subcommand help needed for the operation. Treat those current command surfaces
 as authoritative instead of relying on a copied command list.
 
+`r9p` is the protocol client. `$NAMESPACE` is the caller's admitted logical
+service view, not an alternative transport or client. Without `--bind`, the
+first path element selects a Unix socket below `$NAMESPACE`; possession of that
+socket represents the logical service root and authority already admitted for
+the caller. The selected service may return governed referrals, and r9p may
+establish direct data sessions underneath without exposing placement or
+authentication details to the command.
+
+With `--bind`, r9p can instead dial a concrete endpoint directly. A direct dial
+does not acquire namespace admission or authority by itself: the caller must
+already have an explicitly supplied endpoint, authentication configuration,
+expected responder, and principal appropriate to that service. Absence from an
+admitted namespace means only that the current caller context lacks that
+logical route; it does not prove that the service is absent, and it does not
+authorize discovering credentials or topology to bypass the namespace.
+
 When `$NAMESPACE` is set, use logical paths such as `memory/status` or
 `newsgroups/resolve/guide`. The first path element resolves through the
 already-admitted local projection, and r9p follows governed referrals itself.
+An absent namespace socket is treated as a transient startup race and retried
+until the request timeout. When service admission or readiness is uncertain,
+preflight the intended `guide`, `manifest`, or `status` path with an explicit
+short `--request-timeout`; do not mistake the bounded retry for a hung command.
 Do not discover or guess a Coordinator endpoint, service host, authentication
 domain, principal, or credential path. Use `--bind` only when the surrounding
 request explicitly supplies an admitted endpoint and authentication context.

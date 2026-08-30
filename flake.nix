@@ -4,9 +4,13 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    cargo-nix-plugin = {
+      url = "git+ssh://git@git.mesh:2222/MrVampy/cargo-nix-plugin.git?ref=main";
+      flake = false;
+    };
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
+  outputs = { self, nixpkgs, flake-utils, cargo-nix-plugin }:
     {
       lib = {
         skills.r9p = builtins.path {
@@ -41,7 +45,7 @@
           pkgs = import nixpkgs {
             inherit system;
           };
-          rustSource = nixpkgs.lib.fileset.toSource {
+          workspaceSource = nixpkgs.lib.fileset.toSource {
             root = ./.;
             fileset = nixpkgs.lib.fileset.unions [
               ./.cargo
@@ -49,6 +53,20 @@
               ./Cargo.toml
               ./crates
             ];
+          };
+          cargoNixPluginSource = cargo-nix-plugin.outPath or cargo-nix-plugin;
+          cargoNix = import "${cargoNixPluginSource}/lib" {
+            inherit pkgs;
+            src = workspaceSource;
+            clippyArgs = [
+              "-D"
+              "warnings"
+            ];
+            crateOverrides = pkgs.defaultCrateOverrides // {
+              cli = _: {
+                nativeCheckInputs = [ pkgs.git ];
+              };
+            };
           };
           sessionAuthModuleEval = nixpkgs.lib.nixosSystem {
             inherit system;
@@ -73,74 +91,55 @@
               }
             ];
           };
-          r9p = pkgs.rustPlatform.buildRustPackage {
+          cliMember = cargoNix.workspaceMembers.cli;
+          r9p = pkgs.symlinkJoin {
+            name = "r9p-0.1.0";
             pname = "r9p";
             version = "0.1.0";
-            src = rustSource;
-            requiredSystemFeatures = pkgs.lib.optionals (
-              pkgs.stdenv.hostPlatform.system == "x86_64-linux"
-            ) [ "cloud-burst" ];
-            cargoLock.lockFile = ./Cargo.lock;
-            nativeBuildInputs = with pkgs; [
-              clang
-              mold
-              binutils
-              makeWrapper
-            ];
-            nativeCheckInputs = with pkgs; [
-              git
-            ];
-            postFixup = ''
+            paths = [ cliMember.build ];
+            nativeBuildInputs = [ pkgs.makeWrapper ];
+            postBuild = ''
               wrapProgram "$out/bin/r9p" \
                 --suffix PATH : ${pkgs.lib.makeBinPath [ pkgs.fuse3 ]}
             '';
+            passthru = {
+              src = cliMember.build.src;
+              cargoTests = cliMember.runTests;
+              cargoClippy = cargoNix.clippy.workspaceMembers.cli.checkTests;
+            };
+            meta = {
+              description = "Reusable 9P2000 command-line and FUSE client";
+              license = pkgs.lib.licenses.mit;
+              mainProgram = "r9p";
+              platforms = pkgs.lib.platforms.unix;
+            };
           };
-          front = pkgs.rustPlatform.buildRustPackage {
-            pname = "r9p-front";
-            version = "0.1.0-abi23";
-            src = rustSource;
-            cargoLock.lockFile = ./Cargo.lock;
-            cargoBuildFlags = [ "-p" "front" ];
-            doCheck = false;
-            nativeBuildInputs = with pkgs; [
-              clang
-              mold
-              binutils
-            ];
-            installPhase = ''
-              runHook preInstall
-              install -Dm644 target/${pkgs.stdenv.hostPlatform.rust.rustcTarget}/release/libfront.so \
-                "$out/lib/libfront.so"
-              install -Dm644 crates/front/include/r9p_front.h \
+          frontMember = cargoNix.workspaceMembers.front;
+          frontAssets = pkgs.runCommandLocal "r9p-front-assets-abi23" { } ''
+              install -Dm644 ${./crates/front/include/r9p_front.h} \
                 "$out/include/r9p_front.h"
-              install -Dm644 crates/front/bindings/deno/front_sink.ts \
+              install -Dm644 ${./crates/front/bindings/deno/front_sink.ts} \
                 "$out/share/r9p/front/deno/front_sink.ts"
-              install -Dm644 crates/front/bindings/deno/export_descriptor.ts \
+              install -Dm644 ${./crates/front/bindings/deno/export_descriptor.ts} \
                 "$out/share/r9p/front/deno/export_descriptor.ts"
-              install -Dm644 crates/front/bindings/deno/request_context.ts \
+              install -Dm644 ${./crates/front/bindings/deno/request_context.ts} \
                 "$out/share/r9p/front/deno/request_context.ts"
-              runHook postInstall
-            '';
+          '';
+          front = pkgs.symlinkJoin {
+            name = "r9p-front-0.1.0-abi23";
+            paths = [ frontMember.build frontAssets ];
+            passthru = {
+              cargoTests = frontMember.runTests;
+              cargoClippy = cargoNix.clippy.workspaceMembers.front.checkTests;
+            };
+            meta = {
+              description = "Native r9p Front ABI library";
+              license = pkgs.lib.licenses.mit;
+              platforms = pkgs.lib.platforms.unix;
+            };
           };
-          beamPort = pkgs.rustPlatform.buildRustPackage {
-            pname = "r9p-beam-port";
-            version = "0.1.0";
-            src = rustSource;
-            cargoLock.lockFile = ./Cargo.lock;
-            cargoBuildFlags = [ "-p" "beam-port" ];
-            doCheck = false;
-            nativeBuildInputs = with pkgs; [
-              clang
-              mold
-              binutils
-            ];
-            installPhase = ''
-              runHook preInstall
-              install -Dm755 target/${pkgs.stdenv.hostPlatform.rust.rustcTarget}/release/r9p-beam-port \
-                "$out/bin/r9p-beam-port"
-              runHook postInstall
-            '';
-          };
+          beamPortMember = cargoNix.workspaceMembers."beam-port";
+          beamPort = beamPortMember.build;
           beamGleam = pkgs.stdenvNoCC.mkDerivation {
             pname = "r9p-beam-gleam";
             version = "0.1.0";
@@ -153,25 +152,13 @@
               runHook postInstall
             '';
           };
-          frontTests = pkgs.rustPlatform.buildRustPackage {
-            pname = "r9p-front-tests";
-            version = "0.1.0";
-            src = rustSource;
-            cargoLock.lockFile = ./Cargo.lock;
-            cargoBuildFlags = [ "-p" "front" "-p" "beam-port" ];
-            cargoTestFlags = [ "-p" "front" "-p" "beam-port" ];
-            nativeBuildInputs = with pkgs; [
-              clang
-              mold
-              binutils
-            ];
-            installPhase = ''
-              runHook preInstall
-              mkdir -p "$out"
-              printf 'passed\n' > "$out/result"
-              runHook postInstall
-            '';
-          };
+          frontTests = pkgs.linkFarmFromDrvs "r9p-front-tests" [
+            frontMember.runTests
+            beamPortMember.runTests
+          ];
+          cargoMemberTests = pkgs.lib.mapAttrs' (
+            name: member: pkgs.lib.nameValuePair "cargo-${name}-tests" member.runTests
+          ) cargoNix.workspaceMembers;
         in
         {
           packages.default = r9p;
@@ -185,7 +172,7 @@
           packages.front-tests = frontTests;
           packages.r9p = r9p;
 
-          checks = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          checks = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux ({
             r9p = r9p;
             beam-front = frontTests;
             fuse-runtime-helper = pkgs.runCommandLocal "r9p-fuse-runtime-helper-check" { } ''
@@ -282,7 +269,7 @@
                 test ! -e ${r9p.src}/docs
                 touch "$out"
               '';
-          };
+          } // cargoMemberTests);
 
           devShells.default = pkgs.mkShell {
             packages = with pkgs; [

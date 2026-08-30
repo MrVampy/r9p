@@ -189,6 +189,7 @@ dependencies = [
  "r9p",
  "r9p-auth",
  "r9p-reverse",
+ "rustix",
  "session",
 ]
 

@@ -2,6 +2,8 @@ mod read_ahead;
 
 use std::env;
 use std::ffi::CString;
+use std::io::{Read, Write};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -25,6 +27,14 @@ pub(super) struct MountSupervisorConfig {
 pub(super) enum SystemdUnitScope {
     User,
     System,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct MountReplacementConfig {
+    pub(super) mountpoint: PathBuf,
+    pub(super) unit: String,
+    pub(super) unit_scope: SystemdUnitScope,
+    pub(super) attempts: usize,
 }
 
 pub(super) fn mount_status_cmd(args: Vec<String>) -> CliResult<()> {
@@ -71,6 +81,191 @@ pub(super) fn mount_stop_cmd(args: Vec<String>) -> CliResult<()> {
 
 pub(super) fn mount_read_ahead_cmd(args: Vec<String>) -> CliResult<()> {
     read_ahead::run(args)
+}
+
+pub(super) fn mount_replace_cmd(
+    config: MountReplacementConfig,
+    mount: fuse::Config,
+) -> CliResult<()> {
+    assert_single_mount_layer(&config.mountpoint)?;
+    let active_pid = systemd_main_pid(&config.unit, config.unit_scope)?;
+    let (mut prepared_parent, prepared_child) = UnixStream::pair()
+        .map_err(|error| cli_error(format!("create replacement preflight channel: {error}")))?;
+    let (mut start_parent, start_child) = UnixStream::pair()
+        .map_err(|error| cli_error(format!("create replacement start channel: {error}")))?;
+    let (mut ready_parent, ready_child) = UnixStream::pair()
+        .map_err(|error| cli_error(format!("create replacement readiness channel: {error}")))?;
+    for channel in [&prepared_parent, &start_parent, &ready_parent] {
+        channel
+            .set_read_timeout(Some(Duration::from_secs(60)))
+            .map_err(|error| cli_error(format!("set replacement channel timeout: {error}")))?;
+        channel
+            .set_write_timeout(Some(Duration::from_secs(60)))
+            .map_err(|error| cli_error(format!("set replacement channel timeout: {error}")))?;
+    }
+    let replacement_pid = unsafe { libc::fork() };
+    if replacement_pid < 0 {
+        return Err(cli_error(format!(
+            "fork replacement mount: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    if replacement_pid == 0 {
+        drop(prepared_parent);
+        drop(start_parent);
+        drop(ready_parent);
+        let exit_code =
+            match fuse::mount_replacement(mount, prepared_child, start_child, ready_child) {
+                Ok(()) => 0,
+                Err(error) => {
+                    eprintln!("r9p replacement mount: {}", error.message());
+                    1
+                }
+            };
+        unsafe {
+            libc::_exit(exit_code);
+        }
+    }
+    drop(prepared_child);
+    drop(start_child);
+    drop(ready_child);
+
+    let result = replace_mount_generation(
+        &config,
+        active_pid,
+        replacement_pid,
+        &mut prepared_parent,
+        &mut start_parent,
+        &mut ready_parent,
+    );
+    if result.is_err() {
+        terminate_replacement(replacement_pid);
+    }
+    result
+}
+
+fn replace_mount_generation(
+    config: &MountReplacementConfig,
+    active_pid: libc::pid_t,
+    replacement_pid: libc::pid_t,
+    prepared: &mut UnixStream,
+    start: &mut UnixStream,
+    ready: &mut UnixStream,
+) -> CliResult<()> {
+    expect_replacement_event(prepared, b'P', "preflight")?;
+    signal_process(active_pid, libc::SIGHUP, "retire active mount")?;
+    wait_for_mount_absent(&config.mountpoint, config.attempts)?;
+    start
+        .write_all(b"G")
+        .map_err(|error| cli_error(format!("start replacement mount: {error}")))?;
+    expect_replacement_event(ready, b'R', "readiness")?;
+    wait_for_main_pid(
+        &config.unit,
+        config.unit_scope,
+        replacement_pid,
+        config.attempts,
+    )?;
+    signal_process(
+        active_pid,
+        libc::SIGUSR1,
+        "release retired mount generation",
+    )?;
+    println!(
+        "mountpoint {} replaced process {} -> {}",
+        config.mountpoint.display(),
+        active_pid,
+        replacement_pid
+    );
+    Ok(())
+}
+
+fn expect_replacement_event(channel: &mut UnixStream, expected: u8, label: &str) -> CliResult<()> {
+    let mut event = [0_u8; 1];
+    channel
+        .read_exact(&mut event)
+        .map_err(|error| cli_error(format!("wait for replacement mount {label}: {error}")))?;
+    if event[0] != expected {
+        return Err(cli_error(format!(
+            "replacement_mount_{label}_failed:event={}",
+            event[0]
+        )));
+    }
+    Ok(())
+}
+
+fn signal_process(pid: libc::pid_t, signal: libc::c_int, label: &str) -> CliResult<()> {
+    if unsafe { libc::kill(pid, signal) } == 0 {
+        return Ok(());
+    }
+    Err(cli_error(format!(
+        "{label}: pid={pid}: {}",
+        std::io::Error::last_os_error()
+    )))
+}
+
+fn wait_for_mount_absent(mountpoint: &Path, attempts: usize) -> CliResult<()> {
+    for attempt in 0..=attempts {
+        if mounted_targets(mountpoint)?.is_empty() {
+            return Ok(());
+        }
+        if attempt >= attempts {
+            return Err(cli_error(format!(
+                "replacement_mount_detach_timeout:{}",
+                mountpoint.display()
+            )));
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    Ok(())
+}
+
+fn wait_for_main_pid(
+    unit: &str,
+    scope: SystemdUnitScope,
+    expected_pid: libc::pid_t,
+    attempts: usize,
+) -> CliResult<()> {
+    for attempt in 0..=attempts {
+        let output = systemd_command("systemctl", scope)
+            .args(["show", unit, "-p", "MainPID", "--value", "--no-pager"])
+            .output()
+            .map_err(|error| cli_error(format!("systemctl show {unit}: {error}")))?;
+        let actual = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if output.status.success() && actual == expected_pid.to_string() {
+            return Ok(());
+        }
+        if attempt >= attempts {
+            return Err(cli_error(format!(
+                "replacement_mount_main_pid_not_adopted:unit={unit}:expected={expected_pid}:actual={actual}"
+            )));
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    Ok(())
+}
+
+fn systemd_main_pid(unit: &str, scope: SystemdUnitScope) -> CliResult<libc::pid_t> {
+    let output = systemd_command("systemctl", scope)
+        .args(["show", unit, "-p", "MainPID", "--value", "--no-pager"])
+        .output()
+        .map_err(|error| cli_error(format!("systemctl show {unit}: {error}")))?;
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let pid = value
+        .parse::<libc::pid_t>()
+        .map_err(|_| cli_error(format!("invalid main pid for {unit}: {value}")))?;
+    if !output.status.success() || pid <= 1 {
+        return Err(cli_error(format!(
+            "replacement_mount_main_pid_unavailable:unit={unit}:pid={value}"
+        )));
+    }
+    Ok(pid)
+}
+
+fn terminate_replacement(pid: libc::pid_t) {
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+        libc::waitpid(pid, std::ptr::null_mut(), 0);
+    }
 }
 
 fn check_mount_status(config: &MountSupervisorConfig) -> CliResult<()> {
@@ -182,6 +377,83 @@ pub(super) fn parse_mount_ensure_config(
     if config.unit.is_none() {
         return Err(cli_error("r9p mount ensure requires --unit"));
     }
+    Ok((config, mount_args))
+}
+
+pub(super) fn parse_mount_replacement_config(
+    args: Vec<String>,
+) -> CliResult<(MountReplacementConfig, Vec<String>)> {
+    let separator = args
+        .iter()
+        .position(|arg| arg == "--")
+        .ok_or_else(|| cli_error("r9p mount replace requires -- before mount arguments"))?;
+    let replacement_args = &args[..separator];
+    let mount_args = args[separator + 1..].to_vec();
+    if mount_args.is_empty() {
+        return Err(cli_error(
+            "r9p mount replace requires mount arguments after --",
+        ));
+    }
+    let mut mountpoint = PathBuf::new();
+    let mut unit = None;
+    let mut unit_scope = None;
+    let mut attempts = 100_usize;
+    let mut index = 0_usize;
+    while index < replacement_args.len() {
+        match replacement_args[index].as_str() {
+            "--mountpoint" => {
+                index += 1;
+                mountpoint = PathBuf::from(
+                    replacement_args
+                        .get(index)
+                        .ok_or_else(|| cli_error("missing replacement mountpoint"))?,
+                );
+            }
+            "--unit" => {
+                index += 1;
+                unit = Some(
+                    replacement_args
+                        .get(index)
+                        .ok_or_else(|| cli_error("missing replacement unit"))?
+                        .clone(),
+                );
+            }
+            "--unit-scope" => {
+                index += 1;
+                unit_scope = Some(parse_systemd_unit_scope(
+                    replacement_args
+                        .get(index)
+                        .ok_or_else(|| cli_error("missing replacement unit scope"))?,
+                )?);
+            }
+            "--attempts" => {
+                index += 1;
+                let value = replacement_args
+                    .get(index)
+                    .ok_or_else(|| cli_error("missing replacement attempts"))?;
+                attempts = value
+                    .parse::<usize>()
+                    .map_err(|_| cli_error(format!("invalid replacement attempts {value}")))?;
+            }
+            "-h" | "--help" => mount_supervisor_usage(0),
+            option => {
+                return Err(cli_error(format!(
+                    "unknown mount replacement option {option}"
+                )))
+            }
+        }
+        index += 1;
+    }
+    if mountpoint.as_os_str().is_empty() {
+        return Err(cli_error("missing replacement --mountpoint"));
+    }
+    let config = MountReplacementConfig {
+        mountpoint: absolute_mountpoint(&mountpoint)?,
+        unit: unit.ok_or_else(|| cli_error("missing replacement --unit"))?,
+        unit_scope: unit_scope
+            .ok_or_else(|| cli_error("missing replacement --unit-scope user|system"))?,
+        attempts,
+    };
     Ok((config, mount_args))
 }
 
@@ -489,7 +761,7 @@ fn wait_with_timeout(child: &mut std::process::Child, timeout: Duration) -> std:
 
 fn mount_supervisor_usage(code: i32) -> ! {
     eprintln!(
-        "usage: r9p mount ensure|status|stop --mountpoint path [--unit name --unit-scope user|system] [--status-file path] [--expect-endpoint endpoint] [--expect-change-feed path] [--expect-status-file path] [--attempts count] [-- mount args...]\n       r9p mount read-ahead --mountpoint path --kilobytes count [--attempts count]"
+        "usage: r9p mount ensure|status|stop --mountpoint path [--unit name --unit-scope user|system] [--status-file path] [--expect-endpoint endpoint] [--expect-change-feed path] [--expect-status-file path] [--attempts count] [-- mount args...]\n       r9p mount replace --mountpoint path --unit name --unit-scope user|system [--attempts count] -- mount args...\n       r9p mount read-ahead --mountpoint path --kilobytes count [--attempts count]"
     );
     std::process::exit(code);
 }

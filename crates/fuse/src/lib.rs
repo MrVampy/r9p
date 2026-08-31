@@ -29,3 +29,12 @@ pub fn mount_with_session(
 ) -> Result<(), Error> {
     fuse::R9pFuse::mount_with_session(config, client, feed_events)
 }
+
+pub fn mount_replacement(
+    config: Config,
+    prepared: std::os::unix::net::UnixStream,
+    start: std::os::unix::net::UnixStream,
+    ready: std::os::unix::net::UnixStream,
+) -> Result<(), Error> {
+    fuse::R9pFuse::mount_replacement(config, prepared, start, ready)
+}

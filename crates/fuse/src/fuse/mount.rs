@@ -6,11 +6,11 @@
 //! also the helper's liveness guard, so the mount owns both the socket and the
 //! helper process until teardown.
 //!
-//! We also install a SIGINT/SIGTERM/SIGHUP watcher that runs `fusermount -u`
-//! on the way out. Without it, an interrupted process leaves the mount in
-//! `Transport endpoint is not connected` limbo until the user manually runs
-//! the unmount.
+//! Mount-generation signal ownership lives in the sibling `generation`
+//! module. This module exposes owned cleanup and lazy detach as separate
+//! operations so replacement never closes the old FUSE connection.
 
+use super::generation::unblock_mount_signals;
 use crate::error::{Error, Result};
 use std::{
     ffi::CString,
@@ -34,25 +34,6 @@ const UNMOUNT_TIMEOUT: Duration = Duration::from_secs(2);
 pub(super) struct FuseMount {
     file: Option<File>,
     cleanup: MountCleanup,
-}
-
-pub(super) fn block_termination_signals() {
-    set_termination_signal_mask(libc::SIG_BLOCK);
-}
-
-fn unblock_termination_signals() {
-    set_termination_signal_mask(libc::SIG_UNBLOCK);
-}
-
-fn set_termination_signal_mask(how: libc::c_int) {
-    unsafe {
-        let mut set: libc::sigset_t = zeroed();
-        libc::sigemptyset(&mut set);
-        libc::sigaddset(&mut set, libc::SIGINT);
-        libc::sigaddset(&mut set, libc::SIGTERM);
-        libc::sigaddset(&mut set, libc::SIGHUP);
-        libc::pthread_sigmask(how, &set, ptr::null_mut());
-    }
 }
 
 impl FuseMount {
@@ -91,6 +72,10 @@ impl MountCleanup {
     pub(super) fn cleanup(&self) {
         self.close_fuse_fd();
         self.detach_and_abort();
+    }
+
+    pub(super) fn detach_for_replacement(&self) {
+        lazy_unmount(&self.mountpoint);
     }
 
     fn detach_and_abort(&self) {
@@ -132,7 +117,6 @@ pub(super) fn mount_fuse(
     mountpoint: &Path,
     namespace_source: &str,
     allow_other: bool,
-    unmount_on_signal: bool,
 ) -> Result<FuseMount> {
     let absolute_mountpoint = absolute_mountpoint(mountpoint)?;
     clear_stale_fuse_mount(&absolute_mountpoint);
@@ -155,9 +139,6 @@ pub(super) fn mount_fuse(
         fuse_fd: Arc::clone(&fuse_fd),
         auto_unmount_guardian: Arc::new(Mutex::new(descriptors.auto_unmount_guardian)),
     };
-    if unmount_on_signal {
-        install_unmount_on_signal(cleanup.clone());
-    }
     Ok(FuseMount {
         file: Some(unsafe { File::from_raw_fd(fd) }),
         cleanup,
@@ -331,7 +312,7 @@ unsafe fn child_exec_fusermount(
     auto_unmount: bool,
     allow_other: bool,
 ) -> ! {
-    unblock_termination_signals();
+    unblock_mount_signals();
     let env_name = CString::new("_FUSE_COMMFD").expect("static env name contains no NUL");
     let env_value = CString::new(comm_fd.to_string()).expect("fd string contains no NUL");
     let mountpoint = CString::new(mountpoint).expect("mountpoint contains no NUL");
@@ -418,36 +399,6 @@ pub(super) fn recv_fd(socket: RawFd) -> Result<RawFd> {
         }
         let data = libc::CMSG_DATA(cmsg).cast::<RawFd>();
         Ok(ptr::read_unaligned(data))
-    }
-}
-
-fn install_unmount_on_signal(cleanup: MountCleanup) {
-    // Block SIGINT/SIGTERM/SIGHUP on every thread except the dedicated
-    // watcher. Setting the mask on the calling (main) thread before any
-    // worker threads spawn means the watcher's sibling threads inherit the
-    // block, which is what `sigwait` requires.
-    block_termination_signals();
-    thread::spawn(move || {
-        let signo = wait_for_termination_signal();
-        cleanup.cleanup();
-        unsafe {
-            libc::_exit(128 + signo);
-        }
-    });
-}
-
-fn wait_for_termination_signal() -> libc::c_int {
-    unsafe {
-        let mut set: libc::sigset_t = zeroed();
-        libc::sigemptyset(&mut set);
-        libc::sigaddset(&mut set, libc::SIGINT);
-        libc::sigaddset(&mut set, libc::SIGTERM);
-        libc::sigaddset(&mut set, libc::SIGHUP);
-        let mut signo: libc::c_int = 0;
-        if libc::sigwait(&set, &mut signo) != 0 {
-            return libc::SIGTERM;
-        }
-        signo
     }
 }
 

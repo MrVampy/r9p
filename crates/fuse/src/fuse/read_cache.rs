@@ -35,7 +35,7 @@ struct Inner {
     state: Mutex<State>,
     completed: Condvar,
     storage: Mutex<()>,
-    _lock: File,
+    lock: File,
 }
 
 #[derive(Default)]
@@ -140,15 +140,13 @@ impl ReadCache {
         if !private_owner(&lock_metadata) {
             return Err(Error::new(libc::EACCES, "read cache lock is not private"));
         }
-        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(Error::io(
-                "lock read cache volume",
-                std::io::Error::last_os_error(),
-            ));
-        }
-        bind_volume(root, &volume_binding(volume_identity, chunk_bytes)?)?;
-        let chunks = root.join(CHUNKS_DIRECTORY);
-        ensure_private_directory(&chunks)?;
+        let chunks = {
+            let _disk = CacheFileLock::acquire(&lock)?;
+            bind_volume(root, &volume_binding(volume_identity, chunk_bytes)?)?;
+            let chunks = root.join(CHUNKS_DIRECTORY);
+            ensure_private_directory(&chunks)?;
+            chunks
+        };
         let cache = Self {
             inner: Arc::new(Inner {
                 chunks,
@@ -164,7 +162,7 @@ impl ReadCache {
                 }),
                 completed: Condvar::new(),
                 storage: Mutex::new(()),
-                _lock: lock,
+                lock,
             }),
         };
         cache.reconcile_usage()?;
@@ -344,11 +342,8 @@ impl ReadCache {
         if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > self.inner.max_bytes {
             return Ok(());
         }
-        let _storage = self
-            .inner
-            .storage
-            .lock()
-            .map_err(|_| Error::new(libc::EIO, "read cache storage lock poisoned"))?;
+        let _storage = self.lock_storage()?;
+        self.refresh_usage_from_disk()?;
         let destination = self.chunk_path(key);
         if destination.is_file() {
             return Ok(());
@@ -387,11 +382,12 @@ impl ReadCache {
     }
 
     fn reconcile_usage(&self) -> Result<()> {
-        let _storage = self
-            .inner
-            .storage
-            .lock()
-            .map_err(|_| Error::new(libc::EIO, "read cache storage lock poisoned"))?;
+        let _storage = self.lock_storage()?;
+        self.refresh_usage_from_disk()?;
+        self.evict_for(0)
+    }
+
+    fn refresh_usage_from_disk(&self) -> Result<()> {
         let entries = self.entries()?;
         let total = entries
             .iter()
@@ -402,8 +398,20 @@ impl ReadCache {
             .lock()
             .map_err(|_| Error::new(libc::EIO, "read cache state lock poisoned"))?;
         state.snapshot.current_bytes = total;
-        drop(state);
-        self.evict_for(0)
+        Ok(())
+    }
+
+    fn lock_storage(&self) -> Result<CacheStorageLock<'_>> {
+        let thread = self
+            .inner
+            .storage
+            .lock()
+            .map_err(|_| Error::new(libc::EIO, "read cache storage lock poisoned"))?;
+        let file = CacheFileLock::acquire(&self.inner.lock)?;
+        Ok(CacheStorageLock {
+            _thread: thread,
+            _file: file,
+        })
     }
 
     fn evict_for(&self, incoming: u64) -> Result<()> {
@@ -529,6 +537,35 @@ impl ReadCache {
             state.snapshot.read_errors = state.snapshot.read_errors.saturating_add(1);
         }
     }
+}
+
+struct CacheFileLock<'a> {
+    file: &'a File,
+}
+
+impl<'a> CacheFileLock<'a> {
+    fn acquire(file: &'a File) -> Result<Self> {
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(Error::io(
+                "lock read cache storage",
+                std::io::Error::last_os_error(),
+            ));
+        }
+        Ok(Self { file })
+    }
+}
+
+impl Drop for CacheFileLock<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+struct CacheStorageLock<'a> {
+    _thread: std::sync::MutexGuard<'a, ()>,
+    _file: CacheFileLock<'a>,
 }
 
 fn ensure_private_directory(path: &Path) -> Result<()> {

@@ -11,6 +11,7 @@
 mod change_feed;
 mod config;
 mod dispatch;
+mod generation;
 mod invalidation;
 mod mount;
 mod mount_state;
@@ -31,12 +32,14 @@ use crate::{
     node::NodeTable,
 };
 use config::{normalize_config, parse_source_path, read_cache_volume_identity};
-use mount::{block_termination_signals, mount_fuse, FuseMount, MountCleanup};
+use generation::{block_mount_signals, notify_ready, MountGeneration};
+use mount::{mount_fuse, FuseMount, MountCleanup};
 use read_cache::ReadCache;
 use recovery::ShapeRecovery;
 use session::{feed::FeedEventReceiver, ClientSession};
 use status::MountStatus;
 use std::{
+    io::{Read, Write},
     net::Shutdown,
     os::unix::net::UnixStream,
     path::Path,
@@ -72,7 +75,6 @@ impl MountHandle {
                 Path::new(&config.mountpoint),
                 &config.source_path,
                 config.allow_other,
-                false,
             )?;
             prepared.push((config, mount));
         }
@@ -155,11 +157,11 @@ pub struct R9pFuse {
 
 impl R9pFuse {
     pub fn mount(mut config: Config) -> Result<()> {
-        block_termination_signals();
+        block_mount_signals();
         normalize_config(&mut config)?;
         let connections = config.connections()?;
         let client = ClientSession::connect_set(&connections, config.connect_timeout)?;
-        Self::mount_prepared(config, client, None)
+        Self::mount_prepared(config, client, None, true, false)
     }
 
     pub fn mount_with_session(
@@ -167,9 +169,40 @@ impl R9pFuse {
         client: ClientSession,
         feed_events: Option<FeedEventReceiver>,
     ) -> Result<()> {
-        block_termination_signals();
+        block_mount_signals();
         normalize_config(&mut config)?;
-        Self::mount_prepared(config, client, feed_events)
+        Self::mount_prepared(config, client, feed_events, false, false)
+    }
+
+    pub fn mount_replacement(
+        mut config: Config,
+        mut prepared: UnixStream,
+        mut start: UnixStream,
+        mut ready: UnixStream,
+    ) -> Result<()> {
+        block_mount_signals();
+        normalize_config(&mut config)?;
+        let connections = config.connections()?;
+        let client = ClientSession::connect_set(&connections, config.connect_timeout)?;
+        let fs = Self::prepare(config, client)?;
+        prepared
+            .write_all(b"P")
+            .map_err(|error| Error::io("publish replacement mount preflight", error))?;
+        let mut command = [0_u8; 1];
+        start
+            .read_exact(&mut command)
+            .map_err(|error| Error::io("wait for replacement mount start", error))?;
+        if command != *b"G" {
+            return Err(Error::new(
+                libc::EPROTO,
+                "replacement mount received an invalid start command",
+            ));
+        }
+        let result = Self::mount_prepared_fs(fs, None, true, true, Some(&mut ready));
+        if result.is_err() {
+            let _ = ready.write_all(b"E");
+        }
+        result
     }
 
     fn mount_managed(
@@ -182,6 +215,7 @@ impl R9pFuse {
         let connections = config.connections()?;
         let client = ClientSession::connect_set(&connections, config.connect_timeout)?;
         let fs = Self::prepare(config, client)?;
+        fs.status.activate();
         let _ = ready.send(Ok(()));
         let cleanup = mount.cleanup_handle();
         fs.run_managed(mount.file_mut(), shutdown, cleanup)
@@ -191,16 +225,39 @@ impl R9pFuse {
         config: Config,
         client: ClientSession,
         feed_events: Option<FeedEventReceiver>,
+        notify_service: bool,
+        adopt_main_process: bool,
     ) -> Result<()> {
         validate_coherent_cache(&config, feed_events.is_some())?;
-        let mut mount = mount_fuse(
-            Path::new(&config.mountpoint),
-            &config.source_path,
-            config.allow_other,
-            true,
-        )?;
         let fs = Self::prepare(config, client)?;
-        fs.run(mount.file_mut(), feed_events)
+        Self::mount_prepared_fs(fs, feed_events, notify_service, adopt_main_process, None)
+    }
+
+    fn mount_prepared_fs(
+        fs: Self,
+        feed_events: Option<FeedEventReceiver>,
+        notify_service: bool,
+        adopt_main_process: bool,
+        replacement_ready: Option<&mut UnixStream>,
+    ) -> Result<()> {
+        let mut mount = mount_fuse(
+            Path::new(&fs.config.mountpoint),
+            &fs.config.source_path,
+            fs.config.allow_other,
+        )?;
+        let generation = MountGeneration::start(mount.cleanup_handle(), fs.status.clone())?;
+        fs.status.activate();
+        if notify_service {
+            notify_ready(adopt_main_process)?;
+        }
+        if let Some(ready) = replacement_ready {
+            ready
+                .write_all(b"R")
+                .map_err(|error| Error::io("publish replacement mount readiness", error))?;
+        }
+        let result = fs.run(mount.file_mut(), feed_events);
+        generation.wait_for_successor_if_pending();
+        result
     }
 
     fn prepare(config: Config, client: ClientSession) -> Result<Self> {

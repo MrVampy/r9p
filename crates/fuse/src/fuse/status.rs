@@ -5,21 +5,25 @@ use crate::{
     fuse::read_cache::CacheSnapshot,
 };
 use std::{
-    fs::OpenOptions,
+    fs::{self, OpenOptions},
     io::Write,
+    os::unix::fs::OpenOptionsExt,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 
 const CACHE_STATUS_INTERVAL: Duration = Duration::from_secs(1);
+static STATUS_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
 pub(super) struct MountStatus {
     state: Arc<Mutex<State>>,
 }
 
-#[derive(Clone)]
 struct State {
     path: Option<PathBuf>,
     namespace_source: String,
@@ -59,14 +63,11 @@ impl MountStatus {
     }
 
     pub(super) fn set_transport(&self, active_endpoint: String) {
-        let snapshot = {
-            let Ok(mut state) = self.state.lock() else {
-                return;
-            };
-            state.active_endpoint = active_endpoint;
-            state.clone()
+        let Ok(mut state) = self.state.lock() else {
+            return;
         };
-        let _ = write_status(snapshot);
+        state.active_endpoint = active_endpoint;
+        let _ = write_status(&state);
     }
 
     pub(super) fn set_change_feed(
@@ -76,63 +77,73 @@ impl MountStatus {
         last_event_id: Option<String>,
         last_error: Option<String>,
     ) {
-        let snapshot = {
-            let Ok(mut state) = self.state.lock() else {
-                return;
-            };
-            state.change_feed = change_feed;
-            state.source = source;
-            if last_event_id.is_some() {
-                state.last_event_id = last_event_id;
-            }
-            state.last_error = last_error;
-            state.clone()
+        let Ok(mut state) = self.state.lock() else {
+            return;
         };
-        let _ = write_status(snapshot);
+        state.change_feed = change_feed;
+        state.source = source;
+        if last_event_id.is_some() {
+            state.last_event_id = last_event_id;
+        }
+        state.last_error = last_error;
+        let _ = write_status(&state);
     }
 
     pub(super) fn set_read_cache(&self, read_cache: CacheSnapshot) {
-        let snapshot = {
-            let Ok(mut state) = self.state.lock() else {
-                return;
-            };
-            state.read_cache = Some(read_cache);
-            let now = Instant::now();
-            if state
-                .last_cache_publish
-                .is_some_and(|last| now.duration_since(last) < CACHE_STATUS_INTERVAL)
-            {
-                return;
-            }
-            state.last_cache_publish = Some(now);
-            state.clone()
+        let Ok(mut state) = self.state.lock() else {
+            return;
         };
-        let _ = write_status(snapshot);
+        state.read_cache = Some(read_cache);
+        let now = Instant::now();
+        if state
+            .last_cache_publish
+            .is_some_and(|last| now.duration_since(last) < CACHE_STATUS_INTERVAL)
+        {
+            return;
+        }
+        state.last_cache_publish = Some(now);
+        let _ = write_status(&state);
     }
 
     fn publish(&self) {
-        let snapshot = {
-            let Ok(state) = self.state.lock() else {
-                return;
-            };
-            state.clone()
+        let Ok(state) = self.state.lock() else {
+            return;
         };
-        let _ = write_status(snapshot);
+        let _ = write_status(&state);
     }
 }
 
-fn write_status(state: State) -> Result<()> {
+fn write_status(state: &State) -> Result<()> {
     let Some(path) = state.path.as_ref() else {
         return Ok(());
     };
+    let parent = path
+        .parent()
+        .ok_or_else(|| Error::new(libc::EINVAL, "status path parent missing"))?;
+    let sequence = STATUS_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = parent.join(format!(
+        ".r9p-mount-status-{}-{sequence}.tmp",
+        std::process::id()
+    ));
     let mut file = OpenOptions::new()
-        .create(true)
+        .create_new(true)
         .write(true)
-        .truncate(true)
-        .open(path)
-        .map_err(|error| Error::io(format!("open status {}", path.display()), error))?;
-    writeln!(file, "{}", status_json(&state))
-        .map_err(|error| Error::io(format!("write status {}", path.display()), error))
+        .mode(0o666)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&temporary)
+        .map_err(|error| Error::io(format!("create status {}", temporary.display()), error))?;
+    if let Err(error) = writeln!(file, "{}", status_json(state)) {
+        let _ = fs::remove_file(&temporary);
+        return Err(Error::io(
+            format!("write status {}", temporary.display()),
+            error,
+        ));
+    }
+    drop(file);
+    fs::rename(&temporary, path).map_err(|error| {
+        let _ = fs::remove_file(&temporary);
+        Error::io(format!("publish status {}", path.display()), error)
+    })
 }
 
 fn status_json(state: &State) -> String {
@@ -213,7 +224,14 @@ fn escape_json(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{status_json, CacheSnapshot, State};
+    use super::{status_json, write_status, CacheSnapshot, State};
+    use std::{
+        fs::{self, File},
+        io::Read,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
     #[test]
     fn status_json_reports_feed_state() {
@@ -249,5 +267,48 @@ mod tests {
         assert!(json.contains("\"last_error\":\"feed missing\""));
         assert!(json.contains("\"persistent_read_cache\":{\"state\":\"ready\""));
         assert!(json.contains("\"hit_chunks\":3"));
+    }
+
+    #[test]
+    fn status_replacement_keeps_open_readers_on_one_complete_snapshot() {
+        let sequence = TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "r9p-mount-status-{}-{sequence}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir(&directory).expect("create status directory");
+        let path = directory.join("status");
+        let mut state = State {
+            path: Some(path.clone()),
+            namespace_source: "/sources/newsgroups/downloads/files".to_string(),
+            active_endpoint: "nucbox.mesh:9564".to_string(),
+            endpoint_candidates: vec!["nucbox.mesh:9564".to_string()],
+            change_feed: "connected",
+            source: Some("session"),
+            last_event_id: Some("event-1".to_string()),
+            last_error: None,
+            read_cache: None,
+            last_cache_publish: None,
+        };
+        write_status(&state).expect("publish first status");
+        let first_json = status_json(&state) + "\n";
+        let mut first_reader = File::open(&path).expect("open first status");
+
+        state.active_endpoint = "m7.mesh:9564".to_string();
+        state.last_event_id = Some("event-2".to_string());
+        write_status(&state).expect("publish replacement status");
+        let second_json = status_json(&state) + "\n";
+        let mut retained = String::new();
+        first_reader
+            .read_to_string(&mut retained)
+            .expect("read retained status");
+
+        assert_eq!(retained, first_json);
+        assert_eq!(
+            fs::read_to_string(&path).expect("read current status"),
+            second_json
+        );
+        fs::remove_dir_all(directory).expect("remove status directory");
     }
 }

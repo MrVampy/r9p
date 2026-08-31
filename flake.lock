@@ -3,11 +3,11 @@
     "cargo-nix-plugin": {
       "flake": false,
       "locked": {
-        "lastModified": 1788131536,
-        "narHash": "sha256-aW26zXYff+ECg3zW9ea+sGGGYUbrouFmKq5K5neDfk0=",
+        "lastModified": 1788142265,
+        "narHash": "sha256-aOyUynQs5QjcSDnnOiNUxlwXlWK01F+53bhdrZzFc1Y=",
         "ref": "main",
-        "rev": "9a1cfba3606a4f81d9b2cafc44618008ce6ba5da",
-        "revCount": 122,
+        "rev": "7bdf188640df9b59f1a7b35096024cac930e2a10",
+        "revCount": 124,
         "type": "git",
         "url": "ssh://git@git.mesh:2222/MrVampy/cargo-nix-plugin.git"
       },

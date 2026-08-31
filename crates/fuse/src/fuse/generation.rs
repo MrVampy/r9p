@@ -3,8 +3,10 @@ use crate::{error::Result, Error};
 use std::{
     env,
     ffi::OsStr,
+    io,
     mem::zeroed,
     os::{
+        fd::AsRawFd,
         linux::net::SocketAddrExt,
         unix::{
             ffi::OsStrExt,
@@ -76,10 +78,106 @@ pub(super) fn notify_ready(adopt_main_process: bool) -> Result<()> {
     } else {
         "READY=1".to_string()
     };
-    UnixDatagram::unbound()
-        .and_then(|socket| socket.send_to_addr(message.as_bytes(), &socket_address))
-        .map(|_| ())
-        .map_err(|error| Error::io("notify systemd mount readiness", error))
+    let socket = UnixDatagram::unbound()
+        .map_err(|error| Error::io("create systemd notify socket", error))?;
+    socket
+        .connect_addr(&socket_address)
+        .map_err(|error| Error::io("connect systemd notify socket", error))?;
+    let sent = socket
+        .send(message.as_bytes())
+        .map_err(|error| Error::io("notify systemd mount readiness", error))?;
+    if sent != message.len() {
+        return Err(Error::new(
+            libc::EIO,
+            "systemd mount readiness notification was incomplete",
+        ));
+    }
+    notify_barrier(&socket).map_err(|error| Error::io("wait for systemd notify barrier", error))
+}
+
+fn notify_barrier(socket: &UnixDatagram) -> io::Result<()> {
+    let mut pipe = [-1_i32; 2];
+    if unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let send_result = send_barrier_fd(socket.as_raw_fd(), pipe[1]);
+    unsafe {
+        libc::close(pipe[1]);
+    }
+    if let Err(error) = send_result {
+        unsafe {
+            libc::close(pipe[0]);
+        }
+        return Err(error);
+    }
+    let mut poll = libc::pollfd {
+        fd: pipe[0],
+        events: libc::POLLIN | libc::POLLHUP,
+        revents: 0,
+    };
+    let result = loop {
+        let result = unsafe { libc::poll(&mut poll, 1, 60_000) };
+        if result >= 0 {
+            break result;
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            unsafe {
+                libc::close(pipe[0]);
+            }
+            return Err(error);
+        }
+    };
+    unsafe {
+        libc::close(pipe[0]);
+    }
+    if result == 0 {
+        return Err(io::Error::from_raw_os_error(libc::ETIMEDOUT));
+    }
+    if poll.revents & (libc::POLLIN | libc::POLLHUP) == 0 {
+        return Err(io::Error::other(
+            "systemd notify barrier returned no completion",
+        ));
+    }
+    Ok(())
+}
+
+fn send_barrier_fd(socket: libc::c_int, barrier_fd: libc::c_int) -> io::Result<()> {
+    let mut payload = *b"BARRIER=1";
+    let mut iov = libc::iovec {
+        iov_base: payload.as_mut_ptr().cast(),
+        iov_len: payload.len(),
+    };
+    let mut control = [0_u8; 64];
+    let mut message: libc::msghdr = unsafe { zeroed() };
+    message.msg_iov = &mut iov;
+    message.msg_iovlen = 1;
+    message.msg_control = control.as_mut_ptr().cast();
+    message.msg_controllen =
+        unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as _) } as usize;
+    let header = unsafe { libc::CMSG_FIRSTHDR(&message) };
+    if header.is_null() {
+        return Err(io::Error::other(
+            "systemd notify barrier control buffer missing",
+        ));
+    }
+    unsafe {
+        (*header).cmsg_level = libc::SOL_SOCKET;
+        (*header).cmsg_type = libc::SCM_RIGHTS;
+        (*header).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as _) as usize;
+        std::ptr::write_unaligned(libc::CMSG_DATA(header).cast::<libc::c_int>(), barrier_fd);
+    }
+    let sent = unsafe { libc::sendmsg(socket, &message, libc::MSG_NOSIGNAL) };
+    if sent < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if usize::try_from(sent).unwrap_or_default() != payload.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            "systemd notify barrier was incomplete",
+        ));
+    }
+    Ok(())
 }
 
 fn signal_loop(

@@ -65,9 +65,11 @@ count.
 The systemd reload command starts the new r9p binary in two phases. It first
 prepares the namespace connection and source binding. Only after that preflight
 succeeds does it signal the active generation to lazy-detach, start the
-successor mount, wait for successor readiness and systemd main-PID adoption,
-and release the retired generation's replacement fence. SIGINT and SIGTERM
-retain immediate owned teardown.
+successor mount, publish successor readiness and main-PID adoption, wait on the
+systemd notification barrier, and release the retired generation's replacement
+fence. The active PID is supplied by systemd's reload command; r9p does not
+query host service state through an ambient helper. SIGINT and SIGTERM retain
+immediate owned teardown.
 
 The old generation stops publishing shared status when it retires but keeps
 serving its detached FUSE connection until the kernel destroys it. The new

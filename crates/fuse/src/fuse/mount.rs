@@ -22,7 +22,7 @@ use std::{
     process::{Child, Command, Stdio},
     ptr,
     sync::{
-        atomic::{AtomicI32, Ordering},
+        atomic::{AtomicBool, AtomicI32, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -65,6 +65,7 @@ pub(super) struct MountCleanup {
     mountpoint: PathBuf,
     connection_id: Option<u64>,
     fuse_fd: Arc<AtomicI32>,
+    detached: Arc<AtomicBool>,
     auto_unmount_guardian: Arc<Mutex<Option<AutoUnmountGuardian>>>,
 }
 
@@ -75,13 +76,15 @@ impl MountCleanup {
     }
 
     pub(super) fn detach_for_replacement(&self) {
-        lazy_unmount(&self.mountpoint);
+        detach_mountpoint_for_replacement(&self.detached, || lazy_unmount(&self.mountpoint));
     }
 
     fn detach_and_abort(&self) {
         abort_fuse_connection(self.connection_id);
         self.stop_auto_unmount_guardian();
-        lazy_unmount(&self.mountpoint);
+        unmount_owned_mountpoint(&self.detached, || {
+            let _ = lazy_unmount(&self.mountpoint);
+        });
     }
 
     fn stop_auto_unmount_guardian(&self) {
@@ -137,6 +140,7 @@ pub(super) fn mount_fuse(
         mountpoint: absolute_mountpoint,
         connection_id,
         fuse_fd: Arc::clone(&fuse_fd),
+        detached: Arc::new(AtomicBool::new(false)),
         auto_unmount_guardian: Arc::new(Mutex::new(descriptors.auto_unmount_guardian)),
     };
     Ok(FuseMount {
@@ -402,9 +406,9 @@ pub(super) fn recv_fd(socket: RawFd) -> Result<RawFd> {
     }
 }
 
-pub(super) fn lazy_unmount(mountpoint: &Path) {
+pub(super) fn lazy_unmount(mountpoint: &Path) -> bool {
     if umount2_lazy(mountpoint) {
-        return;
+        return true;
     }
     for (binary, args) in [
         ("fusermount3", &["-u", "-z"][..]),
@@ -412,8 +416,23 @@ pub(super) fn lazy_unmount(mountpoint: &Path) {
         ("umount", &["-l"][..]),
     ] {
         if run_unmount_command(binary, args, mountpoint) {
-            return;
+            return true;
         }
+    }
+    false
+}
+
+fn detach_mountpoint_for_replacement(detached: &AtomicBool, detach: impl FnOnce() -> bool) -> bool {
+    if detached.load(Ordering::SeqCst) || !detach() {
+        return false;
+    }
+    detached.store(true, Ordering::SeqCst);
+    true
+}
+
+fn unmount_owned_mountpoint(detached: &AtomicBool, unmount: impl FnOnce()) {
+    if !detached.load(Ordering::SeqCst) {
+        unmount();
     }
 }
 
@@ -524,11 +543,13 @@ fn decode_mounts_path(path: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_mounts_path, filesystem_source, fusermount_candidates, mount_options,
-        parse_connection_id_from_mountinfo, AutoUnmountGuardian,
+        decode_mounts_path, detach_mountpoint_for_replacement, filesystem_source,
+        fusermount_candidates, mount_options, parse_connection_id_from_mountinfo,
+        unmount_owned_mountpoint, AutoUnmountGuardian,
     };
     use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
     use std::os::unix::net::UnixStream;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[test]
     fn prefers_fusermount3_before_fuse2_helper() {
@@ -584,6 +605,30 @@ mod tests {
         let status = guardian.stop().expect("stop and reap auto-unmount helper");
         assert!(libc::WIFEXITED(status));
         assert_eq!(0, libc::WEXITSTATUS(status));
+    }
+
+    #[test]
+    fn detached_generation_never_unmounts_successor_path() {
+        let detached = AtomicBool::new(false);
+        let unmounts = AtomicUsize::new(0);
+        assert!(detach_mountpoint_for_replacement(&detached, || true));
+        unmount_owned_mountpoint(&detached, || {
+            unmounts.fetch_add(1, Ordering::SeqCst);
+        });
+        assert!(detached.load(Ordering::SeqCst));
+        assert_eq!(unmounts.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn failed_detach_retains_mountpoint_cleanup_ownership() {
+        let detached = AtomicBool::new(false);
+        let unmounts = AtomicUsize::new(0);
+        assert!(!detach_mountpoint_for_replacement(&detached, || false));
+        unmount_owned_mountpoint(&detached, || {
+            unmounts.fetch_add(1, Ordering::SeqCst);
+        });
+        assert!(!detached.load(Ordering::SeqCst));
+        assert_eq!(unmounts.load(Ordering::SeqCst), 1);
     }
 
     #[test]

@@ -620,6 +620,8 @@ struct MountArgs {
     expect_change_feed: Option<String>,
     #[arg(long, value_name = "COUNT")]
     attempts: Option<usize>,
+    #[arg(long, value_name = "PID")]
+    active_pid: Option<i32>,
     #[arg(long = "kilobytes", value_name = "COUNT")]
     read_ahead_kilobytes: Option<u64>,
     /// Direct mount arguments for `mount ensure`.
@@ -1187,6 +1189,7 @@ impl MountArgs {
             self.expect_change_feed,
         );
         push_option(&mut options, "--attempts", self.attempts);
+        push_option(&mut options, "--active-pid", self.active_pid);
         push_option(&mut options, "--kilobytes", self.read_ahead_kilobytes);
 
         let mut args = Vec::new();

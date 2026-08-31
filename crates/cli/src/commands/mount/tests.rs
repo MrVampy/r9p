@@ -345,10 +345,8 @@ fn parses_mount_replacement_as_a_bounded_systemd_generation_change() {
     let (replacement, mount_args) = parse_mount_replacement_config(vec![
         "--mountpoint".to_string(),
         "/home/mrvamp/Newsgroups".to_string(),
-        "--unit".to_string(),
-        "newsgroups-downloads.mount.service".to_string(),
-        "--unit-scope".to_string(),
-        "system".to_string(),
+        "--active-pid".to_string(),
+        "4200".to_string(),
         "--attempts".to_string(),
         "80".to_string(),
         "--".to_string(),
@@ -363,8 +361,7 @@ fn parses_mount_replacement_as_a_bounded_systemd_generation_change() {
         replacement.mountpoint,
         PathBuf::from("/home/mrvamp/Newsgroups")
     );
-    assert_eq!(replacement.unit, "newsgroups-downloads.mount.service");
-    assert_eq!(replacement.unit_scope, SystemdUnitScope::System);
+    assert_eq!(replacement.active_pid, 4200);
     assert_eq!(replacement.attempts, 80);
     assert_eq!(
         mount_args,

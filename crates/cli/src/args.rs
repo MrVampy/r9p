@@ -524,7 +524,7 @@ struct SessionRequiredPathArgs {
 
 #[derive(Debug, ClapArgs)]
 struct MountArgs {
-    /// Direct endpoint, or one of ensure, read-ahead, status, and stop.
+    /// Direct endpoint, or one of ensure, read-ahead, replace, status, and stop.
     #[arg(value_name = "ENDPOINT_OR_ACTION")]
     endpoint_or_action: String,
     /// Direct-mode mountpoint.
@@ -1096,7 +1096,7 @@ impl MountArgs {
     fn into_args(self) -> Vec<String> {
         let action = matches!(
             self.endpoint_or_action.as_str(),
-            "ensure" | "read-ahead" | "status" | "stop"
+            "ensure" | "read-ahead" | "replace" | "status" | "stop"
         );
         let mut options = Vec::new();
         for endpoint in self.fallback_endpoint {

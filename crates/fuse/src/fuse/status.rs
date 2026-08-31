@@ -35,6 +35,8 @@ struct State {
     last_error: Option<String>,
     read_cache: Option<CacheSnapshot>,
     last_cache_publish: Option<Instant>,
+    generation: &'static str,
+    publish_enabled: bool,
 }
 
 impl MountStatus {
@@ -44,7 +46,7 @@ impl MountStatus {
         active_endpoint: String,
         endpoint_candidates: Vec<String>,
     ) -> Self {
-        let status = Self {
+        Self {
             state: Arc::new(Mutex::new(State {
                 path,
                 namespace_source,
@@ -56,10 +58,19 @@ impl MountStatus {
                 last_error: None,
                 read_cache: None,
                 last_cache_publish: None,
+                generation: "preparing",
+                publish_enabled: false,
             })),
+        }
+    }
+
+    pub(super) fn activate(&self) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
         };
-        status.publish();
-        status
+        state.generation = "active";
+        state.publish_enabled = true;
+        let _ = write_status(&state);
     }
 
     pub(super) fn set_transport(&self, active_endpoint: String) {
@@ -67,7 +78,7 @@ impl MountStatus {
             return;
         };
         state.active_endpoint = active_endpoint;
-        let _ = write_status(&state);
+        publish_status(&state);
     }
 
     pub(super) fn set_change_feed(
@@ -86,7 +97,7 @@ impl MountStatus {
             state.last_event_id = last_event_id;
         }
         state.last_error = last_error;
-        let _ = write_status(&state);
+        publish_status(&state);
     }
 
     pub(super) fn set_read_cache(&self, read_cache: CacheSnapshot) {
@@ -102,14 +113,16 @@ impl MountStatus {
             return;
         }
         state.last_cache_publish = Some(now);
-        let _ = write_status(&state);
+        publish_status(&state);
     }
 
-    fn publish(&self) {
-        let Ok(state) = self.state.lock() else {
+    pub(super) fn retire(&self) {
+        let Ok(mut state) = self.state.lock() else {
             return;
         };
+        state.generation = "retired";
         let _ = write_status(&state);
+        state.publish_enabled = false;
     }
 }
 
@@ -146,10 +159,18 @@ fn write_status(state: &State) -> Result<()> {
     })
 }
 
+fn publish_status(state: &State) {
+    if state.publish_enabled {
+        let _ = write_status(state);
+    }
+}
+
 fn status_json(state: &State) -> String {
     format!(
-        "{{\"namespace_source\":\"{}\",\"active_endpoint\":\"{}\",\"endpoint_candidates\":{},\"change_feed\":\"{}\",\"source\":{},\"last_event_id\":{},\"last_error\":{},\"persistent_read_cache\":{}}}",
+        "{{\"namespace_source\":\"{}\",\"process_id\":{},\"mount_generation\":\"{}\",\"active_endpoint\":\"{}\",\"endpoint_candidates\":{},\"change_feed\":\"{}\",\"source\":{},\"last_event_id\":{},\"last_error\":{},\"persistent_read_cache\":{}}}",
         escape_json(&state.namespace_source),
+        std::process::id(),
+        state.generation,
         escape_json(&state.active_endpoint),
         string_array_json(&state.endpoint_candidates),
         state.change_feed,
@@ -257,6 +278,8 @@ mod tests {
                 write_errors: 0,
             }),
             last_cache_publish: None,
+            generation: "active",
+            publish_enabled: true,
         });
         assert!(json.contains("\"namespace_source\":\"/sources/newsgroups/browse\""));
         assert!(json.contains("\"active_endpoint\":\"nucbox.mesh:9564\""));
@@ -290,6 +313,8 @@ mod tests {
             last_error: None,
             read_cache: None,
             last_cache_publish: None,
+            generation: "active",
+            publish_enabled: true,
         };
         write_status(&state).expect("publish first status");
         let first_json = status_json(&state) + "\n";
@@ -308,6 +333,36 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&path).expect("read current status"),
             second_json
+        );
+        fs::remove_dir_all(directory).expect("remove status directory");
+    }
+
+    #[test]
+    fn retired_generation_cannot_overwrite_successor_status() {
+        let sequence = TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "r9p-retired-mount-status-{}-{sequence}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir(&directory).expect("create status directory");
+        let path = directory.join("status");
+        let status = super::MountStatus::new(
+            Some(path.clone()),
+            "/sources/newsgroups/downloads/files".to_string(),
+            "nucbox.mesh:9564".to_string(),
+            vec!["nucbox.mesh:9564".to_string()],
+        );
+        status.activate();
+        status.retire();
+        let retired = fs::read_to_string(&path).expect("read retired status");
+        assert!(retired.contains("\"mount_generation\":\"retired\""));
+
+        fs::write(&path, "successor\n").expect("publish successor status");
+        status.set_transport("m7.mesh:9564".to_string());
+        assert_eq!(
+            fs::read_to_string(&path).expect("read successor status"),
+            "successor\n"
         );
         fs::remove_dir_all(directory).expect("remove status directory");
     }

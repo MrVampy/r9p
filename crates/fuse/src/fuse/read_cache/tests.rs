@@ -222,11 +222,25 @@ fn discarding_a_truncated_chunk_releases_quota_and_repopulates_it() {
 }
 
 #[test]
-fn a_cache_volume_cannot_change_identity_or_gain_a_second_owner() {
+fn a_cache_volume_allows_same_identity_generation_overlap() {
     let directory = test_directory("identity");
     let cache = ReadCache::open_with_chunk_bytes(&directory, 64, b"volume-a", 16).expect("cache");
-    assert!(ReadCache::open_with_chunk_bytes(&directory, 64, b"volume-a", 16).is_err());
+    let successor =
+        ReadCache::open_with_chunk_bytes(&directory, 64, b"volume-a", 16).expect("successor");
+    let identity = identity(1, 1, 16);
+    let first = cache
+        .read(identity, 0, 16, |_, count| {
+            Ok(vec![7; usize::try_from(count).expect("count")])
+        })
+        .expect("first generation read");
+    let retained = successor
+        .read(identity, 0, 16, |_, _| {
+            Err(Error::new(libc::ENOTCONN, "source unavailable"))
+        })
+        .expect("successor retained read");
+    assert_eq!(retained, first);
     drop(cache);
+    drop(successor);
     assert!(ReadCache::open_with_chunk_bytes(&directory, 64, b"volume-a", 8).is_err());
     assert!(ReadCache::open_with_chunk_bytes(&directory, 64, b"volume-b", 16).is_err());
     assert!(fs::read(directory.join("volume"))

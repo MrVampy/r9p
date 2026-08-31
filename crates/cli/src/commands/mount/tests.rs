@@ -1,9 +1,10 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::{
     decode_mountinfo_path, mountinfo_targets_for_absolute, parse_mount_config,
-    parse_mount_ensure_config, parse_mount_supervisor_config, systemd_command, SystemdUnitScope,
+    parse_mount_ensure_config, parse_mount_replacement_config, parse_mount_supervisor_config,
+    systemd_command, SystemdUnitScope,
 };
 use crate::{target::Config, DEFAULT_MSIZE};
 
@@ -337,6 +338,43 @@ fn parses_mount_supervisor_options() {
         Some(Path::new(".vault/live.status.json"))
     );
     assert_eq!(config.attempts, 3);
+}
+
+#[test]
+fn parses_mount_replacement_as_a_bounded_systemd_generation_change() {
+    let (replacement, mount_args) = parse_mount_replacement_config(vec![
+        "--mountpoint".to_string(),
+        "/home/mrvamp/Newsgroups".to_string(),
+        "--unit".to_string(),
+        "newsgroups-downloads.mount.service".to_string(),
+        "--unit-scope".to_string(),
+        "system".to_string(),
+        "--attempts".to_string(),
+        "80".to_string(),
+        "--".to_string(),
+        "nucbox.mesh:9564".to_string(),
+        "/home/mrvamp/Newsgroups".to_string(),
+        "--source".to_string(),
+        "/sources/newsgroups/downloads/files".to_string(),
+    ])
+    .expect("replacement config");
+
+    assert_eq!(
+        replacement.mountpoint,
+        PathBuf::from("/home/mrvamp/Newsgroups")
+    );
+    assert_eq!(replacement.unit, "newsgroups-downloads.mount.service");
+    assert_eq!(replacement.unit_scope, SystemdUnitScope::System);
+    assert_eq!(replacement.attempts, 80);
+    assert_eq!(
+        mount_args,
+        vec![
+            "nucbox.mesh:9564",
+            "/home/mrvamp/Newsgroups",
+            "--source",
+            "/sources/newsgroups/downloads/files"
+        ]
+    );
 }
 
 #[test]

@@ -77,6 +77,12 @@ generation owns the pathname and shared status immediately. No request, file
 handle, node ID, directory cursor, or 9P operation crosses a process boundary,
 and no operation is replayed.
 
+Mountpoint ownership also moves at detach time. A retired generation may abort
+its exact old FUSE connection and stop its own auto-unmount guardian, but its
+final destructor must not unmount by pathname: that pathname belongs to the
+successor by then. A failed detach retains pathname cleanup ownership so a
+failed replacement cannot strand a connected mount.
+
 If a future consumer requires a single connection to change workers rather
 than letting old references drain naturally, implement the separately
 justified stable-parent FUSE FD and strict state-handoff protocol. Do not weaken

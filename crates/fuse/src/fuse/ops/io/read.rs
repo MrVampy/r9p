@@ -112,12 +112,7 @@ impl R9pFuse {
         offset: u64,
         size: u32,
     ) -> Result<Vec<u8>> {
-        let (client, node_fid) = self.bound_node_fid(nodeid)?;
-        let fid = client.clone_fid_timeout(node_fid, self.lookup_timeout())?;
-        if let Err(error) = client.open_timeout(fid, OREAD, self.lookup_timeout()) {
-            let _ = client.clunk_timeout(fid, self.control_timeout());
-            return Err(error.into());
-        }
+        let (client, fid, stat) = self.reopen_read_binding(nodeid)?;
         let old_handle =
             match self
                 .nodes()?
@@ -132,12 +127,7 @@ impl R9pFuse {
         let _ = old_handle
             .client
             .clunk_timeout(old_handle.require_fid()?, self.control_timeout());
-        let (stat, cache_identity) = {
-            let nodes = self.nodes()?;
-            let node = nodes.node(nodeid)?;
-            let identity = read_cache_identity(&node.stat, node.stat_freshness.is_stale());
-            (node.stat.clone(), identity)
-        };
+        let cache_identity = read_cache_identity(&stat, false);
         self.read_handle_range(&client, fid, OREAD, &stat, cache_identity, offset, size)
     }
 

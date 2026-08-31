@@ -2,4 +2,5 @@
 
 mod open;
 mod read;
+mod reopen;
 mod write;

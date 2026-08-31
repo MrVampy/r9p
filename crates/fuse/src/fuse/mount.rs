@@ -423,11 +423,15 @@ pub(super) fn lazy_unmount(mountpoint: &Path) -> bool {
 }
 
 fn detach_mountpoint_for_replacement(detached: &AtomicBool, detach: impl FnOnce() -> bool) -> bool {
-    if detached.load(Ordering::SeqCst) || !detach() {
+    if detached.swap(true, Ordering::SeqCst) {
         return false;
     }
-    detached.store(true, Ordering::SeqCst);
-    true
+    if detach() {
+        true
+    } else {
+        detached.store(false, Ordering::SeqCst);
+        false
+    }
 }
 
 fn unmount_owned_mountpoint(detached: &AtomicBool, unmount: impl FnOnce()) {
@@ -611,7 +615,10 @@ mod tests {
     fn detached_generation_never_unmounts_successor_path() {
         let detached = AtomicBool::new(false);
         let unmounts = AtomicUsize::new(0);
-        assert!(detach_mountpoint_for_replacement(&detached, || true));
+        assert!(detach_mountpoint_for_replacement(&detached, || {
+            assert!(detached.load(Ordering::SeqCst));
+            true
+        }));
         unmount_owned_mountpoint(&detached, || {
             unmounts.fetch_add(1, Ordering::SeqCst);
         });

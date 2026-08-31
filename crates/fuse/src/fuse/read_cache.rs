@@ -302,7 +302,7 @@ impl ReadCache {
             || !private_owner(&metadata)
             || metadata.len() != u64::from(expected)
         {
-            let _ = fs::remove_file(path);
+            self.discard_unusable_chunk(&path, &metadata);
             self.note_read_error();
             return Ok(None);
         }
@@ -313,7 +313,7 @@ impl ReadCache {
         {
             Ok(file) => file,
             Err(_) => {
-                let _ = fs::remove_file(path);
+                self.discard_unusable_chunk(&path, &metadata);
                 self.note_read_error();
                 return Ok(None);
             }
@@ -323,12 +323,21 @@ impl ReadCache {
             .read_exact_at(&mut bytes, u64::try_from(start).unwrap_or(u64::MAX))
             .is_err()
         {
-            let _ = fs::remove_file(path);
+            self.discard_unusable_chunk(&path, &metadata);
             self.note_read_error();
             return Ok(None);
         }
         let _ = file.set_modified(SystemTime::now());
         Ok(Some(bytes))
+    }
+
+    fn discard_unusable_chunk(&self, path: &Path, observed: &fs::Metadata) {
+        if fs::symlink_metadata(path)
+            .is_ok_and(|current| current.dev() == observed.dev() && current.ino() == observed.ino())
+        {
+            let _ = fs::remove_file(path);
+        }
+        let _ = self.reconcile_usage();
     }
 
     fn store_chunk(&self, key: ChunkKey, bytes: &[u8]) -> Result<()> {

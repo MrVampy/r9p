@@ -188,6 +188,40 @@ fn quota_evicts_the_oldest_complete_chunk() {
 }
 
 #[test]
+fn discarding_a_truncated_chunk_releases_quota_and_repopulates_it() {
+    let directory = test_directory("truncated");
+    let cache = ReadCache::open_with_chunk_bytes(&directory, 16, b"volume-a", 16).expect("cache");
+    let identity = identity(1, 1, 16);
+    cache
+        .read(identity, 0, 8, |_, count| {
+            Ok(vec![1; usize::try_from(count).expect("count")])
+        })
+        .expect("initial read");
+    let destination = cache.chunk_path(ChunkKey { identity, index: 0 });
+    fs::write(&destination, vec![9; 8]).expect("truncate cached chunk");
+
+    let repaired = cache
+        .read(identity, 0, 8, |_, count| {
+            Ok(vec![2; usize::try_from(count).expect("count")])
+        })
+        .expect("repair read");
+    let offline = cache
+        .read(identity, 0, 8, |_, _| {
+            Err(Error::new(libc::ENOTCONN, "source unavailable"))
+        })
+        .expect("repopulated cache read");
+
+    assert_eq!(repaired, vec![2; 8]);
+    assert_eq!(offline, repaired);
+    assert_eq!(cache.snapshot().current_bytes, 16);
+    assert_eq!(cache.snapshot().read_errors, 1);
+    assert_eq!(cache.snapshot().write_errors, 0);
+    assert_eq!(cache.snapshot().evictions, 0);
+    drop(cache);
+    fs::remove_dir_all(directory).expect("remove cache directory");
+}
+
+#[test]
 fn a_cache_volume_cannot_change_identity_or_gain_a_second_owner() {
     let directory = test_directory("identity");
     let cache = ReadCache::open_with_chunk_bytes(&directory, 64, b"volume-a", 16).expect("cache");

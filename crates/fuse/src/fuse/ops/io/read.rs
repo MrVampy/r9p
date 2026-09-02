@@ -12,6 +12,8 @@ use crate::{
 use session::OREAD;
 use std::fs::File;
 
+const MAX_PARALLEL_CACHE_READS: u32 = 8;
+
 impl R9pFuse {
     pub(in crate::fuse) fn readlink(
         &mut self,
@@ -144,10 +146,11 @@ impl R9pFuse {
         if open_mode == OREAD {
             if let (Some(cache), Some(identity)) = (self.read_cache.as_ref(), cache_identity) {
                 let result = cache.read(identity, offset, size, |range_offset, range_size| {
-                    Ok(client.read_full_timeout(
+                    Ok(client.read_exact_parallel_timeout(
                         fid,
                         range_offset,
                         range_size,
+                        MAX_PARALLEL_CACHE_READS,
                         self.read_timeout(),
                     )?)
                 });

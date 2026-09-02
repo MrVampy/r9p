@@ -1,6 +1,7 @@
 use super::config::DEFAULT_CHANGE_FEED_RECONNECT_DELAY;
 use super::dispatch::{
-    fuse_init_out, max_request_pages, supported_init_flags, wait_for_managed_input, ManagedInput,
+    fuse_init_out, max_request_pages, source_binding_retryable, supported_init_flags,
+    wait_for_managed_input, ManagedInput,
 };
 use super::mount_state::negative_entry_out;
 use super::ops::encode_dirents;
@@ -254,6 +255,30 @@ fn closed_9p_reader_errors_are_reconnect_candidates() {
         libc::EPROTO,
         "9P client state: response tag mismatch",
     )));
+}
+
+#[test]
+fn reconnect_waits_only_for_transient_source_publication_failures() {
+    for errno in [
+        libc::ENOENT,
+        libc::ESTALE,
+        libc::EAGAIN,
+        libc::ETIMEDOUT,
+        libc::ENOTCONN,
+        libc::ECONNREFUSED,
+        libc::ECONNRESET,
+        libc::ECONNABORTED,
+        libc::EPIPE,
+        libc::ENETDOWN,
+        libc::ENETUNREACH,
+        libc::EHOSTDOWN,
+        libc::EHOSTUNREACH,
+    ] {
+        assert!(source_binding_retryable(&Error::new(errno, "transient")));
+    }
+    for errno in [libc::EACCES, libc::EPERM, libc::EPROTO, libc::EINVAL] {
+        assert!(!source_binding_retryable(&Error::new(errno, "fatal")));
+    }
 }
 
 #[test]

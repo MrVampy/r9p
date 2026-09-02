@@ -33,7 +33,10 @@ use std::{
         Arc, Mutex, MutexGuard,
     },
     thread::{self, JoinHandle},
+    time::{Duration, Instant},
 };
+
+const SOURCE_RECONNECT_RETRY_DELAY: Duration = Duration::from_millis(25);
 
 impl R9pFuse {
     pub(super) fn run(
@@ -286,6 +289,7 @@ impl R9pFuse {
         let _reconnect_guard = reconnect
             .lock()
             .map_err(|_| Error::new(libc::EIO, "reconnect lock poisoned"))?;
+        self.status.set_data_session("reconnecting", None);
         if self.config.debug {
             eprintln!(
                 "r9p mount: reconnecting from {} across {} candidate(s)",
@@ -293,20 +297,42 @@ impl R9pFuse {
                 self.client.candidate_addresses().len()
             );
         }
-        let client = self.client.reconnect()?;
-        self.status.set_transport(self.client.active_address());
-        let (root_fid, root_stat) = self.source_binding(&client, self.config.lookup_timeout)?;
-        let lazy_rebind_count = {
+        let stale = {
             let mut nodes = self.nodes()?;
-            let stale = nodes
+            let nodeids = nodes
                 .rebind_paths()
                 .into_iter()
-                .filter_map(|(nodeid, _)| (nodeid != ROOT_NODEID).then_some(nodeid))
+                .map(|(nodeid, _)| nodeid)
                 .collect::<Vec<_>>();
-            let lazy_rebind_count = stale.len();
-            let _ = nodes.apply_rebind_results(vec![(ROOT_NODEID, root_fid, root_stat)], stale);
+            let stale_count = nodeids.len();
+            let _ = nodes.apply_rebind_results(Vec::new(), nodeids);
+            stale_count
+        };
+        let client = match self.client.reconnect() {
+            Ok(client) => client,
+            Err(error) => {
+                self.status
+                    .set_data_session("degraded", Some(error.message().to_string()));
+                return Err(error.into());
+            }
+        };
+        self.status.set_transport(self.client.active_address());
+        let (root_fid, root_stat) = match self.reconnect_source_binding(&client) {
+            Ok(binding) => binding,
+            Err(error) => {
+                self.status
+                    .set_data_session("degraded", Some(error.message().to_string()));
+                return Err(error);
+            }
+        };
+        let lazy_rebind_count = {
+            let mut nodes = self.nodes()?;
+            let _ =
+                nodes.apply_rebind_results(vec![(ROOT_NODEID, root_fid, root_stat)], Vec::new());
+            let lazy_rebind_count = stale.saturating_sub(1);
             lazy_rebind_count
         };
+        self.status.set_data_session("connected", None);
         self.record_mount_diagnostic(
             "transport_reconnected",
             0,
@@ -326,6 +352,33 @@ impl R9pFuse {
             );
         }
         Ok(())
+    }
+
+    fn reconnect_source_binding(&self, client: &session::Client) -> Result<(r9p::Fid, r9p::Stat)> {
+        let started = Instant::now();
+        loop {
+            let elapsed = started.elapsed();
+            let remaining = self.config.lookup_timeout.saturating_sub(elapsed);
+            if remaining.is_zero() {
+                return Err(Error::new(
+                    libc::ETIMEDOUT,
+                    "mounted namespace source did not return before reconnect deadline",
+                ));
+            }
+            match self.source_binding(client, remaining) {
+                Ok(binding) => return Ok(binding),
+                Err(error)
+                    if source_binding_retryable(&error)
+                        && started.elapsed() < self.config.lookup_timeout =>
+                {
+                    thread::sleep(
+                        SOURCE_RECONNECT_RETRY_DELAY
+                            .min(self.config.lookup_timeout.saturating_sub(started.elapsed())),
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     pub(super) fn recover_namespace_shape(&mut self, nodeid: u64) -> Result<()> {
@@ -384,6 +437,25 @@ impl R9pFuse {
         }
         Ok(())
     }
+}
+
+pub(super) fn source_binding_retryable(error: &Error) -> bool {
+    matches!(
+        error.errno,
+        libc::ENOENT
+            | libc::ESTALE
+            | libc::EAGAIN
+            | libc::ETIMEDOUT
+            | libc::ENOTCONN
+            | libc::ECONNREFUSED
+            | libc::ECONNRESET
+            | libc::ECONNABORTED
+            | libc::EPIPE
+            | libc::ENETDOWN
+            | libc::ENETUNREACH
+            | libc::EHOSTDOWN
+            | libc::EHOSTUNREACH
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

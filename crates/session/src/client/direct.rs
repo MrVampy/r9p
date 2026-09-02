@@ -205,6 +205,19 @@ impl DirectClient {
             .map_err(client_error)
     }
 
+    pub fn read_exact_parallel_timeout(
+        &self,
+        fid: Fid,
+        offset: u64,
+        count: u32,
+        max_in_flight: u32,
+        timeout: Duration,
+    ) -> Result<Vec<u8>> {
+        self.inner
+            .read_exact_parallel_timeout(fid, offset, count, max_in_flight, timeout)
+            .map_err(client_error)
+    }
+
     pub fn read_delimited_timeout(
         &self,
         fid: Fid,

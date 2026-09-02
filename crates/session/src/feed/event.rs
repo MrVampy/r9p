@@ -285,6 +285,40 @@ impl FeedWake {
         }
     }
 
+    pub fn wait_after_timeout(
+        &self,
+        generation: u64,
+        timeout: Duration,
+    ) -> R9pResult<Option<u64>> {
+        let deadline = Instant::now() + timeout;
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| Error::new(libc::EIO, "namespace feed wake lock poisoned"))?;
+        loop {
+            if state.generation != generation {
+                return Ok(Some(state.generation));
+            }
+            if state.closed {
+                return Err(Error::new(libc::ESHUTDOWN, "namespace feed wake is closed"));
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(None);
+            }
+            let (next, timed_out) = self
+                .inner
+                .changed
+                .wait_timeout(state, remaining)
+                .map_err(|_| Error::new(libc::EIO, "namespace feed wake lock poisoned"))?;
+            state = next;
+            if timed_out.timed_out() && state.generation == generation {
+                return Ok(None);
+            }
+        }
+    }
+
     pub(crate) fn wait_until_closed_or_timeout(&self, timeout: Duration) -> R9pResult<()> {
         let state = self
             .inner
@@ -365,6 +399,37 @@ mod tests {
             waiter.join().expect("waiter").expect_err("closed").errno,
             libc::ESHUTDOWN
         );
+    }
+
+    #[test]
+    fn timed_wait_returns_a_new_generation_when_notified() {
+        let wake = FeedWake::new();
+        let generation = wake.generation().expect("initial generation");
+        let waiter = {
+            let wake = wake.clone();
+            thread::spawn(move || {
+                wake.wait_after_timeout(generation, Duration::from_secs(60))
+                    .expect("wake")
+            })
+        };
+
+        wake.notify();
+
+        assert_ne!(waiter.join().expect("waiter"), Some(generation));
+    }
+
+    #[test]
+    fn timed_wait_returns_none_at_its_deadline() {
+        let wake = FeedWake::new();
+        let generation = wake.generation().expect("initial generation");
+        let started = Instant::now();
+
+        assert_eq!(
+            wake.wait_after_timeout(generation, Duration::from_millis(50))
+                .expect("deadline"),
+            None
+        );
+        assert!(started.elapsed() >= Duration::from_millis(40));
     }
 
     #[test]

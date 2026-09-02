@@ -340,6 +340,97 @@ fn fuse_mount_replays_read_only_open_handle_after_export_restart() -> io::Result
 
 #[test]
 #[ignore = "host-gated: requires /dev/fuse, fusermount, and user mount permission"]
+fn fuse_mount_replays_open_directory_handle_after_export_restart() -> io::Result<()> {
+    if !host_can_run_fuse() {
+        return Ok(());
+    }
+
+    let root = unique_temp_dir("r9p-fuse-directory-replay-export")?;
+    let mountpoint = unique_temp_dir("r9p-fuse-directory-replay-mount")?;
+    let descriptor = root.with_extension("desc");
+    let diagnostics = root.with_extension("jsonl");
+    seed_wide_directory(&root, 4096)?;
+
+    let mut export = ChildGuard::spawn(
+        Command::new(r9p_bin())
+            .arg("export")
+            .arg("--bind")
+            .arg("127.0.0.1:0")
+            .arg("--descriptor-file")
+            .arg(&descriptor)
+            .arg(&root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )?;
+    let endpoint = wait_for_descriptor_endpoint(&descriptor)?;
+
+    let mut mount = ChildGuard::spawn(
+        Command::new(r9p_bin())
+            .arg("mount")
+            .arg("--request-timeout")
+            .arg("1")
+            .arg("--lookup-timeout")
+            .arg("1")
+            .arg("--read-timeout")
+            .arg("1")
+            .arg("--control-timeout")
+            .arg("1")
+            .arg("--diagnostics-file")
+            .arg(&diagnostics)
+            .arg(&endpoint)
+            .arg(&mountpoint)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )?;
+    wait_for_metadata(&mountpoint.join("entries/entry-0000.txt"))?;
+    let mut directory = fs::read_dir(mountpoint.join("entries"))?;
+    let first = directory
+        .next()
+        .transpose()?
+        .ok_or_else(|| io::Error::other("mounted directory is empty"))?;
+    if first.file_name().to_string_lossy().is_empty() {
+        return Err(io::Error::other("mounted directory returned an empty name"));
+    }
+
+    export.kill();
+    export.wait_or_kill()?;
+    let mut restarted_export = ChildGuard::spawn(
+        Command::new(r9p_bin())
+            .arg("export")
+            .arg("--bind")
+            .arg(&endpoint)
+            .arg(&root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )?;
+    wait_for_endpoint(&endpoint)?;
+
+    let remaining = directory.collect::<io::Result<Vec<_>>>()?;
+    if remaining.len() != 4095 {
+        return Err(io::Error::other(format!(
+            "replayed directory returned {} of 4095 remaining entries",
+            remaining.len()
+        )));
+    }
+    if !fs::read_to_string(&diagnostics)?.contains("transport_reconnected") {
+        return Err(io::Error::other(
+            "directory replay did not record data-session renewal",
+        ));
+    }
+
+    unmount(&mountpoint);
+    mount.wait_or_kill()?;
+    restarted_export.kill();
+    restarted_export.wait_or_kill()?;
+    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(&mountpoint);
+    let _ = fs::remove_file(descriptor);
+    let _ = fs::remove_file(diagnostics);
+    Ok(())
+}
+
+#[test]
+#[ignore = "host-gated: requires /dev/fuse, fusermount, and user mount permission"]
 fn fuse_mount_lazy_unmount_drains_open_handles() -> io::Result<()> {
     if !host_can_run_fuse() {
         return Ok(());
@@ -494,6 +585,32 @@ fn seed_tree(root: &Path) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+fn seed_wide_directory(root: &Path, entries: usize) -> io::Result<()> {
+    let directory = root.join("entries");
+    fs::create_dir_all(&directory)?;
+    for index in 0..entries {
+        fs::write(
+            directory.join(format!("entry-{index:04}.txt")),
+            format!("entry={index}\n"),
+        )?;
+    }
+    Ok(())
+}
+
+fn wait_for_endpoint(endpoint: &str) -> io::Result<()> {
+    let started = Instant::now();
+    loop {
+        match TcpStream::connect(endpoint) {
+            Ok(stream) => {
+                drop(stream);
+                return Ok(());
+            }
+            Err(error) if started.elapsed() > Duration::from_secs(5) => return Err(error),
+            Err(_) => thread::sleep(Duration::from_millis(20)),
+        }
+    }
 }
 
 fn wait_for_descriptor_endpoint(path: &Path) -> io::Result<String> {

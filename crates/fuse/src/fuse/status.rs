@@ -29,6 +29,8 @@ struct State {
     namespace_source: String,
     active_endpoint: String,
     endpoint_candidates: Vec<String>,
+    data_session: &'static str,
+    data_last_error: Option<String>,
     change_feed: &'static str,
     source: Option<&'static str>,
     last_event_id: Option<String>,
@@ -52,6 +54,8 @@ impl MountStatus {
                 namespace_source,
                 active_endpoint,
                 endpoint_candidates,
+                data_session: "connected",
+                data_last_error: None,
                 change_feed: "disabled",
                 source: None,
                 last_event_id: None,
@@ -78,6 +82,19 @@ impl MountStatus {
             return;
         };
         state.active_endpoint = active_endpoint;
+        publish_status(&state);
+    }
+
+    pub(super) fn set_data_session(
+        &self,
+        data_session: &'static str,
+        data_last_error: Option<String>,
+    ) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        state.data_session = data_session;
+        state.data_last_error = data_last_error;
         publish_status(&state);
     }
 
@@ -167,12 +184,14 @@ fn publish_status(state: &State) {
 
 fn status_json(state: &State) -> String {
     format!(
-        "{{\"namespace_source\":\"{}\",\"process_id\":{},\"mount_generation\":\"{}\",\"active_endpoint\":\"{}\",\"endpoint_candidates\":{},\"change_feed\":\"{}\",\"source\":{},\"last_event_id\":{},\"last_error\":{},\"persistent_read_cache\":{}}}",
+        "{{\"namespace_source\":\"{}\",\"process_id\":{},\"mount_generation\":\"{}\",\"active_endpoint\":\"{}\",\"endpoint_candidates\":{},\"data_session\":\"{}\",\"data_last_error\":{},\"change_feed\":\"{}\",\"source\":{},\"last_event_id\":{},\"last_error\":{},\"persistent_read_cache\":{}}}",
         escape_json(&state.namespace_source),
         std::process::id(),
         state.generation,
         escape_json(&state.active_endpoint),
         string_array_json(&state.endpoint_candidates),
+        state.data_session,
+        optional_json(&state.data_last_error),
         state.change_feed,
         optional_static_json(state.source),
         optional_json(&state.last_event_id),
@@ -261,6 +280,8 @@ mod tests {
             namespace_source: "/sources/newsgroups/browse".to_string(),
             active_endpoint: "nucbox.mesh:9564".to_string(),
             endpoint_candidates: vec!["m7.mesh:9564".to_string(), "nucbox.mesh:9564".to_string()],
+            data_session: "degraded",
+            data_last_error: Some("data connection lost".to_string()),
             change_feed: "degraded",
             source: Some("stream"),
             last_event_id: Some("event-1".to_string()),
@@ -284,6 +305,8 @@ mod tests {
         assert!(json.contains("\"namespace_source\":\"/sources/newsgroups/browse\""));
         assert!(json.contains("\"active_endpoint\":\"nucbox.mesh:9564\""));
         assert!(json.contains("\"endpoint_candidates\":[\"m7.mesh:9564\",\"nucbox.mesh:9564\"]"));
+        assert!(json.contains("\"data_session\":\"degraded\""));
+        assert!(json.contains("\"data_last_error\":\"data connection lost\""));
         assert!(json.contains("\"change_feed\":\"degraded\""));
         assert!(json.contains("\"source\":\"stream\""));
         assert!(json.contains("\"last_event_id\":\"event-1\""));
@@ -307,6 +330,8 @@ mod tests {
             namespace_source: "/sources/newsgroups/downloads/files".to_string(),
             active_endpoint: "nucbox.mesh:9564".to_string(),
             endpoint_candidates: vec!["nucbox.mesh:9564".to_string()],
+            data_session: "connected",
+            data_last_error: None,
             change_feed: "connected",
             source: Some("session"),
             last_event_id: Some("event-1".to_string()),

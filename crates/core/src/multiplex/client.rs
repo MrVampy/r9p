@@ -21,7 +21,7 @@ use std::{
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[cfg(unix)]
@@ -658,6 +658,70 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
         Ok(out)
     }
 
+    /// Pipelines positional reads on one read-capable fid and returns exactly
+    /// `count` bytes. Every submitted request is resolved or cancelled before
+    /// an error is returned.
+    pub fn read_exact_parallel_timeout(
+        &self,
+        fid: Fid,
+        offset: u64,
+        count: u32,
+        max_in_flight: u32,
+        timeout: Duration,
+    ) -> Result<Vec<u8>> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        if max_in_flight == 0 {
+            return Err(Error::from(
+                "invalid parallel read in-flight bound: expected nonzero",
+            ));
+        }
+        let segments = exact_read_segments(offset, count, codec::max_iounit(self.msize()))?;
+        let started = Instant::now();
+        let mut output = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
+        let window = usize::try_from(max_in_flight).unwrap_or(usize::MAX);
+        for segments in segments.chunks(window) {
+            let mut pending = Vec::with_capacity(segments.len());
+            for (segment_offset, segment_count) in segments {
+                pending.push((
+                    *segment_count,
+                    self.submit_read(fid, *segment_offset, *segment_count),
+                ));
+            }
+            let mut first_error = None;
+            for (expected, pending) in pending {
+                let bytes = match pending {
+                    Ok(pending) if timeout.is_zero() => self.wait_read(pending),
+                    Ok(pending) => {
+                        let remaining = timeout
+                            .saturating_sub(started.elapsed())
+                            .max(Duration::from_nanos(1));
+                        self.wait_read_timeout(pending, remaining)
+                    }
+                    Err(error) => Err(error),
+                };
+                match bytes {
+                    Ok(bytes) if bytes.len() == usize::try_from(expected).unwrap_or(usize::MAX) => {
+                        output.extend(bytes);
+                    }
+                    Ok(_) => {
+                        first_error.get_or_insert_with(|| {
+                            Error::from("parallel read input/output incomplete")
+                        });
+                    }
+                    Err(error) => {
+                        first_error.get_or_insert(error);
+                    }
+                };
+            }
+            if let Some(error) = first_error {
+                return Err(error);
+            }
+        }
+        Ok(output)
+    }
+
     /// Reads one bounded delimiter-terminated record without probing for EOF
     /// after the delimiter has arrived.
     ///
@@ -1042,6 +1106,23 @@ impl<S: MultiplexTransport> MultiplexedClient<S> {
             other => Err(unexpected("Rrenameat", other)),
         }
     }
+}
+
+fn exact_read_segments(offset: u64, count: u32, max_iounit: u32) -> Result<Vec<(u64, u32)>> {
+    if max_iounit == 0 {
+        return Err(Error::from("invalid 9P read payload limit: zero"));
+    }
+    let mut segments = Vec::new();
+    let mut consumed = 0_u32;
+    while consumed < count {
+        let segment_count = max_iounit.min(count - consumed);
+        let segment_offset = offset
+            .checked_add(u64::from(consumed))
+            .ok_or_else(|| Error::from("parallel read offset overflow"))?;
+        segments.push((segment_offset, segment_count));
+        consumed = consumed.saturating_add(segment_count);
+    }
+    Ok(segments)
 }
 
 fn bounded_flush_timeout(timeout: Duration) -> Duration {

@@ -113,6 +113,144 @@ mod tests {
     }
 
     #[test]
+    fn exact_parallel_read_submits_a_window_and_orders_replies() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .map_err(|error| io_error("bind test listener", error))?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| io_error("read listener address", error))?;
+        let server = thread::spawn(move || {
+            let (stream, _) = listener
+                .accept()
+                .map_err(|error| io_error("accept test connection", error))?;
+            scripted_parallel_read_server(stream)
+        });
+        let client = MultiplexedClient::connect(
+            TcpStream::connect(address).map_err(|error| io_error("connect test client", error))?,
+            "glenda",
+            "",
+            256,
+        )?;
+
+        let data = client.read_exact_parallel_timeout(
+            client.root_fid(),
+            7,
+            600,
+            3,
+            Duration::from_secs(1),
+        )?;
+        assert_eq!(
+            data,
+            (7_u64..607)
+                .map(|value| u8::try_from(value % 251).expect("bounded byte"))
+                .collect::<Vec<_>>()
+        );
+        server
+            .join()
+            .map_err(|_| Error::from("server worker panicked"))??;
+        Ok(())
+    }
+
+    #[test]
+    fn exact_parallel_read_drains_its_window_before_returning_error() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .map_err(|error| io_error("bind test listener", error))?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| io_error("read listener address", error))?;
+        let (short_sent, short_seen) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener
+                .accept()
+                .map_err(|error| io_error("accept test connection", error))?;
+            handshake(&mut stream)?;
+            let mut reads = Vec::new();
+            for _ in 0..2 {
+                match read_tmessage(&mut stream)? {
+                    TMessage::Read {
+                        tag, offset, count, ..
+                    } => reads.push((tag, offset, count)),
+                    other => {
+                        return Err(Error::from(format!(
+                            "expected pipelined Tread, got {other:?}"
+                        )))
+                    }
+                }
+            }
+            let (first_tag, first_offset, first_count) = reads[0];
+            let first_data = (first_offset..first_offset + u64::from(first_count - 1))
+                .map(|value| u8::try_from(value % 251).expect("bounded byte"))
+                .collect();
+            write_response(
+                &mut stream,
+                &RMessage::Read {
+                    tag: first_tag,
+                    data: first_data,
+                },
+            )?;
+            short_sent
+                .send(())
+                .map_err(|_| Error::from("short-read observation receiver closed"))?;
+            released
+                .recv()
+                .map_err(|_| Error::from("parallel read release sender closed"))?;
+            let (second_tag, second_offset, second_count) = reads[1];
+            let second_data = (second_offset..second_offset + u64::from(second_count))
+                .map(|value| u8::try_from(value % 251).expect("bounded byte"))
+                .collect();
+            write_response(
+                &mut stream,
+                &RMessage::Read {
+                    tag: second_tag,
+                    data: second_data,
+                },
+            )
+        });
+        let client = MultiplexedClient::connect(
+            TcpStream::connect(address).map_err(|error| io_error("connect test client", error))?,
+            "glenda",
+            "",
+            256,
+        )?;
+        let (result_sender, result_receiver) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            let result = client.read_exact_parallel_timeout(
+                client.root_fid(),
+                0,
+                400,
+                2,
+                Duration::from_secs(1),
+            );
+            let _ = result_sender.send(result);
+        });
+
+        short_seen
+            .recv_timeout(Duration::from_secs(1))
+            .map_err(|_| Error::from("server did not publish short read"))?;
+        assert!(
+            result_receiver
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "client returned while a submitted read remained unresolved"
+        );
+        release
+            .send(())
+            .map_err(|_| Error::from("parallel read server stopped"))?;
+        assert!(result_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .map_err(|_| Error::from("parallel read did not finish"))?
+            .is_err());
+        reader
+            .join()
+            .map_err(|_| Error::from("parallel read worker panicked"))?;
+        server
+            .join()
+            .map_err(|_| Error::from("server worker panicked"))??;
+        Ok(())
+    }
+
+    #[test]
     fn dependent_write_and_read_are_sent_before_either_reply() -> Result<()> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .map_err(|error| io_error("bind test listener", error))?;
@@ -695,6 +833,30 @@ mod tests {
                 data: b"read after stat\n".to_vec(),
             },
         )?;
+        Ok(())
+    }
+
+    fn scripted_parallel_read_server(mut stream: TcpStream) -> Result<()> {
+        handshake(&mut stream)?;
+        let mut reads = Vec::new();
+        for _ in 0..3 {
+            match read_tmessage(&mut stream)? {
+                TMessage::Read {
+                    tag, offset, count, ..
+                } => reads.push((tag, offset, count)),
+                other => {
+                    return Err(Error::from(format!(
+                        "expected pipelined Tread, got {other:?}"
+                    )))
+                }
+            }
+        }
+        for (tag, offset, count) in reads.into_iter().rev() {
+            let data = (offset..offset + u64::from(count))
+                .map(|value| u8::try_from(value % 251).expect("bounded byte"))
+                .collect();
+            write_response(&mut stream, &RMessage::Read { tag, data })?;
+        }
         Ok(())
     }
 

@@ -142,6 +142,7 @@ impl R9pFuse {
                 if let Some(old_fid) = old_fid {
                     let _ = client.clunk_timeout(old_fid, self.control_timeout());
                 }
+                self.status.set_data_session("connected", None);
                 Ok((client, fid))
             }
         }

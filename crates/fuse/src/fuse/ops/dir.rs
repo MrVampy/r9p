@@ -13,6 +13,7 @@ use crate::{
     fuse::{
         reply::{as_bytes, push_u32, push_u64, read_struct, reply_bytes},
         util::dirent_size,
+        util::{is_namespace_shape_error, is_transport_error},
         wire::{FuseEntryOut, FuseInHeader, FuseReadIn},
         R9pFuse,
     },
@@ -32,7 +33,8 @@ impl R9pFuse {
         let input = read_struct::<FuseReadIn>(payload)?;
         let size = usize::try_from(input.size)
             .map_err(|_| Error::new(libc::EINVAL, "readdir too large"))?;
-        let entries = self.directory_entries_for_read(
+        let entries = self.directory_entries_for_read_with_recovery(
+            header.nodeid,
             input.fh,
             input.offset,
             size,
@@ -51,10 +53,61 @@ impl R9pFuse {
         let input = read_struct::<FuseReadIn>(payload)?;
         let size = usize::try_from(input.size)
             .map_err(|_| Error::new(libc::EINVAL, "readdirplus too large"))?;
-        let entries =
-            self.directory_entries_for_read(input.fh, input.offset, size, DirectoryEncoding::Plus)?;
+        let entries = self.directory_entries_for_read_with_recovery(
+            header.nodeid,
+            input.fh,
+            input.offset,
+            size,
+            DirectoryEncoding::Plus,
+        )?;
         let data = self.encode_dirents_plus(header.nodeid, input.offset, size, &entries)?;
         reply_bytes(file, header.unique, &data)
+    }
+
+    fn directory_entries_for_read_with_recovery(
+        &mut self,
+        nodeid: u64,
+        handle_id: u64,
+        offset: u64,
+        size: usize,
+        encoding: DirectoryEncoding,
+    ) -> Result<Vec<DirEntry>> {
+        match self.directory_entries_for_read(handle_id, offset, size, encoding) {
+            Ok(entries) => Ok(entries),
+            Err(error) if is_transport_error(&error) => {
+                self.reconnect()?;
+                self.reopen_directory_handle(nodeid, handle_id)?;
+                self.directory_entries_for_read(handle_id, offset, size, encoding)
+            }
+            Err(error) if is_namespace_shape_error(&error) => {
+                self.recover_namespace_shape(nodeid)?;
+                self.reopen_directory_handle(nodeid, handle_id)?;
+                self.directory_entries_for_read(handle_id, offset, size, encoding)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn reopen_directory_handle(&mut self, nodeid: u64, handle_id: u64) -> Result<()> {
+        let (client, node_fid) = self.bound_node_fid(nodeid)?;
+        let fid = client.clone_fid_timeout(node_fid, self.lookup_timeout())?;
+        if let Err(error) = client.open_timeout(fid, session::OREAD, self.lookup_timeout()) {
+            let _ = client.clunk_timeout(fid, self.control_timeout());
+            return Err(error.into());
+        }
+        let (old_client, old_fid) =
+            match self
+                .nodes()?
+                .replace_directory_handle_binding(handle_id, client.clone(), fid)
+            {
+                Ok(replaced) => replaced,
+                Err(error) => {
+                    let _ = client.clunk_timeout(fid, self.control_timeout());
+                    return Err(error);
+                }
+            };
+        let _ = old_client.clunk_timeout(old_fid, self.control_timeout());
+        Ok(())
     }
 
     fn directory_entries_for_read(

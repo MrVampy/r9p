@@ -110,6 +110,32 @@ impl NodeTable {
         Ok(old)
     }
 
+    pub fn replace_directory_handle_binding(
+        &mut self,
+        handle: u64,
+        client: Client,
+        fid: Fid,
+    ) -> Result<(Client, Fid)> {
+        let current = self
+            .handles
+            .get_mut(&handle)
+            .ok_or_else(|| Error::new(libc::ESTALE, format!("unknown file handle {handle}")))?;
+        if !current.is_dir {
+            return Err(Error::new(libc::ESTALE, "file handle is not a directory"));
+        }
+        let directory = current.directory.as_ref().ok_or_else(|| {
+            Error::new(libc::ESTALE, "directory handle has no incremental stream")
+        })?;
+        let mut stream = directory
+            .lock()
+            .map_err(|_| Error::new(libc::EIO, "directory stream lock poisoned"))?;
+        let replaced = (stream.client.clone(), stream.fid);
+        stream.client = client.clone();
+        stream.fid = fid;
+        current.client = client;
+        Ok(replaced)
+    }
+
     pub fn replace_write_handle_binding(
         &mut self,
         handle: u64,

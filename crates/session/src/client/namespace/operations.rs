@@ -139,6 +139,24 @@ impl Client {
         })
     }
 
+    /// Pipelines positional reads on one read-capable fid and returns exactly
+    /// `count` bytes. Every submitted request is resolved or cancelled before
+    /// an error is returned.
+    pub fn read_exact_parallel_timeout(
+        &self,
+        fid: Fid,
+        offset: u64,
+        count: u32,
+        max_in_flight: u32,
+        timeout: Duration,
+    ) -> Result<Vec<u8>> {
+        let binding = self.binding(fid)?;
+        let remote = binding.remote()?;
+        remote
+            .client
+            .read_exact_parallel_timeout(remote.fid, offset, count, max_in_flight, timeout)
+    }
+
     pub fn read_delimited_timeout(
         &self,
         fid: Fid,
